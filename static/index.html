@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Journal</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>My Journal</h1>
+
+        <section class="journal-form">
+            <h2>New Entry</h2>
+            <form id="entry-form">
+                <input type="text" id="title" placeholder="Entry title..." required>
+                <textarea id="content" placeholder="Write your thoughts..." required></textarea>
+                <div class="sliders">
+                    <label>Mood: <span id="mood-value">3</span>/5
+                        <input type="range" id="mood" min="1" max="5" value="3">
+                    </label>
+                    <label>Goal Progress: <span id="goal-value">50</span>%
+                        <input type="range" id="goal-progress" min="0" max="100" value="50">
+                    </label>
+                </div>
+                <button type="submit">Save Entry</button>
+            </form>
+        </section>
+
+        <section class="entries-list">
+            <h2>Past Entries</h2>
+            <div id="entries"></div>
+        </section>
+        <section class="habits-section">
+            <h2>Habit Tracker</h2>
+            <form id="habit-form">
+                <input type="text" id="habit-name" placeholder="Habit name (e.g. Exercise)..." required>
+                <button type="submit">Log Habit</button>
+            </form>
+            <div id="streaks"></div>
+        </section>
+        <section class="chat-section">
+            <h2>Chat with Your Journal</h2>
+            <div id="chat-messages"></div>
+            <form id="chat-form">
+                <input type="text" id="chat-input" placeholder="Ask about your journal..." required>
+                <button type="submit">Send</button>
+            </form>
+        </section>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

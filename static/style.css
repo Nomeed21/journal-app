@@ -1,0 +1,402 @@
+/* ============================================
+   AI Study Coach — "Ballerina" Notebook Theme
+   ============================================ */
+
+:root {
+    --paper: #fffaf9;
+    --paper-soft: #fcedf0;
+    --ink: #3a2c30;
+    --ink-soft: #8a6e74;
+    --ink-faint: #c9a8b0;
+    --accent: #d98aa0;        /* ballerina pink */
+    --accent-soft: #fbe2e9;   /* pale rose tint */
+    --accent-deep: #b8617c;   /* hover/deep rose */
+    --line: #f3dde2;
+    --line-strong: #e6bdc7;
+    --shadow: rgba(184, 97, 124, 0.12);
+
+    --font-display: "Fraunces", "Georgia", "Times New Roman", serif;
+    --font-body: "Inter", "Segoe UI", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", "Courier New", monospace;
+}
+
+/* Reset & Base Setup */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-body);
+    background: linear-gradient(165deg, #fde6ec 0%, #f7d4de 100%);
+    color: var(--ink);
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+}
+
+/* The Open Notebook Container */
+.container {
+    width: 100%;
+    max-width: 1040px;
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 20px;
+    box-shadow: 0 25px 50px -12px var(--shadow),
+                0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    padding: 2.75rem;
+    position: relative;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+}
+
+/* Notebook Middle Crease / Binding Effect */
+.container::before {
+    content: "";
+    position: absolute;
+    top: 2.5rem;
+    bottom: 2.5rem;
+    left: 50%;
+    width: 1px;
+    background: linear-gradient(to bottom, transparent, var(--line-strong) 10%, var(--line-strong) 90%, transparent);
+}
+
+/* Page Titles */
+h1 {
+    grid-column: span 2;
+    text-align: left;
+    font-family: var(--font-display);
+    font-size: 2.4rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    margin-bottom: 0.25rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+}
+
+h1::after {
+    content: "Study Coach";
+    font-family: var(--font-body);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--accent-deep);
+    background: var(--accent-soft);
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    margin-left: auto;
+}
+
+h2 {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 1.1rem;
+    text-transform: none;
+    letter-spacing: 0.01em;
+}
+
+/* Styled Forms & Inputs */
+input[type="text"],
+textarea {
+    width: 100%;
+    background: var(--paper-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.7rem 0.9rem;
+    font-family: var(--font-body);
+    font-size: 0.98rem;
+    color: var(--ink);
+    margin-bottom: 1.25rem;
+    outline: none;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+input[type="text"]::placeholder,
+textarea::placeholder {
+    color: var(--ink-faint);
+}
+
+input[type="text"]:focus,
+textarea:focus {
+    border-color: var(--accent);
+    background: var(--paper);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+textarea {
+    min-height: 130px;
+    line-height: 1.8;
+    resize: vertical;
+}
+
+/* Section wrappers */
+.journal-form,
+.chat-section,
+.entries-list {
+    background: transparent;
+    padding: 0;
+    margin-bottom: 0;
+}
+
+.journal-form form,
+.chat-section {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 1.75rem;
+    background: var(--paper-soft);
+    position: relative;
+}
+
+/* Minimalist Fountain Pen Icon */
+.journal-form::before {
+    content: "Reflect on today";
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 0.95rem;
+    display: block;
+    text-align: left;
+    margin-bottom: 0.8rem;
+    color: var(--ink-soft);
+}
+
+/* Sliders */
+.sliders {
+    display: flex;
+    flex-direction: column;
+    gap: 1.4rem;
+    margin-bottom: 1.5rem;
+}
+
+.sliders label {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--ink-soft);
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 3px;
+    background: var(--line-strong);
+    outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 3px solid var(--paper);
+    cursor: pointer;
+    box-shadow: 0 1px 4px var(--shadow);
+    transition: background 0.15s ease, transform 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+    background: var(--accent-deep);
+    transform: scale(1.1);
+}
+
+input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 3px solid var(--paper);
+    cursor: pointer;
+    box-shadow: 0 1px 4px var(--shadow);
+}
+
+/* Buttons */
+button {
+    background: var(--accent);
+    color: #ffffff;
+    border: none;
+    padding: 0.65rem 1.6rem;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+    box-shadow: 0 2px 8px var(--shadow);
+    transition: background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+button:hover {
+    background: var(--accent-deep);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px var(--shadow);
+}
+
+button:active {
+    transform: translateY(0);
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Right-Page Layout */
+.entries-list {
+    margin-top: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+/* Memory Entry Cards */
+.entry-card {
+    background: var(--paper-soft);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.entry-card:hover {
+    box-shadow: 0 4px 14px var(--shadow);
+    transform: translateY(-1px);
+}
+
+.entry-card strong {
+    font-family: var(--font-display);
+    color: var(--ink);
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+
+.entry-card p {
+    font-size: 0.92rem;
+    margin-top: 0.4rem;
+    color: var(--ink-soft);
+}
+
+.entry-card .meta {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+    margin-top: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+
+/* Chatbot Interface */
+#chat-messages {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: 1rem;
+    padding: 1rem;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+#chat-messages::-webkit-scrollbar {
+    width: 6px;
+}
+
+#chat-messages::-webkit-scrollbar-thumb {
+    background: var(--line-strong);
+    border-radius: 3px;
+}
+
+.chat-msg {
+    padding: 0.6rem 0.95rem;
+    border-radius: 14px;
+    font-size: 0.92rem;
+    max-width: 85%;
+    line-height: 1.5;
+}
+
+.chat-msg.user {
+    background: var(--accent);
+    color: #ffffff;
+    margin-left: auto;
+    border-bottom-right-radius: 3px;
+}
+
+.chat-msg.assistant {
+    background: var(--paper-soft);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    margin-right: auto;
+    border-bottom-left-radius: 3px;
+}
+
+#chat-form {
+    display: flex;
+    gap: 0.6rem;
+}
+
+#chat-form input {
+    flex: 1;
+    margin-bottom: 0;
+}
+
+/* Section label instead of "001" watermark */
+.chat-section::after {
+    content: "Coach";
+    position: absolute;
+    top: -0.7rem;
+    right: 1.5rem;
+    font-family: var(--font-body);
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--accent-deep);
+    background: var(--paper);
+    padding: 0.25rem 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+    .container {
+        grid-template-columns: 1fr;
+        padding: 1.5rem;
+        gap: 2rem;
+    }
+    .container::before {
+        display: none;
+    }
+    h1 {
+        font-size: 1.9rem;
+        flex-wrap: wrap;
+    }
+    h1::after {
+        margin-left: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        transition: none !important;
+    }
+}
