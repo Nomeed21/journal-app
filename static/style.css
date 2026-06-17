@@ -180,12 +180,11 @@ textarea {
 }
 
 .sliders label {
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: var(--ink-soft);
+    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    font-size: 0.9rem;
+    font-weight: 500;
 }
 
 input[type="range"] {
@@ -399,4 +398,59 @@ textarea:focus-visible {
     * {
         transition: none !important;
     }
+}
+
+.filters {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+.filters input {
+    flex: 1;
+    min-width: 120px;
+    margin-bottom: 0;
+}
+
+.filters button {
+    padding: 0.5rem 1rem;
+}
+
+.entry-card .tags {
+    margin-top: 0.5rem;
+}
+
+.entry-card .tags span {
+    display: inline-block;
+    background: #e8f4f8;
+    color: #2980b9;
+    padding: 0.2rem 0.5rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+    margin-right: 0.3rem;
+}
+
+.entry-card .actions {
+    margin-top: 0.5rem;
+}
+
+.entry-card .actions button {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+    margin-right: 0.3rem;
+}
+
+.entry-card .actions .delete-btn {
+    background: #e74c3c;
+}
+
+.entry-card .actions .delete-btn:hover {
+    background: #c0392b;
+}
+
+.chart-container {
+    position: relative;
+    margin-bottom: 1.5rem;
+    height: 250px;
 }

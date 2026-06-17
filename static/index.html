@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>My Journal</title>
     <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div class="container">
@@ -23,13 +24,29 @@
                         <input type="range" id="goal-progress" min="0" max="100" value="50">
                     </label>
                 </div>
+		<input type="text" id="tags" placeholder="Tags (comma-separated, e.g. study, project)...">
                 <button type="submit">Save Entry</button>
             </form>
         </section>
 
         <section class="entries-list">
             <h2>Past Entries</h2>
+            <div class="filters">
+                <input type="text" id="filter-keyword" placeholder="Search by keyword...">
+                <input type="text" id="filter-tag" placeholder="Filter by tag...">
+                <button id="filter-btn">Filter</button>
+                <button id="clear-btn">Clear</button>
+            </div>
             <div id="entries"></div>
+        </section>
+	<section class="insights-section">
+            <h2>Insights</h2>
+            <div class="chart-container">
+                <canvas id="trends-chart"></canvas>
+            </div>
+            <div class="chart-container">
+                <canvas id="correlation-chart"></canvas>
+            </div>
         </section>
         <section class="habits-section">
             <h2>Habit Tracker</h2>
