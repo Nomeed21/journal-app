@@ -276,7 +276,17 @@ async function loadInsights() {
     `).join("");
 }
 
+async function loadAIInsight() {
+    const res = await fetch("/ai-insight");
+    const data = await res.json();
+
+    document.getElementById("ai-insight").innerHTML =
+        data.insight;
+}
+
+
 loadInsights();
+loadAIInsight();
 loadCharts();
 loadEntries();
 loadStreaks();

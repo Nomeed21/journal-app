@@ -543,6 +543,58 @@ def build_coach_context(message: str) -> str:
     return "\n\n---\n\n".join(sections)
 
 
+
+def build_ai_insight_context():
+    all_light = fetch_all_entries_light()
+
+    if len(all_light) < 3:
+        return None
+
+    moods = [e["mood"] for e in all_light]
+    goals = [e["goal_progress"] for e in all_light]
+
+    mood_slope = linear_slope(moods)
+    goal_slope = linear_slope(goals)
+
+    correlations = get_correlations()
+
+    best_day = None
+    valid_days = [d for d in correlations if d["avg_mood"] > 0]
+
+    if valid_days:
+        best_day = max(
+            valid_days,
+            key=lambda d: d["avg_mood"]
+        )
+
+    streaks = get_streaks()
+
+    strongest_habit = None
+    longest_streak = 0
+
+    if streaks:
+        strongest_habit, stats = max(
+            streaks.items(),
+            key=lambda item: item[1]["current_streak"]
+        )
+
+        longest_streak = stats["current_streak"]
+
+    avg_mood = round(sum(moods) / len(moods), 1)
+    avg_goal = round(sum(goals) / len(goals), 1)
+
+    return {
+        "entries": len(all_light),
+        "avg_mood": avg_mood,
+        "avg_goal_progress": avg_goal,
+        "mood_trend": describe_trend(mood_slope),
+        "goal_trend": describe_trend(goal_slope, threshold=0.5),
+        "best_day": best_day["day"] if best_day else None,
+        "best_day_mood": best_day["avg_mood"] if best_day else None,
+        "strongest_habit": strongest_habit,
+        "habit_streak": longest_streak,
+    }
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
@@ -641,66 +693,61 @@ def get_insights():
     if len(all_light) < 3:
         return {
             "insights": [
-                "Keep journaling. More entries are needed before meaningful patterns can be detected."
+                {
+                    "type": "info",
+                    "title": "Getting Started",
+                    "message": "Keep journaling. More entries are needed before meaningful patterns can be detected."
+                }
             ]
         }
 
     insights = []
 
-    # --------------------------------------------------
+    # ---------------------------------------
     # Mood Trend
-    # --------------------------------------------------
+    # ---------------------------------------
     moods = [e["mood"] for e in all_light]
     mood_slope = linear_slope(moods)
 
     if mood_slope > 0.05:
-        insights.append(
-            "Your mood has been improving over time. Whatever you're doing recently seems to be helping."
-        )
+        insights.append({
+            "type": "success",
+            "title": "Mood Trend",
+            "message": "Your mood has been improving over time.",
+            "recommendation": "Review your recent entries and identify what has been helping."
+        })
     elif mood_slope < -0.05:
-        insights.append(
-            "Your mood has been gradually declining. It may be worth reviewing what changed recently."
-        )
+        insights.append({
+            "type": "warning",
+            "title": "Mood Trend",
+            "message": "Your mood has been gradually declining.",
+            "recommendation": "Review your last few entries and look for recurring stressors."
+        })
 
-    # --------------------------------------------------
-    # Goal Progress Trend
-    # --------------------------------------------------
+    # ---------------------------------------
+    # Goal Trend
+    # ---------------------------------------
     goals = [e["goal_progress"] for e in all_light]
     goal_slope = linear_slope(goals)
 
     if goal_slope > 0.5:
-        insights.append(
-            "Your goal progress is trending upward. You're building momentum."
-        )
+        insights.append({
+            "type": "success",
+            "title": "Goal Progress",
+            "message": "Your goal progress is trending upward.",
+            "recommendation": "Keep the current pace and focus on consistency."
+        })
     elif goal_slope < -0.5:
-        insights.append(
-            "Goal progress has been slipping recently. A smaller daily target might help rebuild consistency."
-        )
+        insights.append({
+            "type": "warning",
+            "title": "Goal Progress",
+            "message": "Goal progress has slowed recently.",
+            "recommendation": "Break your goals into smaller daily actions."
+        })
 
-    # --------------------------------------------------
-    # Last 7 vs Previous 7 Entries
-    # --------------------------------------------------
-    if len(all_light) >= 14:
-        recent7 = all_light[-7:]
-        previous7 = all_light[-14:-7]
-
-        recent_mood = sum(e["mood"] for e in recent7) / len(recent7)
-        previous_mood = sum(e["mood"] for e in previous7) / len(previous7)
-
-        diff = round(recent_mood - previous_mood, 1)
-
-        if diff > 0.5:
-            insights.append(
-                f"Your average mood increased by {diff} points compared to your previous 7 entries."
-            )
-        elif diff < -0.5:
-            insights.append(
-                f"Your average mood dropped by {abs(diff)} points compared to your previous 7 entries."
-            )
-
-    # --------------------------------------------------
-    # Best Day of Week
-    # --------------------------------------------------
+    # ---------------------------------------
+    # Best Day
+    # ---------------------------------------
     correlations = get_correlations()
 
     valid_days = [d for d in correlations if d["avg_mood"] > 0]
@@ -708,13 +755,16 @@ def get_insights():
     if valid_days:
         best_day = max(valid_days, key=lambda d: d["avg_mood"])
 
-        insights.append(
-            f"{best_day['day']} is currently your strongest day with an average mood of {best_day['avg_mood']}/5."
-        )
+        insights.append({
+            "type": "observation",
+            "title": "Best Day",
+            "message": f"{best_day['day']} is your strongest day with an average mood of {best_day['avg_mood']}/5.",
+            "recommendation": f"Schedule important work on {best_day['day']} whenever possible."
+        })
 
-    # --------------------------------------------------
-    # Habit Streaks
-    # --------------------------------------------------
+    # ---------------------------------------
+    # Habits
+    # ---------------------------------------
     streaks = get_streaks()
 
     if streaks:
@@ -723,24 +773,77 @@ def get_insights():
             key=lambda item: item[1]["current_streak"]
         )
 
-        name = best_habit[0]
+        habit_name = best_habit[0]
         streak = best_habit[1]["current_streak"]
 
         if streak >= 3:
-            insights.append(
-                f"Your strongest habit right now is '{name}' with a {streak}-day streak."
-            )
+            insights.append({
+                "type": "success",
+                "title": "Strong Habit",
+                "message": f"'{habit_name}' currently has a {streak}-day streak.",
+                "recommendation": "Protect this habit. It is becoming part of your identity."
+            })
 
-    # --------------------------------------------------
-    # Low Data Fallback
-    # --------------------------------------------------
     if not insights:
-        insights.append(
-            "No strong patterns detected yet. Keep journaling and tracking habits to unlock deeper insights."
-        )
+        insights.append({
+            "type": "info",
+            "title": "No Strong Patterns Yet",
+            "message": "No significant trends detected.",
+            "recommendation": "Keep journaling consistently."
+        })
 
     return {
         "insights": insights
     }
+
+@app.get("/ai-insight")
+def ai_insight():
+    stats = build_ai_insight_context()
+
+    if not stats:
+        return {
+            "insight":
+                "Keep journaling. I need a little more data before I can identify meaningful patterns."
+        }
+
+    prompt = f"""
+You are LiAInne.
+
+You are reviewing a user's journal analytics.
+
+Statistics:
+
+{stats}
+
+Write:
+
+1. One observation
+2. One recommendation
+
+Rules:
+- Maximum 80 words.
+- Sound personal and thoughtful.
+- Do not list statistics.
+- Do not mention slopes.
+- Do not say 'based on the data'.
+- Focus on patterns and actionable advice.
+"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": prompt
+            }
+        ],
+        temperature=0.8,
+        max_tokens=150,
+    )
+
+    return {
+        "insight": response.choices[0].message.content
+    }
+
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
