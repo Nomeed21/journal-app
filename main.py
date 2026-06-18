@@ -634,5 +634,113 @@ def chat(msg: ChatMessage):
 
     return {"response": response.choices[0].message.content}
 
+@app.get("/insights")
+def get_insights():
+    all_light = fetch_all_entries_light()
+
+    if len(all_light) < 3:
+        return {
+            "insights": [
+                "Keep journaling. More entries are needed before meaningful patterns can be detected."
+            ]
+        }
+
+    insights = []
+
+    # --------------------------------------------------
+    # Mood Trend
+    # --------------------------------------------------
+    moods = [e["mood"] for e in all_light]
+    mood_slope = linear_slope(moods)
+
+    if mood_slope > 0.05:
+        insights.append(
+            "Your mood has been improving over time. Whatever you're doing recently seems to be helping."
+        )
+    elif mood_slope < -0.05:
+        insights.append(
+            "Your mood has been gradually declining. It may be worth reviewing what changed recently."
+        )
+
+    # --------------------------------------------------
+    # Goal Progress Trend
+    # --------------------------------------------------
+    goals = [e["goal_progress"] for e in all_light]
+    goal_slope = linear_slope(goals)
+
+    if goal_slope > 0.5:
+        insights.append(
+            "Your goal progress is trending upward. You're building momentum."
+        )
+    elif goal_slope < -0.5:
+        insights.append(
+            "Goal progress has been slipping recently. A smaller daily target might help rebuild consistency."
+        )
+
+    # --------------------------------------------------
+    # Last 7 vs Previous 7 Entries
+    # --------------------------------------------------
+    if len(all_light) >= 14:
+        recent7 = all_light[-7:]
+        previous7 = all_light[-14:-7]
+
+        recent_mood = sum(e["mood"] for e in recent7) / len(recent7)
+        previous_mood = sum(e["mood"] for e in previous7) / len(previous7)
+
+        diff = round(recent_mood - previous_mood, 1)
+
+        if diff > 0.5:
+            insights.append(
+                f"Your average mood increased by {diff} points compared to your previous 7 entries."
+            )
+        elif diff < -0.5:
+            insights.append(
+                f"Your average mood dropped by {abs(diff)} points compared to your previous 7 entries."
+            )
+
+    # --------------------------------------------------
+    # Best Day of Week
+    # --------------------------------------------------
+    correlations = get_correlations()
+
+    valid_days = [d for d in correlations if d["avg_mood"] > 0]
+
+    if valid_days:
+        best_day = max(valid_days, key=lambda d: d["avg_mood"])
+
+        insights.append(
+            f"{best_day['day']} is currently your strongest day with an average mood of {best_day['avg_mood']}/5."
+        )
+
+    # --------------------------------------------------
+    # Habit Streaks
+    # --------------------------------------------------
+    streaks = get_streaks()
+
+    if streaks:
+        best_habit = max(
+            streaks.items(),
+            key=lambda item: item[1]["current_streak"]
+        )
+
+        name = best_habit[0]
+        streak = best_habit[1]["current_streak"]
+
+        if streak >= 3:
+            insights.append(
+                f"Your strongest habit right now is '{name}' with a {streak}-day streak."
+            )
+
+    # --------------------------------------------------
+    # Low Data Fallback
+    # --------------------------------------------------
+    if not insights:
+        insights.append(
+            "No strong patterns detected yet. Keep journaling and tracking habits to unlock deeper insights."
+        )
+
+    return {
+        "insights": insights
+    }
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

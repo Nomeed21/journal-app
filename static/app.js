@@ -261,6 +261,17 @@ async function loadCharts() {
     });
 }
 
+async function loadInsights() {
+    const res = await fetch("/insights");
+    const data = await res.json();
+
+    document.getElementById("insights").innerHTML =
+        data.insights
+            .map(i => `<div class="entry-card">${i}</div>`)
+            .join("");
+}
+
+loadInsights();
 loadCharts();
 loadEntries();
 loadStreaks();
