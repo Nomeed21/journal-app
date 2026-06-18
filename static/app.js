@@ -9,6 +9,8 @@ const goalSlider = document.getElementById("goal-progress");
 const moodValue = document.getElementById("mood-value");
 const goalValue = document.getElementById("goal-value");
 
+let conversationHistory = [];
+
 moodSlider.addEventListener("input", () => {
     moodValue.textContent = moodSlider.value;
 });
@@ -166,16 +168,30 @@ chatForm.addEventListener("submit", async (e) => {
     chatMessages.innerHTML += `<div class="chat-msg user">${message}</div>`;
     chatMessages.scrollTop = chatMessages.scrollHeight;
 
+
+
     const res = await fetch("/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+	method: "POST",
+	headers: { "Content-Type": "application/json" },
+	    body: JSON.stringify({
+	    message,
+	    history: conversationHistory
+        }),
+    });
+    const data = await res.json();
+    
+    conversationHistory.push({
+        role: "user",
+        content: message
     });
 
-    const data = await res.json();
-    chatMessages.innerHTML += `<div class="chat-msg assistant">${data.response}</div>`;
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-});
+    conversationHistory.push({
+        role: "assistant",
+        content: data.response
+    });
+        chatMessages.innerHTML += `<div class="chat-msg assistant">${data.response}</div>`;
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
 
 async function loadCharts() {
     // Fetch trends data for the last 30 days
