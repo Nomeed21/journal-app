@@ -595,6 +595,91 @@ def build_ai_insight_context():
         "habit_streak": longest_streak,
     }
 
+def get_current_month_entries():
+    now = datetime.now(timezone.utc)
+
+    start = datetime(
+        now.year,
+        now.month,
+        1,
+        tzinfo=timezone.utc
+    )
+
+    result = (
+        supabase.table("journal_entries")
+        .select(
+            "title, content, mood, goal_progress, created_at"
+        )
+        .gte("created_at", start.isoformat())
+        .order("created_at")
+        .execute()
+    )
+
+    return result.data
+
+
+def build_monthly_review_context():
+    entries = get_current_month_entries()
+
+    if not entries:
+        return None
+
+    moods = [e["mood"] for e in entries]
+    goals = [e["goal_progress"] for e in entries]
+
+    avg_mood = round(sum(moods) / len(moods), 1)
+    avg_goal = round(sum(goals) / len(goals), 1)
+
+    mood_trend = describe_trend(linear_slope(moods))
+    goal_trend = describe_trend(
+        linear_slope(goals),
+        threshold=0.5
+    )
+
+    correlations = get_correlations()
+
+    valid_days = [
+        d for d in correlations
+        if d["avg_mood"] > 0
+    ]
+
+    best_day = None
+
+    if valid_days:
+        best_day = max(
+            valid_days,
+            key=lambda d: d["avg_mood"]
+        )["day"]
+
+    streaks = get_streaks()
+
+    strongest_habit = None
+
+    if streaks:
+        strongest_habit = max(
+            streaks.items(),
+            key=lambda x: x[1]["current_streak"]
+        )[0]
+
+    recent_entries = []
+
+    for e in entries[-5:]:
+        recent_entries.append(
+            f"{e['title']}: {e['content'][:200]}"
+        )
+
+    return {
+        "entry_count": len(entries),
+        "avg_mood": avg_mood,
+        "avg_goal_progress": avg_goal,
+        "mood_trend": mood_trend,
+        "goal_trend": goal_trend,
+        "best_day": best_day,
+        "strongest_habit": strongest_habit,
+        "recent_entries": recent_entries
+    }
+
+
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
@@ -844,6 +929,59 @@ Rules:
     return {
         "insight": response.choices[0].message.content
     }
+@app.get("/monthly-review")
+def monthly_review():
+    context = build_monthly_review_context()
 
+    if not context:
+        return {
+            "review":
+            "Not enough journal entries this month yet."
+        }
+
+    prompt = f"""
+You are LiAInne.
+
+Create a monthly review.
+
+Journal statistics:
+
+{context}
+
+Write the review using exactly these sections:
+
+## Wins
+
+## Challenges
+
+## Patterns
+
+## Focus For Next Month
+
+Rules:
+- Maximum 250 words.
+- Be encouraging but honest.
+- Mention patterns you notice.
+- Give actionable focus areas.
+- Do not dump statistics.
+- Write in natural language.
+"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": prompt
+            }
+        ],
+        temperature=0.7,
+        max_tokens=400,
+    )
+
+    return {
+        "review":
+        response.choices[0].message.content
+    }
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

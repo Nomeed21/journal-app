@@ -498,3 +498,19 @@ textarea:focus-visible {
 #ai-insight {
     line-height: 1.7;
 }
+
+.monthly-review-card {
+    margin-top: 2rem;
+    padding: 1.5rem;
+    border-radius: 16px;
+    background: #fdf5f7;
+}
+
+#generate-review {
+    margin-bottom: 1rem;
+}
+
+#monthly-review {
+    line-height: 1.8;
+    white-space: normal;
+}

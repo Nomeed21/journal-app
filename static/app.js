@@ -284,6 +284,26 @@ async function loadAIInsight() {
         data.insight;
 }
 
+document
+.getElementById("generate-review")
+.addEventListener("click", async () => {
+
+    const reviewDiv =
+        document.getElementById("monthly-review");
+
+    reviewDiv.innerHTML =
+        "Generating review...";
+
+    const res =
+        await fetch("/monthly-review");
+
+    const data =
+        await res.json();
+
+    reviewDiv.innerHTML =
+        data.review.replace(/\n/g, "<br>");
+});
+
 
 loadInsights();
 loadAIInsight();
