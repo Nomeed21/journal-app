@@ -265,10 +265,15 @@ async function loadInsights() {
     const res = await fetch("/insights");
     const data = await res.json();
 
-    document.getElementById("insights").innerHTML =
-        data.insights
-            .map(i => `<div class="entry-card">${i}</div>`)
-            .join("");
+    const container = document.getElementById("insights");
+
+    container.innerHTML = data.insights.map(insight => `
+        <div class="insight-card ${insight.type}">
+            <h3>${insight.title}</h3>
+            <p>${insight.message}</p>
+            <small>💡 ${insight.recommendation}</small>
+        </div>
+    `).join("");
 }
 
 loadInsights();
