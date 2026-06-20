@@ -3,17 +3,61 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Journal</title>
+    <title>LiAInne — My Journal</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <div class="container">
-        <h1>My Journal</h1>
 
-        <section class="journal-form">
-            <h2>New Entry</h2>
-            <form id="entry-form">
+<div class="app-shell">
+
+    <!-- ── Sidebar ─────────────────────────────── -->
+    <nav class="sidebar">
+        <div class="sidebar-brand">
+            <span class="brand-icon">✦</span>
+            <span class="brand-name">LiAInne</span>
+        </div>
+
+        <ul class="nav-links">
+            <li><a href="#" class="nav-item active" data-page="journal">
+                <span class="nav-icon">📝</span><span class="nav-label">Journal</span>
+            </a></li>
+            <li><a href="#" class="nav-item" data-page="entries">
+                <span class="nav-icon">📖</span><span class="nav-label">Entries</span>
+            </a></li>
+            <li><a href="#" class="nav-item" data-page="quests">
+                <span class="nav-icon">⚔️</span><span class="nav-label">Quests</span>
+            </a></li>
+            <li><a href="#" class="nav-item" data-page="habits">
+                <span class="nav-icon">🔥</span><span class="nav-label">Habits</span>
+            </a></li>
+            <li><a href="#" class="nav-item" data-page="insights">
+                <span class="nav-icon">📊</span><span class="nav-label">Insights</span>
+            </a></li>
+            <li><a href="#" class="nav-item" data-page="review">
+                <span class="nav-icon">🗓️</span><span class="nav-label">Review</span>
+            </a></li>
+        </ul>
+
+        <div class="sidebar-footer">
+            <span class="sidebar-version">Study Coach</span>
+        </div>
+    </nav>
+
+    <!-- ── Main content ────────────────────────── -->
+    <main class="main-content">
+
+        <!-- PAGE: Journal -->
+        <section class="page active" id="page-journal">
+            <div class="page-header">
+                <h1>Journal</h1>
+                <p class="page-sub">Reflect on your day</p>
+            </div>
+            <div class="ai-coach-card">
+                <div class="ai-coach-label">✦ AI Coach</div>
+                <div id="ai-insight">Loading...</div>
+            </div>
+            <form id="entry-form" class="entry-form-card">
                 <input type="text" id="title" placeholder="Entry title..." required>
                 <textarea id="content" placeholder="Write your thoughts..." required></textarea>
                 <div class="sliders">
@@ -24,13 +68,17 @@
                         <input type="range" id="goal-progress" min="0" max="100" value="50">
                     </label>
                 </div>
-		<input type="text" id="tags" placeholder="Tags (comma-separated, e.g. study, project)...">
+                <input type="text" id="tags" placeholder="Tags (comma-separated)...">
                 <button type="submit">Save Entry</button>
             </form>
         </section>
 
-        <section class="entries-list">
-            <h2>Past Entries</h2>
+        <!-- PAGE: Entries -->
+        <section class="page" id="page-entries">
+            <div class="page-header">
+                <h1>Entries</h1>
+                <p class="page-sub">Your past reflections</p>
+            </div>
             <div class="filters">
                 <input type="text" id="filter-keyword" placeholder="Search by keyword...">
                 <input type="text" id="filter-tag" placeholder="Filter by tag...">
@@ -39,79 +87,95 @@
             </div>
             <div id="entries"></div>
         </section>
-	<section class="insights-section">
-            <h2>Insights</h2>
-            <div class="chart-container">
-                <canvas id="trends-chart"></canvas>
+
+        <!-- PAGE: Quests -->
+        <section class="page" id="page-quests">
+            <div class="page-header">
+                <h1>Quests &amp; Goals</h1>
+                <p class="page-sub">Level up your life</p>
             </div>
-            <div class="chart-container">
-                <canvas id="correlation-chart"></canvas>
+
+            <div class="daily-quest-banner" id="daily-quest">
+                <div class="dq-header">
+                    <span class="dq-label">⚔️ Today's Main Quest</span>
+                    <button class="dq-refresh" onclick="generateDailyQuest()" title="Regenerate">↺</button>
+                </div>
+                <div class="dq-body" id="dq-body">Generating your quest...</div>
+                <div class="dq-footer" id="dq-footer"></div>
             </div>
+
+            <form id="goal-form" class="inline-form">
+                <input id="goal-title" placeholder="Goal title..." required>
+                <select id="goal-category" required>
+                    <option value="" disabled selected>Category...</option>
+                    <option value="Study">📚 Study</option>
+                    <option value="Fitness">💪 Fitness</option>
+                    <option value="Career">💼 Career</option>
+                    <option value="Relationship">❤️ Relationship</option>
+                    <option value="Finance">💰 Finance</option>
+                    <option value="Creativity">🎨 Creativity</option>
+                    <option value="Personal Growth">🌱 Personal Growth</option>
+                </select>
+                <button type="submit">+ Add Goal</button>
+            </form>
+
+            <div id="goal-health" class="goal-health-panel"></div>
+            <div id="goals"></div>
         </section>
-        <section class="habits-section">
-            <h2>Habit Tracker</h2>
-            <form id="habit-form">
+
+        <!-- PAGE: Habits -->
+        <section class="page" id="page-habits">
+            <div class="page-header">
+                <h1>Habits</h1>
+                <p class="page-sub">Build your streaks</p>
+            </div>
+            <form id="habit-form" class="inline-form">
                 <input type="text" id="habit-name" placeholder="Habit name (e.g. Exercise)..." required>
                 <button type="submit">Log Habit</button>
             </form>
             <div id="streaks"></div>
         </section>
-	<section class="ai-coach-card">
-    	    <h2>AI Coach</h2>
-    	    <div id="ai-insight">
-        	Loading...
-    	    </div>
-	</section>
-    <section class="goals-section">
-    <h2>Goals</h2>
 
-    <form id="goal-form">
-
-        <input
-            id="goal-title"
-            placeholder="Goal title..."
-            required
-        >
-
-        <input
-            id="goal-category"
-            placeholder="Category..."
-            required
-        >
-
-        <button type="submit">
-            Add Goal
-        </button>
-
-    </form>
-
-    <div id="goals"></div>
-
-    </section>
-	<section class="monthly-review-card">
-	    <h2>Monthly Review</h2>
-
-	    <button id="generate-review">
-	        Generate Review
-	    </button>
-
-	    <div id="monthly-review">
-	        Click Generate Review
-	    </div>
-	</section>
-	<section class="insights-card">
-	    <h2>AI Insights</h2>
-	    <div id="insights"></div>
-	</section>
-        <section class="chat-section">
-            <h2>Chat with Your Journal</h2>
-            <div id="chat-messages"></div>
-            <form id="chat-form">
-                <input type="text" id="chat-input" placeholder="Ask about your journal..." required>
-                <button type="submit">Send</button>
-            </form>
+        <!-- PAGE: Insights -->
+        <section class="page" id="page-insights">
+            <div class="page-header">
+                <h1>Insights</h1>
+                <p class="page-sub">Patterns in your data</p>
+            </div>
+            <div class="charts-grid">
+                <div class="chart-container"><canvas id="trends-chart"></canvas></div>
+                <div class="chart-container"><canvas id="correlation-chart"></canvas></div>
+            </div>
+            <div id="insights"></div>
         </section>
-    </div>
-    <script src="app.js"></script>
+
+        <!-- PAGE: Monthly Review -->
+        <section class="page" id="page-review">
+            <div class="page-header">
+                <h1>Monthly Review</h1>
+                <p class="page-sub">Reflect on the bigger picture</p>
+            </div>
+            <button id="generate-review">Generate Review</button>
+            <div id="monthly-review" class="review-body">Click Generate Review to start.</div>
+        </section>
+
+    </main>
+
+    <!-- ── Chat sidebar ────────────────────────── -->
+    <aside class="chat-panel">
+        <div class="chat-panel-header">
+            <span class="chat-panel-title">✦ LiAInne</span>
+            <span class="chat-panel-sub">Your AI coach</span>
+        </div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <form id="chat-form" class="chat-input-row">
+            <input type="text" id="chat-input" placeholder="Ask anything..." required>
+            <button type="submit">↑</button>
+        </form>
+    </aside>
+
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>

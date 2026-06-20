@@ -1,3 +1,35 @@
+// ---------------------------------------------------------------------------
+// Navigation
+// ---------------------------------------------------------------------------
+
+function showPage(pageId) {
+    document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+    document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+
+    const page = document.getElementById("page-" + pageId);
+    if (page) page.classList.add("active");
+
+    const navItem = document.querySelector(`.nav-item[data-page="${pageId}"]`);
+    if (navItem) navItem.classList.add("active");
+
+    // Lazy-load data when a page is first navigated to
+    if (pageId === "entries")  loadEntries();
+    if (pageId === "quests")   { loadGoals(); generateDailyQuest(); }
+    if (pageId === "habits")   loadStreaks();
+    if (pageId === "insights") { loadInsights(); loadCharts(); }
+}
+
+document.querySelectorAll(".nav-item").forEach(item => {
+    item.addEventListener("click", e => {
+        e.preventDefault();
+        showPage(item.dataset.page);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// DOM refs
+// ---------------------------------------------------------------------------
+
 const entryForm = document.getElementById("entry-form");
 const chatForm = document.getElementById("chat-form");
 const habitForm = document.getElementById("habit-form");
@@ -614,10 +646,6 @@ goalForm.addEventListener("submit", async (e) => {
     loadGoals();
 });
 
-loadGoals();
-generateDailyQuest();
-loadInsights();
+// Boot: show journal page and load only what's needed for it
+showPage("journal");
 loadAIInsight();
-loadCharts();
-loadEntries();
-loadStreaks();
