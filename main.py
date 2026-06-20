@@ -34,6 +34,7 @@ groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 # Models
 # ---------------------------------------------------------------------------
 
+
 class EntryCreate(BaseModel):
     title: str
     content: str
@@ -56,9 +57,19 @@ class HabitLog(BaseModel):
     name: str
 
 
+class GoalCreate(BaseModel):
+    title: str
+    category: str
+
+
+class TaskCreate(BaseModel):
+    title: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def generate_embedding(text: str) -> list[float]:
     embedding = embedding_model.encode(text)
@@ -108,6 +119,7 @@ def describe_trend(slope: float, threshold: float = 0.05) -> str:
 # ---------------------------------------------------------------------------
 # Entry CRUD
 # ---------------------------------------------------------------------------
+
 
 @app.post("/entries")
 def create_entry(entry: EntryCreate):
@@ -178,11 +190,13 @@ def get_trends(days: int = 30):
 
     trends = []
     for date, values in sorted(daily.items()):
-        trends.append({
-            "date": date,
-            "avg_mood": round(sum(values["moods"]) / len(values["moods"]), 1),
-            "avg_goal": round(sum(values["goals"]) / len(values["goals"]), 1),
-        })
+        trends.append(
+            {
+                "date": date,
+                "avg_mood": round(sum(values["moods"]) / len(values["moods"]), 1),
+                "avg_goal": round(sum(values["goals"]) / len(values["goals"]), 1),
+            }
+        )
 
     return trends
 
@@ -206,11 +220,13 @@ def get_correlations():
     correlations = []
     for i, name in enumerate(day_names):
         if days[i]["moods"]:
-            correlations.append({
-                "day": name,
-                "avg_mood": round(sum(days[i]["moods"]) / len(days[i]["moods"]), 1),
-                "avg_goal": round(sum(days[i]["goals"]) / len(days[i]["goals"]), 1),
-            })
+            correlations.append(
+                {
+                    "day": name,
+                    "avg_mood": round(sum(days[i]["moods"]) / len(days[i]["moods"]), 1),
+                    "avg_goal": round(sum(days[i]["goals"]) / len(days[i]["goals"]), 1),
+                }
+            )
         else:
             correlations.append({"day": name, "avg_mood": 0, "avg_goal": 0})
 
@@ -250,12 +266,7 @@ def update_entry(entry_id: int, entry: EntryCreate):
         "embedding": embedding,
     }
 
-    result = (
-        supabase.table("journal_entries")
-        .update(data)
-        .eq("id", entry_id)
-        .execute()
-    )
+    result = supabase.table("journal_entries").update(data).eq("id", entry_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Entry not found")
     return {"status": "updated", "entry": result.data[0]}
@@ -263,12 +274,7 @@ def update_entry(entry_id: int, entry: EntryCreate):
 
 @app.delete("/entries/{entry_id}")
 def delete_entry(entry_id: int):
-    result = (
-        supabase.table("journal_entries")
-        .delete()
-        .eq("id", entry_id)
-        .execute()
-    )
+    result = supabase.table("journal_entries").delete().eq("id", entry_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Entry not found")
     return {"status": "deleted"}
@@ -277,6 +283,7 @@ def delete_entry(entry_id: int):
 # ---------------------------------------------------------------------------
 # Habits
 # ---------------------------------------------------------------------------
+
 
 @app.post("/habits")
 def log_habit(habit: HabitLog):
@@ -334,8 +341,8 @@ def get_streaks():
 
 RECENT_DAYS = 14
 MAX_WEEKLY_SUMMARY_ROWS = 26  # ~6 months of weekly rows before we'd want to
-                               # bucket by month instead; safe for "low 1000s"
-                               # of entries since this is stats, not raw text.
+# bucket by month instead; safe for "low 1000s"
+# of entries since this is stats, not raw text.
 
 
 def fetch_all_entries_light():
@@ -374,9 +381,10 @@ def build_recent_text_block(today_iso: str) -> str:
 
 def build_weekly_summary_block(all_light_entries: list[dict]) -> str:
     """Collapse everything older than RECENT_DAYS into weekly avg stats."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)
     older = [
-        e for e in all_light_entries
+        e
+        for e in all_light_entries
         if datetime.fromisoformat(e["created_at"].replace("Z", "+00:00")) < cutoff
     ]
     if not older:
@@ -397,15 +405,21 @@ def build_weekly_summary_block(all_light_entries: list[dict]) -> str:
         v = weekly[key]
         avg_mood = round(sum(v["moods"]) / len(v["moods"]), 1)
         avg_goal = round(sum(v["goals"]) / len(v["goals"]), 1)
-        rows.append(f"{key}: avg mood {avg_mood}/5, avg goal {avg_goal}%, {v['count']} entries")
+        rows.append(
+            f"{key}: avg mood {avg_mood}/5, avg goal {avg_goal}%, {v['count']} entries"
+        )
 
     # If history is very long, keep it bounded: earliest rows + most recent
     # rows, with a note in between, rather than truncating silently.
     if len(rows) > MAX_WEEKLY_SUMMARY_ROWS:
         head = rows[: MAX_WEEKLY_SUMMARY_ROWS // 2]
-        tail = rows[-(MAX_WEEKLY_SUMMARY_ROWS // 2):]
+        tail = rows[-(MAX_WEEKLY_SUMMARY_ROWS // 2) :]
         omitted = len(rows) - len(head) - len(tail)
-        rows = head + [f"... ({omitted} earlier weeks omitted, available via search) ..."] + tail
+        rows = (
+            head
+            + [f"... ({omitted} earlier weeks omitted, available via search) ..."]
+            + tail
+        )
 
     return "\n".join(rows)
 
@@ -481,7 +495,9 @@ def build_habit_block() -> str:
         unique_dates = sorted(set(dates), reverse=True)
         streak = calc_streak(unique_dates, today)
         last_done = unique_dates[0] if unique_dates else "never"
-        lines.append(f"- {name}: {streak}-day streak, {len(dates)} total logs, last done {last_done}")
+        lines.append(
+            f"- {name}: {streak}-day streak, {len(dates)} total logs, last done {last_done}"
+        )
     return "\n".join(lines)
 
 
@@ -517,7 +533,8 @@ def build_coach_context(message: str) -> str:
 
     all_light = fetch_all_entries_light()
     recent_ids = {
-        e["id"] for e in all_light
+        e["id"]
+        for e in all_light
         if datetime.fromisoformat(e["created_at"].replace("Z", "+00:00"))
         >= datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)
     }
@@ -538,10 +555,11 @@ def build_coach_context(message: str) -> str:
     ]
 
     if semantic_matches:
-        sections.append(f"SPECIFIC OLDER ENTRIES RELEVANT TO THIS QUESTION:\n{semantic_matches}")
+        sections.append(
+            f"SPECIFIC OLDER ENTRIES RELEVANT TO THIS QUESTION:\n{semantic_matches}"
+        )
 
     return "\n\n---\n\n".join(sections)
-
 
 
 def build_ai_insight_context():
@@ -562,10 +580,7 @@ def build_ai_insight_context():
     valid_days = [d for d in correlations if d["avg_mood"] > 0]
 
     if valid_days:
-        best_day = max(
-            valid_days,
-            key=lambda d: d["avg_mood"]
-        )
+        best_day = max(valid_days, key=lambda d: d["avg_mood"])
 
     streaks = get_streaks()
 
@@ -574,8 +589,7 @@ def build_ai_insight_context():
 
     if streaks:
         strongest_habit, stats = max(
-            streaks.items(),
-            key=lambda item: item[1]["current_streak"]
+            streaks.items(), key=lambda item: item[1]["current_streak"]
         )
 
         longest_streak = stats["current_streak"]
@@ -595,21 +609,15 @@ def build_ai_insight_context():
         "habit_streak": longest_streak,
     }
 
+
 def get_current_month_entries():
     now = datetime.now(timezone.utc)
 
-    start = datetime(
-        now.year,
-        now.month,
-        1,
-        tzinfo=timezone.utc
-    )
+    start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
 
     result = (
         supabase.table("journal_entries")
-        .select(
-            "title, content, mood, goal_progress, created_at"
-        )
+        .select("title, content, mood, goal_progress, created_at")
         .gte("created_at", start.isoformat())
         .order("created_at")
         .execute()
@@ -631,42 +639,28 @@ def build_monthly_review_context():
     avg_goal = round(sum(goals) / len(goals), 1)
 
     mood_trend = describe_trend(linear_slope(moods))
-    goal_trend = describe_trend(
-        linear_slope(goals),
-        threshold=0.5
-    )
+    goal_trend = describe_trend(linear_slope(goals), threshold=0.5)
 
     correlations = get_correlations()
 
-    valid_days = [
-        d for d in correlations
-        if d["avg_mood"] > 0
-    ]
+    valid_days = [d for d in correlations if d["avg_mood"] > 0]
 
     best_day = None
 
     if valid_days:
-        best_day = max(
-            valid_days,
-            key=lambda d: d["avg_mood"]
-        )["day"]
+        best_day = max(valid_days, key=lambda d: d["avg_mood"])["day"]
 
     streaks = get_streaks()
 
     strongest_habit = None
 
     if streaks:
-        strongest_habit = max(
-            streaks.items(),
-            key=lambda x: x[1]["current_streak"]
-        )[0]
+        strongest_habit = max(streaks.items(), key=lambda x: x[1]["current_streak"])[0]
 
     recent_entries = []
 
     for e in entries[-5:]:
-        recent_entries.append(
-            f"{e['title']}: {e['content'][:200]}"
-        )
+        recent_entries.append(f"{e['title']}: {e['content'][:200]}")
 
     return {
         "entry_count": len(entries),
@@ -676,9 +670,267 @@ def build_monthly_review_context():
         "goal_trend": goal_trend,
         "best_day": best_day,
         "strongest_habit": strongest_habit,
-        "recent_entries": recent_entries
+        "recent_entries": recent_entries,
     }
 
+
+# ---------------------------------------------------------------------------
+# Goals
+# ---------------------------------------------------------------------------
+
+
+@app.post("/goals")
+def create_goal(goal: GoalCreate):
+    data = {
+        "title": goal.title,
+        "category": goal.category,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "is_completed": False,
+    }
+
+    result = supabase.table("goals").insert(data).execute()
+
+    return {"status": "created", "goal": result.data[0]}
+
+
+@app.get("/goals")
+def get_goals():
+    goals = supabase.table("goals").select("*").order("created_at", desc=True).execute()
+
+    task_rows = supabase.table("goal_tasks").select("*").execute()
+
+    tasks_by_goal = defaultdict(list)
+
+    for task in task_rows.data:
+        tasks_by_goal[task["goal_id"]].append(task)
+
+    enriched = []
+
+    for goal in goals.data:
+        tasks = tasks_by_goal.get(goal["id"], [])
+
+        total = len(tasks)
+        completed = len([t for t in tasks if t["is_completed"]])
+
+        progress = round(completed / total * 100) if total > 0 else 0
+
+        goal["progress"] = progress
+        goal["completed_tasks"] = completed
+        goal["total_tasks"] = total
+
+        enriched.append(goal)
+
+    return enriched
+
+
+@app.post("/goals/{goal_id}/tasks")
+def create_task(goal_id: int, task: TaskCreate):
+
+    result = (
+        supabase.table("goal_tasks")
+        .insert(
+            {
+                "goal_id": goal_id,
+                "title": task.title,
+                "is_completed": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        .execute()
+    )
+
+    return result.data[0]
+
+
+@app.get("/goals/{goal_id}/tasks")
+def get_tasks(goal_id: int):
+
+    result = supabase.table("goal_tasks").select("*").eq("goal_id", goal_id).execute()
+
+    return result.data
+
+
+@app.put("/tasks/{task_id}")
+def toggle_task(task_id: int):
+
+    task = supabase.table("goal_tasks").select("*").eq("id", task_id).single().execute()
+
+    updated = (
+        supabase.table("goal_tasks")
+        .update({"is_completed": not task.data["is_completed"]})
+        .eq("id", task_id)
+        .execute()
+    )
+
+    return updated.data[0]
+
+
+
+@app.delete("/goals/{goal_id}")
+def delete_goal(goal_id: int):
+    # Delete all tasks for this goal first (no cascade assumed)
+    supabase.table("goal_tasks").delete().eq("goal_id", goal_id).execute()
+    result = supabase.table("goals").delete().eq("id", goal_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    return {"status": "deleted"}
+
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int):
+    result = supabase.table("goal_tasks").delete().eq("id", task_id).execute()
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Goal summary — category health + XP totals, shared by /insights,
+# /daily-quest, and /monthly-review so all three see the same quest data.
+# ---------------------------------------------------------------------------
+
+XP_PER_TASK = 50
+XP_PER_LEVEL = 500
+
+
+def build_goal_summary() -> list[dict]:
+    """
+    Returns one dict per goal with tasks, completion counts, progress %,
+    XP, level, and days_since_created (staleness proxy).
+    """
+    goals = supabase.table("goals").select("*").order("created_at", desc=True).execute()
+    task_rows = supabase.table("goal_tasks").select("*").execute()
+
+    tasks_by_goal: dict[int, list] = defaultdict(list)
+    for task in task_rows.data:
+        tasks_by_goal[task["goal_id"]].append(task)
+
+    summary = []
+    for goal in goals.data:
+        tasks = tasks_by_goal.get(goal["id"], [])
+        completed = len([t for t in tasks if t["is_completed"]])
+        total = len(tasks)
+        progress = round(completed / total * 100) if total > 0 else 0
+        xp = completed * XP_PER_TASK
+        level = xp // XP_PER_LEVEL + 1
+        created = datetime.fromisoformat(goal["created_at"].replace("Z", "+00:00"))
+        days_since_created = (datetime.now(timezone.utc) - created).days
+
+        summary.append(
+            {
+                **goal,
+                "tasks": tasks,
+                "completed_tasks": completed,
+                "total_tasks": total,
+                "progress": progress,
+                "xp": xp,
+                "level": level,
+                "days_since_created": days_since_created,
+            }
+        )
+    return summary
+
+
+def build_category_health(summary: list[dict]) -> list[dict]:
+    """
+    Per-category aggregation: total XP, completion rate, staleness flag.
+    """
+    by_cat: dict[str, dict] = {}
+    for g in summary:
+        cat = g.get("category", "Other")
+        if cat not in by_cat:
+            by_cat[cat] = {"xp": 0, "completed": 0, "total": 0, "days": []}
+        by_cat[cat]["xp"] += g["xp"]
+        by_cat[cat]["completed"] += g["completed_tasks"]
+        by_cat[cat]["total"] += g["total_tasks"]
+        by_cat[cat]["days"].append(g["days_since_created"])
+
+    health = []
+    for cat, data in by_cat.items():
+        rate = round(data["completed"] / data["total"] * 100) if data["total"] > 0 else 0
+        oldest = max(data["days"])
+        stale = oldest > 7 and rate < 50
+        health.append(
+            {
+                "category": cat,
+                "total_xp": data["xp"],
+                "completion_rate": rate,
+                "stale": stale,
+                "oldest_goal_days": oldest,
+            }
+        )
+    return sorted(health, key=lambda x: x["total_xp"], reverse=True)
+
+
+@app.get("/goals/summary")
+def goals_summary():
+    """Full RPG view: goals + tasks + XP + level. Replaces raw /goals for the
+    frontend card renderer so it only needs one round-trip."""
+    return build_goal_summary()
+
+
+@app.post("/daily-quest")
+def daily_quest():
+    """
+    Picks today's most impactful pending quest via Groq.
+    Moved from the browser (where it hit the Anthropic API directly) to the
+    backend so no API keys are ever exposed to the client.
+    """
+    import json
+
+    summary = build_goal_summary()
+
+    pending_lines = []
+    for g in summary:
+        pending = [t["title"] for t in g["tasks"] if not t["is_completed"]]
+        if pending:
+            pending_lines.append(
+                f'Goal "{g["title"]}" [{g["category"]}] — ' +
+                f'pending: {", ".join(pending[:3])}'
+            )
+
+    if not pending_lines:
+        return {"task": None, "message": "All quests complete! Add new ones to keep going."}
+
+    quest_context = "\n".join(pending_lines)
+
+    recent = fetch_all_entries_light()[-7:]
+    avg_mood = round(sum(e["mood"] for e in recent) / len(recent), 1) if recent else None
+    mood_note = f"Recent average mood: {avg_mood}/5." if avg_mood else ""
+
+    prompt = f"""You are a quest generator for a personal journal RPG.
+
+Active goals and pending quests:
+{quest_context}
+
+{mood_note}
+
+Pick the single most impactful task the user should do TODAY.
+Reply in this exact JSON format (no markdown, no extra text):
+{{
+  "task": "exact task name from the list",
+  "goal": "goal title",
+  "category": "category",
+  "difficulty": "Easy|Medium|Hard",
+  "time": estimated minutes as a number,
+  "why": "one sentence reason why this task matters most today",
+  "xp": a number between 40 and 150
+}}"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=300,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    try:
+        quest = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Quest generation failed — invalid JSON from model.")
+
+    return quest
 
 # ---------------------------------------------------------------------------
 # Chat
@@ -688,32 +940,26 @@ SYSTEM_PROMPT_TEMPLATE = (
     "Your name is LiAInne. You are a warm but honest personal coach. "
     "You are not a therapist, doctor, or crisis counselor. You help the user "
     "notice patterns, be honest with themselves, and choose the next useful action.\n\n"
-
     "You have access to the user's journal context: recent entries, mood scores, "
     "goal progress, habit streaks, day-of-week patterns, trend summaries, and "
     "older relevant entries. Use this information privately to understand the "
     "user's situation. Do not read the data back like a report.\n\n"
-
     "Before answering, privately decide three things:\n"
     "1. What is the user's real problem right now?\n"
     "2. What is the most useful pattern or detail from their journal?\n"
     "3. What is one practical next step they can take today?\n\n"
-
     "Your response should usually include:\n"
     "- one honest observation,\n"
     "- one supportive but direct piece of advice,\n"
     "- one small action the user can do today.\n\n"
-
     "Give advice that is specific, grounded, kind, and actionable. "
     "Do not give a long list of options unless the user explicitly asks for one. "
     "Choose the most useful point and say it clearly.\n\n"
-
     "If the user's message is vague, ask one sharp follow-up question instead of guessing. "
     "If the user is venting, validate briefly, then help them move toward clarity. "
     "If the user asks what to do, give a concrete recommendation, not a menu of possibilities. "
     "If their journal data does not support what they are saying, gently point out the mismatch. "
     "Never pretend certainty. Use phrases like 'it looks like' or 'I might be wrong, but' when appropriate.\n\n"
-
     "Style rules:\n"
     "- Talk like a thoughtful friend who pays attention.\n"
     "- Be warm, direct, and concise.\n"
@@ -722,23 +968,20 @@ SYSTEM_PROMPT_TEMPLATE = (
     "- Do not say 'slope,' 'trend value,' or summarize every stat.\n"
     "- Use at most one specific number or date if it strengthens the advice.\n"
     "- Do not diagnose the user or make medical claims.\n\n"
-
     "Safety rules:\n"
     "If the user mentions self-harm, suicide, abuse, immediate danger, or feeling unable "
     "to stay safe, respond with care and urgency. Encourage them to contact local emergency "
     "services, a crisis hotline, or a trusted person nearby. Do not try to coach them through "
     "danger as if it is a normal productivity problem.\n\n"
-
     "A strong response sounds like this:\n"
     "'You sound drained, not lazy. It looks like when your mood dips, your goals start "
     "feeling impossible instead of just hard. Don’t try to fix the whole week tonight. "
     "Pick one tiny thing you can finish in 10 minutes, then stop and call that a win.'\n\n"
-
     "{context}"
 )
 
 MAX_HISTORY_TURNS = 12  # ~6 back-and-forth exchanges; keeps token usage/cost
-                         # bounded since the client resends history every call
+# bounded since the client resends history every call
 
 
 @app.post("/chat")
@@ -771,6 +1014,7 @@ def chat(msg: ChatMessage):
 
     return {"response": response.choices[0].message.content}
 
+
 @app.get("/insights")
 def get_insights():
     all_light = fetch_all_entries_light()
@@ -781,7 +1025,7 @@ def get_insights():
                 {
                     "type": "info",
                     "title": "Getting Started",
-                    "message": "Keep journaling. More entries are needed before meaningful patterns can be detected."
+                    "message": "Keep journaling. More entries are needed before meaningful patterns can be detected.",
                 }
             ]
         }
@@ -795,19 +1039,23 @@ def get_insights():
     mood_slope = linear_slope(moods)
 
     if mood_slope > 0.05:
-        insights.append({
-            "type": "success",
-            "title": "Mood Trend",
-            "message": "Your mood has been improving over time.",
-            "recommendation": "Review your recent entries and identify what has been helping."
-        })
+        insights.append(
+            {
+                "type": "success",
+                "title": "Mood Trend",
+                "message": "Your mood has been improving over time.",
+                "recommendation": "Review your recent entries and identify what has been helping.",
+            }
+        )
     elif mood_slope < -0.05:
-        insights.append({
-            "type": "warning",
-            "title": "Mood Trend",
-            "message": "Your mood has been gradually declining.",
-            "recommendation": "Review your last few entries and look for recurring stressors."
-        })
+        insights.append(
+            {
+                "type": "warning",
+                "title": "Mood Trend",
+                "message": "Your mood has been gradually declining.",
+                "recommendation": "Review your last few entries and look for recurring stressors.",
+            }
+        )
 
     # ---------------------------------------
     # Goal Trend
@@ -816,19 +1064,23 @@ def get_insights():
     goal_slope = linear_slope(goals)
 
     if goal_slope > 0.5:
-        insights.append({
-            "type": "success",
-            "title": "Goal Progress",
-            "message": "Your goal progress is trending upward.",
-            "recommendation": "Keep the current pace and focus on consistency."
-        })
+        insights.append(
+            {
+                "type": "success",
+                "title": "Goal Progress",
+                "message": "Your goal progress is trending upward.",
+                "recommendation": "Keep the current pace and focus on consistency.",
+            }
+        )
     elif goal_slope < -0.5:
-        insights.append({
-            "type": "warning",
-            "title": "Goal Progress",
-            "message": "Goal progress has slowed recently.",
-            "recommendation": "Break your goals into smaller daily actions."
-        })
+        insights.append(
+            {
+                "type": "warning",
+                "title": "Goal Progress",
+                "message": "Goal progress has slowed recently.",
+                "recommendation": "Break your goals into smaller daily actions.",
+            }
+        )
 
     # ---------------------------------------
     # Best Day
@@ -840,12 +1092,14 @@ def get_insights():
     if valid_days:
         best_day = max(valid_days, key=lambda d: d["avg_mood"])
 
-        insights.append({
-            "type": "observation",
-            "title": "Best Day",
-            "message": f"{best_day['day']} is your strongest day with an average mood of {best_day['avg_mood']}/5.",
-            "recommendation": f"Schedule important work on {best_day['day']} whenever possible."
-        })
+        insights.append(
+            {
+                "type": "observation",
+                "title": "Best Day",
+                "message": f"{best_day['day']} is your strongest day with an average mood of {best_day['avg_mood']}/5.",
+                "recommendation": f"Schedule important work on {best_day['day']} whenever possible.",
+            }
+        )
 
     # ---------------------------------------
     # Habits
@@ -853,33 +1107,70 @@ def get_insights():
     streaks = get_streaks()
 
     if streaks:
-        best_habit = max(
-            streaks.items(),
-            key=lambda item: item[1]["current_streak"]
-        )
+        best_habit = max(streaks.items(), key=lambda item: item[1]["current_streak"])
 
         habit_name = best_habit[0]
         streak = best_habit[1]["current_streak"]
 
         if streak >= 3:
-            insights.append({
-                "type": "success",
-                "title": "Strong Habit",
-                "message": f"'{habit_name}' currently has a {streak}-day streak.",
-                "recommendation": "Protect this habit. It is becoming part of your identity."
-            })
+            insights.append(
+                {
+                    "type": "success",
+                    "title": "Strong Habit",
+                    "message": f"'{habit_name}' currently has a {streak}-day streak.",
+                    "recommendation": "Protect this habit. It is becoming part of your identity.",
+                }
+            )
+
+    # ---------------------------------------
+    # Quest / Category Health
+    # ---------------------------------------
+    goal_data = build_goal_summary()
+    if goal_data:
+        category_health = build_category_health(goal_data)
+
+        best_cat = next((c for c in category_health if c["total_xp"] > 0), None)
+        if best_cat:
+            insights.append(
+                {
+                    "type": "success",
+                    "title": "Quest Progress",
+                    "message": (
+                        f"You're progressing fastest in {best_cat['category']} "
+                        f"({best_cat['completion_rate']}% complete, {best_cat['total_xp']} XP earned)."
+                    ),
+                    "recommendation": (
+                        f"Keep the momentum in {best_cat['category']} and consider "
+                        "adding a harder quest to the list."
+                    ),
+                }
+            )
+
+        for s in [c for c in category_health if c["stale"]][:2]:
+            insights.append(
+                {
+                    "type": "warning",
+                    "title": f"{s['category']} Stalled",
+                    "message": (
+                        f"{s['category']} goals haven't had new activity in over a week "
+                        f"and are only {s['completion_rate']}% complete."
+                    ),
+                    "recommendation": f"Open a {s['category']} quest today, even a small one.",
+                }
+            )
 
     if not insights:
-        insights.append({
-            "type": "info",
-            "title": "No Strong Patterns Yet",
-            "message": "No significant trends detected.",
-            "recommendation": "Keep journaling consistently."
-        })
+        insights.append(
+            {
+                "type": "info",
+                "title": "No Strong Patterns Yet",
+                "message": "No significant trends detected.",
+                "recommendation": "Keep journaling consistently.",
+            }
+        )
 
-    return {
-        "insights": insights
-    }
+    return {"insights": insights}
+
 
 @app.get("/ai-insight")
 def ai_insight():
@@ -887,8 +1178,7 @@ def ai_insight():
 
     if not stats:
         return {
-            "insight":
-                "Keep journaling. I need a little more data before I can identify meaningful patterns."
+            "insight": "Keep journaling. I need a little more data before I can identify meaningful patterns."
         }
 
     prompt = f"""
@@ -916,37 +1206,47 @@ Rules:
 
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": prompt
-            }
-        ],
+        messages=[{"role": "system", "content": prompt}],
         temperature=0.8,
         max_tokens=150,
     )
 
-    return {
-        "insight": response.choices[0].message.content
-    }
+    return {"insight": response.choices[0].message.content}
+
+
 @app.get("/monthly-review")
 def monthly_review():
     context = build_monthly_review_context()
 
     if not context:
-        return {
-            "review":
-            "Not enough journal entries this month yet."
-        }
+        return {"review": "Not enough journal entries this month yet."}
 
-    prompt = f"""
-You are LiAInne.
+    # Enrich with quest/goal progress so the review mentions milestones
+    goal_data = build_goal_summary()
+    quest_summary = ""
+    if goal_data:
+        category_health = build_category_health(goal_data)
+        total_xp = sum(g["xp"] for g in goal_data)
+        completed_quests = sum(g["completed_tasks"] for g in goal_data)
+        total_quests = sum(g["total_tasks"] for g in goal_data)
+        best_cat = category_health[0]["category"] if category_health else None
+        stale_cats = [c["category"] for c in category_health if c["stale"]]
+        quest_summary = (
+            f"Quest progress this month: {completed_quests}/{total_quests} quests complete, "
+            f"{total_xp} total XP earned across {len(goal_data)} active goals. "
+            f"Strongest category: {best_cat}. "
+            + (f"Stalled categories: {', '.join(stale_cats)}." if stale_cats else "No stalled categories.")
+        )
+
+    prompt = f"""You are LiAInne.
 
 Create a monthly review.
 
 Journal statistics:
-
 {context}
+
+Quest and goal progress:
+{quest_summary}
 
 Write the review using exactly these sections:
 
@@ -959,9 +1259,9 @@ Write the review using exactly these sections:
 ## Focus For Next Month
 
 Rules:
-- Maximum 250 words.
+- Maximum 300 words.
 - Be encouraging but honest.
-- Mention patterns you notice.
+- Mention quest completions and any stalled goals by name if relevant.
 - Give actionable focus areas.
 - Do not dump statistics.
 - Write in natural language.
@@ -969,19 +1269,13 @@ Rules:
 
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": prompt
-            }
-        ],
+        messages=[{"role": "system", "content": prompt}],
         temperature=0.7,
-        max_tokens=400,
+        max_tokens=500,
     )
 
-    return {
-        "review":
-        response.choices[0].message.content
-    }
+    return {"review": response.choices[0].message.content}
+
+
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

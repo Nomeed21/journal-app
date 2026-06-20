@@ -19,6 +19,12 @@ goalSlider.addEventListener("input", () => {
     goalValue.textContent = goalSlider.value;
 });
 
+const goalForm =
+    document.getElementById("goal-form");
+
+const goalsDiv =
+    document.getElementById("goals");
+
 async function loadEntries(filters = {}) {
     // Build query string from filter parameters
     const params = new URLSearchParams();
@@ -304,7 +310,312 @@ document
         data.review.replace(/\n/g, "<br>");
 });
 
+// ---------------------------------------------------------------------------
+// RPG / Quest System
+// ---------------------------------------------------------------------------
 
+const CATEGORY_ICONS = {
+    "Study":          "📚",
+    "Fitness":        "💪",
+    "Career":         "💼",
+    "Relationship":   "❤️",
+    "Finance":        "💰",
+    "Creativity":     "🎨",
+    "Personal Growth":"🌱",
+};
+
+const CATEGORY_COLORS = {
+    "Study":          "#6c8ebf",
+    "Fitness":        "#82b366",
+    "Career":         "#d6a73a",
+    "Relationship":   "#d98aa0",
+    "Finance":        "#70a58a",
+    "Creativity":     "#9c70c4",
+    "Personal Growth":"#d07040",
+};
+
+// XP per quest completion — base value; milestones count as 3×
+const XP_PER_TASK = 50;
+const XP_PER_LEVEL = 500;
+
+function calcXP(completedTasks) {
+    return completedTasks * XP_PER_TASK;
+}
+
+function calcLevel(xp) {
+    return Math.floor(xp / XP_PER_LEVEL) + 1;
+}
+
+function xpIntoLevel(xp) {
+    return xp % XP_PER_LEVEL;
+}
+
+function daysSince(isoString) {
+    const then = new Date(isoString);
+    const now  = new Date();
+    return Math.floor((now - then) / 86400000);
+}
+
+// Build category-level health insights from all goals+tasks
+function buildGoalHealthInsights(goals, tasksPerGoal) {
+    // Group by category
+    const byCategory = {};
+    goals.forEach((goal, i) => {
+        const cat = goal.category || "Other";
+        if (!byCategory[cat]) byCategory[cat] = { goals: [], tasks: [] };
+        byCategory[cat].goals.push(goal);
+        byCategory[cat].tasks.push(...tasksPerGoal[i]);
+    });
+
+    const insights = [];
+
+    // Most active category (most completions)
+    let bestCat = null, bestCount = 0;
+    Object.entries(byCategory).forEach(([cat, data]) => {
+        const done = data.tasks.filter(t => t.is_completed).length;
+        if (done > bestCount) { bestCount = done; bestCat = cat; }
+    });
+    if (bestCat && bestCount > 0) {
+        insights.push({
+            type: "success",
+            text: `🔥 You're progressing fastest in <strong>${bestCat}</strong> — ${bestCount} quest${bestCount !== 1 ? "s" : ""} completed.`
+        });
+    }
+
+    // Stale categories — all goals have no task activity in 7+ days
+    Object.entries(byCategory).forEach(([cat, data]) => {
+        const allTasks = data.tasks;
+        if (allTasks.length === 0) return;
+        // Use the goal's created_at as a proxy since tasks don't have updated_at exposed
+        const anyRecent = data.goals.some(g => daysSince(g.created_at) < 7);
+        const completionRate = allTasks.filter(t => t.is_completed).length / allTasks.length;
+        if (!anyRecent && completionRate < 0.5) {
+            insights.push({
+                type: "warning",
+                text: `⚠️ <strong>${cat}</strong> goals haven't had new activity recently. Don't let this one stall.`
+            });
+        }
+    });
+
+    // Streaking category — all tasks in a category done
+    Object.entries(byCategory).forEach(([cat, data]) => {
+        const allTasks = data.tasks;
+        if (allTasks.length < 2) return;
+        const allDone = allTasks.every(t => t.is_completed);
+        if (allDone) {
+            insights.push({
+                type: "complete",
+                text: `🏆 All <strong>${cat}</strong> quests complete! Time to add the next challenge.`
+            });
+        }
+    });
+
+    return insights;
+}
+
+async function loadGoals() {
+    const res = await fetch("/goals");
+    const goals = await res.json();
+
+    const healthDiv = document.getElementById("goal-health");
+
+    if (goals.length === 0) {
+        goalsDiv.innerHTML = `<p class="empty-state">No quests yet. Add your first goal above!</p>`;
+        if (healthDiv) healthDiv.innerHTML = "";
+        return;
+    }
+
+    // Fetch tasks for all goals in parallel
+    const tasksPerGoal = await Promise.all(
+        goals.map(goal => fetch(`/goals/${goal.id}/tasks`).then(r => r.json()))
+    );
+
+    // ── Category Health Panel ──────────────────────────────────────────────
+    if (healthDiv) {
+        const insights = buildGoalHealthInsights(goals, tasksPerGoal);
+        healthDiv.innerHTML = insights.length === 0 ? "" : `
+            <div class="health-insights">
+                ${insights.map(i => `<div class="health-insight ${i.type}">${i.text}</div>`).join("")}
+            </div>`;
+    }
+
+    // ── Goal Cards ─────────────────────────────────────────────────────────
+    goalsDiv.innerHTML = goals.map((goal, i) => {
+        const tasks      = tasksPerGoal[i];
+        const completed  = tasks.filter(t => t.is_completed).length;
+        const total      = tasks.length;
+        const progress   = total > 0 ? Math.round(completed / total * 100) : 0;
+        const xp         = calcXP(completed);
+        const level      = calcLevel(xp);
+        const xpInLevel  = xpIntoLevel(xp);
+        const xpPct      = Math.min(100, Math.round(xpInLevel / XP_PER_LEVEL * 100));
+        const color      = CATEGORY_COLORS[goal.category] || "var(--accent)";
+        const icon       = CATEGORY_ICONS[goal.category]  || "🎯";
+        const age        = daysSince(goal.created_at);
+        const stale      = age > 7 && progress < 100;
+
+        // Quest list
+        const questHTML = tasks.length === 0
+            ? `<p class="quest-empty">No quests yet — add one below.</p>`
+            : tasks.map(task => `
+                <div class="quest-item ${task.is_completed ? "done" : ""}">
+                    <button class="quest-check" onclick="toggleTask(${task.id})" aria-label="toggle">
+                        ${task.is_completed ? "✓" : ""}
+                    </button>
+                    <span class="quest-title">${task.title}</span>
+                    <span class="quest-xp">+${XP_PER_TASK} XP</span>
+                    <button class="quest-delete" onclick="deleteTask(${task.id})" title="Remove quest">×</button>
+                </div>`).join("");
+
+        return `
+<div class="goal-card rpg-card" style="--goal-color:${color}">
+
+    <!-- Header: icon + title + delete -->
+    <div class="rpg-header">
+        <span class="rpg-icon">${icon}</span>
+        <div class="rpg-meta">
+            <div class="rpg-title">${goal.title}</div>
+            <div class="rpg-subtitle">
+                <span class="goal-category" style="background:${color}18;color:${color}">${goal.category}</span>
+                <span class="rpg-level-pill" style="background:${color}18;color:${color}">Lv.${level}</span>
+                ${stale ? `<span class="stale-pill">stale</span>` : ""}
+            </div>
+        </div>
+        <button class="goal-delete-btn" onclick="deleteGoal(${goal.id})" title="Delete goal">×</button>
+    </div>
+
+    <!-- XP bar — single line, no redundant numbers -->
+    <div class="xp-track">
+        <div class="xp-fill" style="width:${xpPct}%;background:${color}"></div>
+    </div>
+    <div class="xp-label-row">
+        <span style="color:${color};font-weight:600">${xp} XP</span>
+        <span>${completed}/${total} quests · ${progress}%</span>
+    </div>
+
+    <!-- Quest list -->
+    <div class="quest-list">${questHTML}</div>
+
+    <!-- Add quest -->
+    <div class="add-quest-row">
+        <input
+            type="text"
+            id="task-input-${goal.id}"
+            placeholder="Add a quest..."
+            onkeydown="if(event.key==='Enter'){event.preventDefault();addTask(${goal.id});}"
+        >
+        <button onclick="addTask(${goal.id})">+</button>
+    </div>
+</div>`;
+    }).join("");
+}
+
+async function addTask(goalId) {
+    const input = document.getElementById(`task-input-${goalId}`);
+    const title = input.value.trim();
+    if (!title) return;
+
+    await fetch(`/goals/${goalId}/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+    });
+
+    input.value = "";
+    loadGoals();
+}
+
+async function toggleTask(taskId) {
+    await fetch(`/tasks/${taskId}`, { method: "PUT" });
+    loadGoals();
+}
+
+async function deleteTask(taskId) {
+    await fetch(`/tasks/${taskId}`, { method: "DELETE" });
+    loadGoals();
+}
+
+async function deleteGoal(goalId) {
+    if (!confirm("Delete this goal and all its quests?")) return;
+    await fetch(`/goals/${goalId}`, { method: "DELETE" });
+    loadGoals();
+}
+
+// ── Daily Quest Generator ──────────────────────────────────────────────────
+async function generateDailyQuest() {
+    const bodyEl  = document.getElementById("dq-body");
+    const footEl  = document.getElementById("dq-footer");
+    bodyEl.textContent  = "Summoning your quest…";
+    footEl.textContent  = "";
+
+    // Gather context: active goals + unfinished tasks
+    const goals = await fetch("/goals").then(r => r.json());
+    if (goals.length === 0) {
+        bodyEl.textContent = "Add a goal first, then I'll generate your daily quest.";
+        return;
+    }
+
+    const tasksPerGoal = await Promise.all(
+        goals.map(g => fetch(`/goals/${g.id}/tasks`).then(r => r.json()))
+    );
+
+    // Build a compact context string for the AI
+    const questContext = goals.map((g, i) => {
+        const pending = tasksPerGoal[i].filter(t => !t.is_completed).map(t => t.title);
+        return pending.length > 0
+            ? `Goal "${g.title}" [${g.category}] — pending: ${pending.slice(0, 3).join(", ")}`
+            : null;
+    }).filter(Boolean).join("\n");
+
+    if (!questContext) {
+        bodyEl.innerHTML = "🏆 All quests complete! Add new ones to keep going.";
+        return;
+    }
+
+    try {
+        const res = await fetch("/daily-quest", { method: "POST" });
+        if (!res.ok) throw new Error("server error");
+        const quest = await res.json();
+
+        if (!quest.task) {
+            bodyEl.innerHTML = "🏆 All quests complete! Add new ones to keep going.";
+            return;
+        }
+
+        const icon = CATEGORY_ICONS[quest.category] || "⚔️";
+        const diff = { Easy: "🟢", Medium: "🟡", Hard: "🔴" }[quest.difficulty] || "🟡";
+
+        bodyEl.innerHTML = `
+            <div class="dq-task">${quest.task}</div>
+            <div class="dq-goal">${icon} ${quest.goal}</div>
+            <div class="dq-why">${quest.why}</div>`;
+        footEl.innerHTML = `
+            <span>${diff} ${quest.difficulty}</span>
+            <span>⏱ ~${quest.time} min</span>
+            <span class="dq-reward">+${quest.xp} XP</span>`;
+    } catch {
+        bodyEl.textContent = "Couldn't generate a quest right now. Try again!";
+    }
+}
+
+goalForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const title    = document.getElementById("goal-title").value;
+    const category = document.getElementById("goal-category").value;
+
+    await fetch("/goals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, category }),
+    });
+
+    goalForm.reset();
+    loadGoals();
+});
+
+loadGoals();
+generateDailyQuest();
 loadInsights();
 loadAIInsight();
 loadCharts();

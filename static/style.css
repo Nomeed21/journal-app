@@ -189,6 +189,7 @@ textarea {
 
 input[type="range"] {
     -webkit-appearance: none;
+    appearance: none;
     width: 100%;
     height: 4px;
     border-radius: 3px;
@@ -513,4 +514,511 @@ textarea:focus-visible {
 #monthly-review {
     line-height: 1.8;
     white-space: normal;
+}
+
+.goals-section {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 1.75rem;
+    background: var(--paper-soft);
+    position: relative;
+    margin-bottom: 2rem;
+}
+
+.goals-section::after {
+    content: "Goals";
+    position: absolute;
+    top: -0.7rem;
+    right: 1.5rem;
+
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+
+    color: var(--accent-deep);
+    background: var(--paper);
+
+    padding: 0.25rem 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+}
+
+#goal-form {
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    margin-bottom: 1.5rem;
+}
+
+#goals {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.goal-card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+
+    border-radius: 12px;
+
+    padding: 1rem;
+
+    transition:
+        transform .15s ease,
+        box-shadow .15s ease;
+}
+
+.goal-card:hover {
+    transform: translateY(-2px);
+
+    box-shadow:
+        0 4px 14px var(--shadow);
+}
+
+.goal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+
+    margin-bottom: .75rem;
+}
+
+.goal-category {
+    background: var(--accent-soft);
+    color: var(--accent-deep);
+
+    padding: .25rem .7rem;
+
+    border-radius: 999px;
+
+    font-size: .75rem;
+    font-weight: 600;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 10px;
+
+    background: var(--line);
+
+    border-radius: 999px;
+
+    overflow: hidden;
+
+    margin-top: .75rem;
+}
+
+.progress-fill {
+    height: 100%;
+
+    background: var(--accent);
+
+    transition: width .3s ease;
+}
+
+.goal-stats {
+    margin-top: .5rem;
+
+    display: flex;
+    justify-content: space-between;
+
+    font-size: .85rem;
+
+    color: var(--ink-soft);
+}
+
+
+/* ============================================
+   RPG / Quest System — Upgrades #1-6
+   ============================================ */
+
+/* Category select dropdown */
+#goal-category {
+    width: 100%;
+    background: var(--paper-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.7rem 0.9rem;
+    font-family: var(--font-body);
+    font-size: 0.98rem;
+    color: var(--ink);
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238a6e74' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.9rem center;
+}
+
+#goal-category:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ── Daily Quest Banner ───────────────────── */
+.daily-quest-banner {
+    background: linear-gradient(135deg, #2d1f3d 0%, #1a2a4a 100%);
+    border-radius: 14px;
+    padding: 1.1rem 1.25rem;
+    margin-bottom: 1.5rem;
+    color: #e8d5f5;
+    position: relative;
+    overflow: hidden;
+}
+
+.daily-quest-banner::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at top right, rgba(180,120,255,0.15) 0%, transparent 65%);
+    pointer-events: none;
+}
+
+.dq-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.65rem;
+}
+
+.dq-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: #c9a8f0;
+}
+
+.dq-refresh {
+    background: rgba(255,255,255,0.08);
+    color: #c9a8f0;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    padding: 0.2rem 0.5rem;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.15s ease;
+    box-shadow: none;
+}
+
+.dq-refresh:hover {
+    background: rgba(255,255,255,0.16);
+    transform: rotate(45deg);
+}
+
+.dq-task {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #f0e6ff;
+    margin-bottom: 0.3rem;
+}
+
+.dq-goal {
+    font-size: 0.82rem;
+    color: #b8a0d0;
+    margin-bottom: 0.4rem;
+}
+
+.dq-why {
+    font-size: 0.84rem;
+    color: #c8b8e0;
+    line-height: 1.5;
+    font-style: italic;
+}
+
+.dq-body { margin-bottom: 0.75rem; }
+
+.dq-footer {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.78rem;
+    color: #a090c0;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding-top: 0.6rem;
+}
+
+.dq-reward {
+    margin-left: auto;
+    color: #f0c060;
+    font-weight: 700;
+}
+
+/* ── Goal Health Insights ─────────────────── */
+.health-insights {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+.health-insight {
+    padding: 0.6rem 0.9rem;
+    border-radius: 10px;
+    font-size: 0.87rem;
+    line-height: 1.4;
+}
+
+.health-insight.success  { background: rgba(76,175,80,0.08);  border-left: 3px solid #4caf50; }
+.health-insight.warning  { background: rgba(255,152,0,0.08);  border-left: 3px solid #ff9800; }
+.health-insight.complete { background: rgba(156,112,196,0.1); border-left: 3px solid #9c70c4; }
+
+/* ── RPG Goal Cards ───────────────────────── */
+.rpg-card {
+    border-left: 3px solid var(--goal-color, var(--accent));
+    padding: 1rem 1.1rem;
+    position: relative;
+}
+
+/* Header row: emoji + title/subtitle + delete */
+.rpg-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.65rem;
+    margin-bottom: 0.75rem;
+}
+
+.rpg-icon {
+    font-size: 1.4rem;
+    line-height: 1.2;
+    flex-shrink: 0;
+}
+
+.rpg-meta {
+    flex: 1;
+    min-width: 0;
+}
+
+.rpg-title {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 0.3rem;
+}
+
+/* Pills row: category + level + stale */
+.rpg-subtitle {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.goal-category,
+.rpg-level-pill {
+    display: inline-block;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.stale-pill {
+    display: inline-block;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    background: rgba(208,112,64,0.12);
+    color: #c05820;
+}
+
+/* Delete button — top-right, only on hover */
+.goal-delete-btn {
+    flex-shrink: 0;
+    background: transparent;
+    border: none;
+    color: var(--ink-faint);
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0.1rem 0.3rem;
+    cursor: pointer;
+    box-shadow: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.rpg-card:hover .goal-delete-btn { opacity: 1; }
+.goal-delete-btn:hover { color: #e74c3c; transform: none; box-shadow: none; }
+
+/* XP track */
+.xp-track {
+    width: 100%;
+    height: 5px;
+    background: var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+    margin-bottom: 0.35rem;
+}
+
+.xp-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.4s ease;
+}
+
+.xp-label-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    margin-bottom: 0.75rem;
+}
+
+/* Quest list */
+.quest-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.quest-item {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.35rem 0.4rem;
+    border-radius: 7px;
+    transition: background 0.12s ease;
+}
+
+.quest-item:hover { background: var(--accent-soft); }
+
+.quest-item.done .quest-title {
+    text-decoration: line-through;
+    color: var(--ink-faint);
+}
+
+.quest-item.done .quest-xp { opacity: 0.3; }
+
+.quest-check {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 2px solid var(--goal-color, var(--accent));
+    background: transparent;
+    color: var(--goal-color, var(--accent));
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    box-shadow: none;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.quest-item.done .quest-check {
+    background: var(--goal-color, var(--accent));
+    color: #fff;
+}
+
+.quest-check:hover { transform: scale(1.1); box-shadow: none; }
+
+.quest-title {
+    flex: 1;
+    font-size: 0.87rem;
+    color: var(--ink);
+    line-height: 1.3;
+}
+
+.quest-xp {
+    font-size: 0.71rem;
+    font-weight: 600;
+    color: #c09020;
+    flex-shrink: 0;
+}
+
+.quest-empty {
+    font-size: 0.82rem;
+    color: var(--ink-faint);
+    font-style: italic;
+    padding: 0.2rem 0;
+}
+
+/* Add quest row */
+.add-quest-row {
+    display: flex;
+    gap: 0.4rem;
+}
+
+.add-quest-row input {
+    flex: 1;
+    margin-bottom: 0;
+    font-size: 0.84rem;
+    padding: 0.4rem 0.65rem;
+}
+
+.add-quest-row button {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+.empty-state {
+    color: var(--ink-soft);
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 1rem 0;
+}
+
+/* ── Quest item delete (hover-only) ──────── */
+/* Delete buttons */
+.quest-delete {
+    background: transparent;
+    border: none;
+    color: var(--ink-faint);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0 0.2rem;
+    cursor: pointer;
+    box-shadow: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.quest-item:hover .quest-delete {
+    opacity: 1;
+}
+
+.quest-delete:hover {
+    color: #e74c3c;
+    transform: none;
+    box-shadow: none;
+}
+
+.goal-delete-btn {
+    background: transparent;
+    border: none;
+    color: var(--ink-faint);
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 0.25rem;
+    cursor: pointer;
+    box-shadow: none;
+    opacity: 0;
+    transition: opacity 0.15s ease, color 0.15s ease;
+    margin-left: 0.4rem;
+    align-self: flex-start;
+}
+
+.rpg-card:hover .goal-delete-btn {
+    opacity: 1;
+}
+
+.goal-delete-btn:hover {
+    color: #e74c3c;
+    transform: none;
+    box-shadow: none;
 }
