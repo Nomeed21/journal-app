@@ -715,3 +715,90 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .add-quest-row button { padding: 0.4rem 0.8rem; font-size: 0.9rem; flex-shrink: 0; }
 
 .empty-state { color: var(--ink-soft); font-size: 0.9rem; text-align: center; padding: 1rem 0; }
+
+/* ============================================
+   Action Engine Banner
+   ============================================ */
+
+.action-banner {
+    background: linear-gradient(135deg, #1a3a2a 0%, #0f2a1a 100%);
+    border-radius: 14px;
+    padding: 1.1rem 1.25rem;
+    margin-bottom: 1.5rem;
+    color: #d0f0e0;
+    position: relative;
+    overflow: hidden;
+    animation: ae-slide-in 0.3s ease;
+}
+
+@keyframes ae-slide-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.action-banner::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at top right, rgba(80,220,140,0.12) 0%, transparent 65%);
+    pointer-events: none;
+}
+
+.ae-trigger-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: #80d0a0;
+    margin-bottom: 0.5rem;
+}
+
+.ae-action-title {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #e8fff4;
+    margin-bottom: 0.35rem;
+}
+
+.ae-reason {
+    font-size: 0.84rem;
+    color: #a0c8b0;
+    line-height: 1.5;
+    font-style: italic;
+    margin-bottom: 0.75rem;
+}
+
+.ae-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    font-size: 0.78rem;
+    color: #70a888;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    padding-top: 0.6rem;
+}
+
+.ae-quest-added {
+    color: #60d090;
+    font-weight: 600;
+}
+
+.ae-dismiss {
+    margin-left: auto;
+    background: rgba(255,255,255,0.07);
+    color: #80c8a0;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    padding: 0.2rem 0.65rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: none;
+}
+
+.ae-dismiss:hover {
+    background: rgba(255,255,255,0.13);
+    transform: none;
+    box-shadow: none;
+}

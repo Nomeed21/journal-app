@@ -57,6 +57,75 @@ const goalForm =
 const goalsDiv =
     document.getElementById("goals");
 
+
+// ---------------------------------------------------------------------------
+// Action Engine
+// ---------------------------------------------------------------------------
+
+async function runActionEngine(mood, goalProgress, entryContent) {
+    try {
+        const res = await fetch("/action-engine", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                mood,
+                goal_progress: goalProgress,
+                content: entryContent,
+            }),
+        });
+
+        const data = await res.json();
+        if (!data.triggered || !data.action) return;
+
+        showActionBanner(data);
+    } catch {
+        // Silent fail — action engine is additive, never blocks the user
+    }
+}
+
+function showActionBanner(data) {
+    // Remove any existing banner
+    document.getElementById("action-banner")?.remove();
+
+    const action = data.action;
+    const triggerLabels = {
+        mood_drop:     "Your mood dropped",
+        stale_goal:    "A goal has been inactive",
+        streak_risk:   "Streak at risk",
+        zero_progress: "A goal has 0% progress",
+    };
+    const triggerLabel = triggerLabels[action.trigger_type] || "Action needed";
+    const questNote = data.quest_created
+        ? `<span class="ae-quest-added">✓ Added to your quests</span>`
+        : "";
+
+    const CATEGORY_ICONS = {
+        "Study": "📚", "Fitness": "💪", "Career": "💼",
+        "Relationship": "❤️", "Finance": "💰",
+        "Creativity": "🎨", "Personal Growth": "🌱", "Wellness": "🌿",
+    };
+    const icon = CATEGORY_ICONS[action.category] || "⚡";
+
+    const banner = document.createElement("div");
+    banner.id = "action-banner";
+    banner.className = "action-banner";
+    banner.innerHTML = `
+        <div class="ae-trigger-label">⚡ ${triggerLabel}</div>
+        <div class="ae-action-title">${icon} ${action.action}</div>
+        <div class="ae-reason">${action.reason}</div>
+        <div class="ae-meta">
+            <span>⏱ ${action.duration_minutes} min</span>
+            <span>+${action.xp} XP</span>
+            ${questNote}
+            <button class="ae-dismiss" onclick="document.getElementById('action-banner').remove()">Dismiss</button>
+        </div>
+    `;
+
+    // Insert after the AI coach card on the journal page
+    const coach = document.querySelector(".ai-coach-card");
+    if (coach) coach.after(banner);
+}
+
 async function loadEntries(filters = {}) {
     // Build query string from filter parameters
     const params = new URLSearchParams();
@@ -155,16 +224,15 @@ entryForm.addEventListener("submit", async (e) => {
         tags: tags,
     };
 
+    const isEditing = !!editingId;
     let res;
     if (editingId) {
-        // Update existing entry
         res = await fetch(`/entries/${editingId}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(data),
         });
     } else {
-        // Create new entry
         res = await fetch("/entries", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -180,6 +248,11 @@ entryForm.addEventListener("submit", async (e) => {
         moodValue.textContent = "3";
         goalValue.textContent = "50";
         loadEntries();
+
+        // Run the action engine only on new saves, not edits
+        if (!isEditing) {
+            runActionEngine(data.mood, data.goal_progress, data.content);
+        }
     }
 });
 

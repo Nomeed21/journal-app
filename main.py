@@ -66,6 +66,12 @@ class TaskCreate(BaseModel):
     title: str
 
 
+class ActionEngineRequest(BaseModel):
+    mood: int
+    goal_progress: int
+    content: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -931,6 +937,206 @@ Reply in this exact JSON format (no markdown, no extra text):
         raise HTTPException(status_code=500, detail="Quest generation failed — invalid JSON from model.")
 
     return quest
+
+
+# ---------------------------------------------------------------------------
+# Action Engine
+#
+# Philosophy: don't just report patterns — prescribe actions.
+# Called automatically after every journal save. Evaluates four triggers:
+#   1. Mood drop   — mood fell 2+ pts vs the prior entry
+#   2. Stale goal  — a goal category untouched for 5+ days
+#   3. Streak risk — a habit logged yesterday but not yet today
+#   4. Zero-progress goal — a goal with tasks but 0% done after 7+ days
+#
+# Only fires the LLM when at least one trigger is true. Returns one
+# prescribed action (not a menu of options) and optionally auto-creates
+# it as a quest under the relevant goal.
+# ---------------------------------------------------------------------------
+
+def detect_triggers(mood: int, content: str) -> dict:
+    """
+    Evaluate all four trigger conditions. Returns a dict with:
+      - triggered: bool
+      - reasons: list of plain-English trigger descriptions
+      - context: structured data for the prompt
+    """
+    reasons = []
+    context_parts = []
+
+    # ── 1. Mood drop ──────────────────────────────────────────────────────
+    all_entries = fetch_all_entries_light()
+    if len(all_entries) >= 2:
+        prev_mood = all_entries[-2]["mood"]   # second-to-last (just before this save)
+        drop = prev_mood - mood
+        if drop >= 2:
+            reasons.append(f"mood dropped {drop} points (from {prev_mood} to {mood})")
+            context_parts.append(f"Mood drop: {prev_mood} → {mood}/5")
+
+    # ── 2. Stale goal category ────────────────────────────────────────────
+    goal_data = build_goal_summary()
+    cat_health = build_category_health(goal_data)
+    stale_cats = [c for c in cat_health if c["stale"]]
+    if stale_cats:
+        worst = stale_cats[0]
+        reasons.append(
+            f"{worst['category']} goals inactive for {worst['oldest_goal_days']}+ days"
+        )
+        context_parts.append(
+            f"Stale category: {worst['category']} ({worst['completion_rate']}% done, "
+            f"{worst['oldest_goal_days']} days since created)"
+        )
+
+    # ── 3. Streak at risk ────────────────────────────────────────────────
+    habit_result = (
+        supabase.table("habits")
+        .select("name, completed_at")
+        .order("completed_at", desc=True)
+        .execute()
+    )
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    habit_dates: dict[str, list[str]] = defaultdict(list)
+    for row in habit_result.data:
+        habit_dates[row["name"]].append(row["completed_at"])
+
+    at_risk = []
+    for name, dates in habit_dates.items():
+        unique = sorted(set(dates), reverse=True)
+        logged_yesterday = unique and unique[0] == yesterday
+        logged_today = today in unique
+        if logged_yesterday and not logged_today:
+            at_risk.append(name)
+
+    if at_risk:
+        reasons.append(f"streak at risk for: {', '.join(at_risk)}")
+        context_parts.append(f"Habits not yet done today (streak at risk): {', '.join(at_risk)}")
+
+    # ── 4. Zero-progress goals ────────────────────────────────────────────
+    zero_goals = [
+        g for g in goal_data
+        if g["total_tasks"] > 0
+        and g["progress"] == 0
+        and g["days_since_created"] >= 7
+    ]
+    if zero_goals:
+        names = ", ".join(g["title"] for g in zero_goals[:2])
+        reasons.append(f"goals with 0% progress after 7+ days: {names}")
+        context_parts.append(f"Zero-progress goals (7+ days old): {names}")
+
+    return {
+        "triggered": len(reasons) > 0,
+        "reasons": reasons,
+        "context": "\n".join(context_parts),
+        "goal_data": goal_data,
+        "stale_cats": stale_cats,
+        "at_risk_habits": at_risk,
+        "zero_goals": zero_goals,
+    }
+
+
+@app.post("/action-engine")
+def action_engine(req: ActionEngineRequest):
+    """
+    Evaluate triggers and, if any fire, use Groq to prescribe one concrete
+    action. Optionally auto-creates the action as a quest in the most relevant
+    goal so it appears in the user's quest list immediately.
+    """
+    import json as _json
+
+    triggers = detect_triggers(req.mood, req.content)
+
+    if not triggers["triggered"]:
+        return {"triggered": False, "action": None}
+
+    # Build goal context for the prompt
+    goal_data = triggers["goal_data"]
+    pending_quests = []
+    for g in goal_data:
+        pending = [t["title"] for t in g["tasks"] if not t["is_completed"]]
+        if pending:
+            pending_quests.append(
+                f'Goal "{g["title"]}" [{g["category"]}] — pending: {", ".join(pending[:2])}'
+            )
+
+    pending_block = "\n".join(pending_quests) if pending_quests else "No active quests yet."
+
+    prompt = f"""You are a behavior coach inside a personal journal app.
+
+The user just saved a journal entry. These problems were detected:
+{triggers["context"]}
+
+Entry content: "{req.content[:300]}"
+
+Active goals and pending quests:
+{pending_block}
+
+Your job: prescribe ONE specific action that directly addresses the most urgent problem.
+
+Rules:
+- If mood dropped, prescribe a recovery action (short walk, breathing, one small win).
+- If a goal category is stale, prescribe the smallest concrete next step inside that category.
+- If a habit streak is at risk, prescribe doing that habit right now.
+- If a goal has 0% progress, prescribe the very first task to break inertia.
+- The action should take 5-30 minutes maximum.
+- Be specific. "Go outside for 15 minutes" not "take a break".
+- If there is an existing pending quest that fits, use its exact title.
+- Otherwise invent a new specific micro-task.
+
+Reply ONLY in this JSON format (no markdown, no extra text):
+{{
+  "action": "specific task title",
+  "reason": "one sentence — which trigger this addresses and why this action",
+  "trigger_type": "mood_drop|stale_goal|streak_risk|zero_progress",
+  "category": "the relevant goal category or Wellness",
+  "xp": a number 20-80,
+  "duration_minutes": a number 5-30,
+  "is_existing_quest": true or false,
+  "goal_title": "title of the goal to add this to, or null if no match"
+}}"""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6,
+        max_tokens=300,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    try:
+        action = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return {"triggered": True, "action": None, "error": "parse_failed"}
+
+    # Auto-create the quest if it's a new task and a matching goal exists
+    created_quest = None
+    if not action.get("is_existing_quest") and action.get("goal_title"):
+        # Find the goal by title
+        match = next(
+            (g for g in goal_data if g["title"].lower() == action["goal_title"].lower()),
+            None,
+        )
+        if match:
+            result = (
+                supabase.table("goal_tasks")
+                .insert({
+                    "goal_id": match["id"],
+                    "title": action["action"],
+                    "is_completed": False,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                .execute()
+            )
+            if result.data:
+                created_quest = result.data[0]
+
+    return {
+        "triggered": True,
+        "reasons": triggers["reasons"],
+        "action": action,
+        "quest_created": created_quest is not None,
+        "quest": created_quest,
+    }
 
 # ---------------------------------------------------------------------------
 # Chat
