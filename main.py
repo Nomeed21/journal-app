@@ -41,6 +41,9 @@ class EntryCreate(BaseModel):
     mood: int
     goal_progress: int
     tags: list[str] = []
+    entry_type: str = "free"   # "morning" | "night" | "free"
+    energy: int = 3            # 1-5
+    focus: int = 3             # 1-5
 
 
 class ChatTurn(BaseModel):
@@ -70,6 +73,9 @@ class ActionEngineRequest(BaseModel):
     mood: int
     goal_progress: int
     content: str
+    energy: int = 3
+    focus: int = 3
+    entry_type: str = "free"
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +138,8 @@ def create_entry(entry: EntryCreate):
     combined_text = (
         f"Title: {entry.title}. "
         f"Content: {entry.content}. "
-        f"Mood: {entry.mood}/5. "
-        f"Goal progress: {entry.goal_progress}%."
+        f"Mood: {entry.mood}/5. Energy: {entry.energy}/5. "
+        f"Focus: {entry.focus}/5. Goal progress: {entry.goal_progress}%."
     )
     embedding = generate_embedding(combined_text)
 
@@ -142,6 +148,9 @@ def create_entry(entry: EntryCreate):
         "content": entry.content,
         "mood": entry.mood,
         "goal_progress": entry.goal_progress,
+        "energy": entry.energy,
+        "focus": entry.focus,
+        "entry_type": entry.entry_type,
         "embedding": embedding,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tags": entry.tags,
@@ -159,7 +168,7 @@ def get_entries(
     end_date: Optional[str] = None,
 ):
     query = supabase.table("journal_entries").select(
-        "id, title, content, mood, goal_progress, tags, created_at"
+        "id, title, content, mood, goal_progress, energy, focus, entry_type, tags, created_at"
     )
 
     if tag:
@@ -180,7 +189,7 @@ def get_trends(days: int = 30):
     start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     result = (
         supabase.table("journal_entries")
-        .select("mood, goal_progress, created_at")
+        .select("mood, goal_progress, energy, focus, created_at")
         .gte("created_at", start)
         .order("created_at")
         .execute()
@@ -190,17 +199,21 @@ def get_trends(days: int = 30):
     for entry in result.data:
         date = entry["created_at"][:10]
         if date not in daily:
-            daily[date] = {"moods": [], "goals": []}
+            daily[date] = {"moods": [], "goals": [], "energies": [], "focuses": []}
         daily[date]["moods"].append(entry["mood"])
         daily[date]["goals"].append(entry["goal_progress"])
+        daily[date]["energies"].append(entry.get("energy") or 3)
+        daily[date]["focuses"].append(entry.get("focus") or 3)
 
     trends = []
     for date, values in sorted(daily.items()):
         trends.append(
             {
                 "date": date,
-                "avg_mood": round(sum(values["moods"]) / len(values["moods"]), 1),
-                "avg_goal": round(sum(values["goals"]) / len(values["goals"]), 1),
+                "avg_mood":   round(sum(values["moods"])    / len(values["moods"]), 1),
+                "avg_goal":   round(sum(values["goals"])    / len(values["goals"]), 1),
+                "avg_energy": round(sum(values["energies"]) / len(values["energies"]), 1),
+                "avg_focus":  round(sum(values["focuses"])  / len(values["focuses"]), 1),
             }
         )
 
@@ -258,8 +271,8 @@ def update_entry(entry_id: int, entry: EntryCreate):
     combined_text = (
         f"Title: {entry.title}. "
         f"Content: {entry.content}. "
-        f"Mood: {entry.mood}/5. "
-        f"Goal progress: {entry.goal_progress}%."
+        f"Mood: {entry.mood}/5. Energy: {entry.energy}/5. "
+        f"Focus: {entry.focus}/5. Goal progress: {entry.goal_progress}%."
     )
     embedding = generate_embedding(combined_text)
 
@@ -268,6 +281,9 @@ def update_entry(entry_id: int, entry: EntryCreate):
         "content": entry.content,
         "mood": entry.mood,
         "goal_progress": entry.goal_progress,
+        "energy": entry.energy,
+        "focus": entry.focus,
+        "entry_type": entry.entry_type,
         "tags": entry.tags,
         "embedding": embedding,
     }
@@ -352,10 +368,10 @@ MAX_WEEKLY_SUMMARY_ROWS = 26  # ~6 months of weekly rows before we'd want to
 
 
 def fetch_all_entries_light():
-    """Fetch mood/goal/date for every entry (cheap columns only) for trend math."""
+    """Fetch mood/goal/energy/focus/date for every entry for trend math."""
     result = (
         supabase.table("journal_entries")
-        .select("id, mood, goal_progress, created_at")
+        .select("id, mood, goal_progress, energy, focus, entry_type, created_at")
         .order("created_at")
         .execute()
     )
@@ -378,8 +394,12 @@ def build_recent_text_block(today_iso: str) -> str:
     parts = []
     for e in result.data:
         tags = f" [tags: {', '.join(e['tags'])}]" if e.get("tags") else ""
+        etype = e.get("entry_type", "free")
+        energy = e.get("energy") or 3
+        focus  = e.get("focus")  or 3
         parts.append(
-            f"[{e['created_at'][:10]}] (Mood: {e['mood']}/5, Goal: {e['goal_progress']}%){tags} "
+            f"[{e['created_at'][:10]}] [{etype}] "
+            f"(Mood: {e['mood']}/5, Energy: {energy}/5, Focus: {focus}/5, Goal: {e['goal_progress']}%){tags} "
             f"{e['title']}: {e['content']}"
         )
     return "\n\n".join(parts)

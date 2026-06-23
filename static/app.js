@@ -31,39 +31,123 @@ document.querySelectorAll(".nav-item").forEach(item => {
 // DOM refs
 // ---------------------------------------------------------------------------
 
-const entryForm = document.getElementById("entry-form");
-const chatForm = document.getElementById("chat-form");
-const habitForm = document.getElementById("habit-form");
-const entriesDiv = document.getElementById("entries");
+const entryForm   = document.getElementById("entry-form");
+const chatForm    = document.getElementById("chat-form");
+const habitForm   = document.getElementById("habit-form");
+const entriesDiv  = document.getElementById("entries");
 const chatMessages = document.getElementById("chat-messages");
-const streaksDiv = document.getElementById("streaks");
-const moodSlider = document.getElementById("mood");
-const goalSlider = document.getElementById("goal-progress");
-const moodValue = document.getElementById("mood-value");
-const goalValue = document.getElementById("goal-value");
+const streaksDiv  = document.getElementById("streaks");
+const goalForm    = document.getElementById("goal-form");
+const goalsDiv    = document.getElementById("goals");
 
 let conversationHistory = [];
+let editingId = null;
 
-moodSlider.addEventListener("input", () => {
-    moodValue.textContent = moodSlider.value;
+// Wire all range sliders to their display spans automatically
+document.querySelectorAll("input[type=range]").forEach(slider => {
+    const valEl = document.getElementById(slider.id + "-val")
+               || document.getElementById(slider.id.replace("mood","mood-value")
+                    .replace("goal-progress","goal-value"));
+    if (valEl) slider.addEventListener("input", () => valEl.textContent = slider.value);
 });
 
-goalSlider.addEventListener("input", () => {
-    goalValue.textContent = goalSlider.value;
+// ---------------------------------------------------------------------------
+// Entry type tabs
+// ---------------------------------------------------------------------------
+
+let currentEntryType = "morning";
+
+document.querySelectorAll(".entry-tab").forEach(tab => {
+    tab.addEventListener("click", () => {
+        currentEntryType = tab.dataset.type;
+        document.querySelectorAll(".entry-tab").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelectorAll(".entry-fields").forEach(f => f.classList.add("hidden"));
+        document.getElementById("fields-" + currentEntryType).classList.remove("hidden");
+        document.getElementById("entry-type").value = currentEntryType;
+        document.getElementById("entry-submit").textContent =
+            currentEntryType === "morning" ? "Save Morning Entry" :
+            currentEntryType === "night"   ? "Save Night Reflection" :
+                                             "Save Entry";
+    });
 });
 
-const goalForm =
-    document.getElementById("goal-form");
+// Build structured title + content from each form type
+function buildEntryPayload() {
+    const type = currentEntryType;
+    let title, content, mood, energy, focus, goal_progress = 50, tags = [];
 
-const goalsDiv =
-    document.getElementById("goals");
+    if (type === "morning") {
+        const mainGoal      = document.getElementById("morning-main-goal").value.trim();
+        const task1         = document.getElementById("morning-task-1").value.trim();
+        const task2         = document.getElementById("morning-task-2").value.trim();
+        const task3         = document.getElementById("morning-task-3").value.trim();
+        const obstacles     = document.getElementById("morning-obstacles").value.trim();
+        const counterattack = document.getElementById("morning-counterattack").value.trim();
+        mood   = parseInt(document.getElementById("m-mood").value);
+        energy = parseInt(document.getElementById("m-energy").value);
+        focus  = parseInt(document.getElementById("m-focus").value);
+
+        title = mainGoal || "Morning Planning";
+        const tasks = [task1, task2, task3].filter(Boolean).map((t,i) => `${i+1}. ${t}`).join("\n");
+        content = [
+            mainGoal     ? `Main Goal: ${mainGoal}` : "",
+            tasks        ? `Top Tasks:\n${tasks}` : "",
+            obstacles    ? `Obstacles: ${obstacles}` : "",
+            counterattack? `Counterattack: ${counterattack}` : "",
+        ].filter(Boolean).join("\n\n");
+        goal_progress = 50; // not tracked on morning entries
+
+    } else if (type === "night") {
+        const win       = document.getElementById("night-win").value.trim();
+        const learned   = document.getElementById("night-learned").value.trim();
+        const well      = document.getElementById("night-well").value.trim();
+        const poorly    = document.getElementById("night-poorly").value.trim();
+        const grateful  = document.getElementById("night-grateful").value.trim();
+        const tomorrow  = document.getElementById("night-tomorrow").value.trim();
+        mood          = parseInt(document.getElementById("n-mood").value);
+        energy        = parseInt(document.getElementById("n-energy").value);
+        focus         = parseInt(document.getElementById("n-focus").value);
+        goal_progress = parseInt(document.getElementById("n-goal").value);
+
+        title = win ? `Win: ${win.slice(0, 60)}` : "Night Reflection";
+        content = [
+            win      ? `Biggest Win: ${win}` : "",
+            learned  ? `Learned: ${learned}` : "",
+            well     ? `Went Well: ${well}` : "",
+            poorly   ? `Went Poorly: ${poorly}` : "",
+            grateful ? `Grateful For: ${grateful}` : "",
+            tomorrow ? `Tomorrow: ${tomorrow}` : "",
+        ].filter(Boolean).join("\n\n");
+
+    } else { // free
+        title         = document.getElementById("free-title").value.trim() || "Free Entry";
+        content       = document.getElementById("free-content").value.trim();
+        mood          = parseInt(document.getElementById("f-mood").value);
+        energy        = parseInt(document.getElementById("f-energy").value);
+        focus         = parseInt(document.getElementById("f-focus").value);
+        const tagsRaw = document.getElementById("free-tags").value;
+        tags          = tagsRaw ? tagsRaw.split(",").map(t => t.trim()).filter(Boolean) : [];
+        goal_progress = 50;
+    }
+
+    return { title, content, mood, energy, focus, goal_progress, tags, entry_type: type };
+}
+
+function resetEntryForm() {
+    document.querySelectorAll("#entry-form input[type=text], #entry-form textarea").forEach(el => el.value = "");
+    document.querySelectorAll("#entry-form input[type=range]").forEach(el => {
+        el.value = el.id.includes("goal") ? 50 : 3;
+        el.dispatchEvent(new Event("input"));
+    });
+}
 
 
 // ---------------------------------------------------------------------------
 // Action Engine
 // ---------------------------------------------------------------------------
 
-async function runActionEngine(mood, goalProgress, entryContent) {
+async function runActionEngine(mood, goalProgress, entryContent, energy = 3, focus = 3, entryType = "free") {
     try {
         const res = await fetch("/action-engine", {
             method: "POST",
@@ -72,6 +156,9 @@ async function runActionEngine(mood, goalProgress, entryContent) {
                 mood,
                 goal_progress: goalProgress,
                 content: entryContent,
+                energy,
+                focus,
+                entry_type: entryType,
             }),
         });
 
@@ -163,24 +250,8 @@ async function loadEntries(filters = {}) {
         .join("");
 }
 
-let editingId = null;
-
-function editEntry(id, title, content, mood, goalProgress, tags) {
-    // Pre-fill the form with existing entry data
-    editingId = id;
-    document.getElementById("title").value = title;
-    document.getElementById("content").value = content;
-    moodSlider.value = mood;
-    goalSlider.value = goalProgress;
-    moodValue.textContent = mood;
-    goalValue.textContent = goalProgress;
-    document.getElementById("tags").value = tags;
-    // Scroll to the form
-    document.querySelector(".journal-form").scrollIntoView({ behavior: "smooth" });
-}
-
 async function deleteEntry(id) {
-    if (!confirm("Are you sure you want to delete this entry?")) return;
+    if (!confirm("Delete this entry?")) return;
     const res = await fetch(`/entries/${id}`, { method: "DELETE" });
     if (res.ok) loadEntries();
 }
@@ -198,7 +269,6 @@ document.getElementById("clear-btn").addEventListener("click", () => {
     loadEntries();
 });
 
-
 async function loadStreaks() {
     const res = await fetch("/habits/streaks");
     const streaks = await res.json();
@@ -214,20 +284,12 @@ async function loadStreaks() {
 
 entryForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const tagsRaw = document.getElementById("tags").value;
-    const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean) : [];
-
-    const data = {
-        title: document.getElementById("title").value,
-        content: document.getElementById("content").value,
-        mood: parseInt(moodSlider.value),
-        goal_progress: parseInt(goalSlider.value),
-        tags: tags,
-    };
+    const data = buildEntryPayload();
+    if (!data.content) return;
 
     const isEditing = !!editingId;
     let res;
-    if (editingId) {
+    if (isEditing) {
         res = await fetch(`/entries/${editingId}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -243,16 +305,10 @@ entryForm.addEventListener("submit", async (e) => {
 
     if (res.ok) {
         editingId = null;
-        entryForm.reset();
-        moodSlider.value = 3;
-        goalSlider.value = 50;
-        moodValue.textContent = "3";
-        goalValue.textContent = "50";
+        resetEntryForm();
         loadEntries();
-
-        // Run the action engine only on new saves, not edits
         if (!isEditing) {
-            runActionEngine(data.mood, data.goal_progress, data.content);
+            runActionEngine(data.mood, data.goal_progress, data.content, data.energy, data.focus, data.entry_type);
         }
     }
 });

@@ -56,23 +56,118 @@
                 <h1>Journal</h1>
                 <p class="page-sub">Reflect on your day</p>
             </div>
+
             <div class="ai-coach-card">
                 <div class="ai-coach-label">✦ AI Coach</div>
                 <div id="ai-insight">Loading...</div>
             </div>
+
+            <!-- Entry type tabs -->
+            <div class="entry-tabs">
+                <button class="entry-tab active" data-type="morning">🌅 Morning</button>
+                <button class="entry-tab"         data-type="night">🌙 Night</button>
+                <button class="entry-tab"         data-type="free">📓 Free</button>
+            </div>
+
             <form id="entry-form" class="entry-form-card">
-                <input type="text" id="title" placeholder="Entry title..." required>
-                <textarea id="content" placeholder="Write your thoughts..." required></textarea>
-                <div class="sliders">
-                    <label>Mood: <span id="mood-value">3</span>/5
-                        <input type="range" id="mood" min="1" max="5" value="3">
-                    </label>
-                    <label>Goal Progress: <span id="goal-value">50</span>%
-                        <input type="range" id="goal-progress" min="0" max="100" value="50">
-                    </label>
+                <input type="hidden" id="entry-type" value="morning">
+
+                <!-- ── Morning Planning ─────────────────── -->
+                <div class="entry-fields" id="fields-morning">
+                    <div class="field-group">
+                        <label class="field-label">Today's Main Goal</label>
+                        <input type="text" id="morning-main-goal" placeholder="What would make today a success?">
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Top 3 Tasks</label>
+                        <input type="text" id="morning-task-1" placeholder="1.">
+                        <input type="text" id="morning-task-2" placeholder="2.">
+                        <input type="text" id="morning-task-3" placeholder="3.">
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Potential Obstacles</label>
+                        <textarea id="morning-obstacles" placeholder="What could derail you today?" rows="2"></textarea>
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Counterattack Plan</label>
+                        <textarea id="morning-counterattack" placeholder="What will you do when that happens?" rows="2"></textarea>
+                    </div>
+                    <div class="sliders">
+                        <label>Mood <span class="slider-val" id="m-mood-val">3</span>/5
+                            <input type="range" class="morning-slider" id="m-mood" min="1" max="5" value="3">
+                        </label>
+                        <label>Energy <span class="slider-val" id="m-energy-val">3</span>/5
+                            <input type="range" class="morning-slider" id="m-energy" min="1" max="5" value="3">
+                        </label>
+                        <label>Focus <span class="slider-val" id="m-focus-val">3</span>/5
+                            <input type="range" class="morning-slider" id="m-focus" min="1" max="5" value="3">
+                        </label>
+                    </div>
                 </div>
-                <input type="text" id="tags" placeholder="Tags (comma-separated)...">
-                <button type="submit">Save Entry</button>
+
+                <!-- ── Night Reflection ──────────────────── -->
+                <div class="entry-fields hidden" id="fields-night">
+                    <div class="field-group">
+                        <label class="field-label">Biggest Win Today</label>
+                        <textarea id="night-win" placeholder="What went well?" rows="2"></textarea>
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">What Did I Learn?</label>
+                        <textarea id="night-learned" placeholder="Any insight, lesson, or realisation..." rows="2"></textarea>
+                    </div>
+                    <div class="field-group two-col">
+                        <div>
+                            <label class="field-label">What Went Well?</label>
+                            <textarea id="night-well" placeholder="..." rows="2"></textarea>
+                        </div>
+                        <div>
+                            <label class="field-label">What Went Poorly?</label>
+                            <textarea id="night-poorly" placeholder="..." rows="2"></textarea>
+                        </div>
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">What Am I Grateful For?</label>
+                        <textarea id="night-grateful" placeholder="..." rows="2"></textarea>
+                    </div>
+                    <div class="field-group">
+                        <label class="field-label">Tomorrow's Priority</label>
+                        <input type="text" id="night-tomorrow" placeholder="One thing to focus on tomorrow...">
+                    </div>
+                    <div class="sliders">
+                        <label>Mood <span class="slider-val" id="n-mood-val">3</span>/5
+                            <input type="range" id="n-mood" min="1" max="5" value="3">
+                        </label>
+                        <label>Goal Progress <span class="slider-val" id="n-goal-val">50</span>%
+                            <input type="range" id="n-goal" min="0" max="100" value="50">
+                        </label>
+                        <label>Energy <span class="slider-val" id="n-energy-val">3</span>/5
+                            <input type="range" id="n-energy" min="1" max="5" value="3">
+                        </label>
+                        <label>Focus <span class="slider-val" id="n-focus-val">3</span>/5
+                            <input type="range" id="n-focus" min="1" max="5" value="3">
+                        </label>
+                    </div>
+                </div>
+
+                <!-- ── Free Journal ───────────────────────── -->
+                <div class="entry-fields hidden" id="fields-free">
+                    <input type="text" id="free-title" placeholder="Title (optional)...">
+                    <textarea id="free-content" placeholder="Write freely..." rows="8"></textarea>
+                    <div class="sliders">
+                        <label>Mood <span class="slider-val" id="f-mood-val">3</span>/5
+                            <input type="range" id="f-mood" min="1" max="5" value="3">
+                        </label>
+                        <label>Energy <span class="slider-val" id="f-energy-val">3</span>/5
+                            <input type="range" id="f-energy" min="1" max="5" value="3">
+                        </label>
+                        <label>Focus <span class="slider-val" id="f-focus-val">3</span>/5
+                            <input type="range" id="f-focus" min="1" max="5" value="3">
+                        </label>
+                    </div>
+                    <input type="text" id="free-tags" placeholder="Tags (comma-separated)...">
+                </div>
+
+                <button type="submit" id="entry-submit">Save Morning Entry</button>
             </form>
         </section>
 
