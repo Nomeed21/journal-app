@@ -45,10 +45,10 @@ let editingId = null;
 
 // Wire all range sliders to their display spans automatically
 document.querySelectorAll("input[type=range]").forEach(slider => {
-    const valEl = document.getElementById(slider.id + "-val")
-               || document.getElementById(slider.id.replace("mood","mood-value")
-                    .replace("goal-progress","goal-value"));
-    if (valEl) slider.addEventListener("input", () => valEl.textContent = slider.value);
+    try {
+        const valEl = document.getElementById(slider.id + "-val");
+        if (valEl) slider.addEventListener("input", () => valEl.textContent = slider.value);
+    } catch (_) {}
 });
 
 // ---------------------------------------------------------------------------
@@ -285,7 +285,9 @@ async function loadStreaks() {
 entryForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const data = buildEntryPayload();
-    if (!data.content) return;
+    // Morning entries may have no free-text content — use title as fallback
+    if (!data.content && !data.title) return;
+    if (!data.content) data.content = data.title;
 
     const isEditing = !!editingId;
     let res;
@@ -306,7 +308,14 @@ entryForm.addEventListener("submit", async (e) => {
     if (res.ok) {
         editingId = null;
         resetEntryForm();
-        loadEntries();
+
+        // Show brief confirmation on journal page
+        const btn = document.getElementById("entry-submit");
+        const prev = btn.textContent;
+        btn.textContent = "✓ Saved!";
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = prev; btn.disabled = false; }, 1800);
+
         if (!isEditing) {
             runActionEngine(data.mood, data.goal_progress, data.content, data.energy, data.focus, data.entry_type);
         }
@@ -339,27 +348,25 @@ chatForm.addEventListener("submit", async (e) => {
 
 
     const res = await fetch("/chat", {
-	method: "POST",
-	headers: { "Content-Type": "application/json" },
-	    body: JSON.stringify({
-	    message,
-	    history: conversationHistory
-        }),
-    });
-    const data = await res.json();
-    
-    conversationHistory.push({
-        role: "user",
-        content: message
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, history: conversationHistory }),
     });
 
-    conversationHistory.push({
-        role: "assistant",
-        content: data.response
-    });
-        chatMessages.innerHTML += `<div class="chat-msg assistant">${data.response}</div>`;
+    if (!res.ok) {
+        chatMessages.innerHTML += `<div class="chat-msg assistant">Sorry, something went wrong. Try again.</div>`;
         chatMessages.scrollTop = chatMessages.scrollHeight;
-    });
+        return;
+    }
+
+    const data = await res.json();
+
+    conversationHistory.push({ role: "user", content: message });
+    conversationHistory.push({ role: "assistant", content: data.response });
+
+    chatMessages.innerHTML += `<div class="chat-msg assistant">${data.response}</div>`;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+});
 
 async function loadCharts() {
     // Fetch trends data for the last 30 days
@@ -445,11 +452,15 @@ async function loadInsights() {
 }
 
 async function loadAIInsight() {
-    const res = await fetch("/ai-insight");
-    const data = await res.json();
-
-    document.getElementById("ai-insight").innerHTML =
-        data.insight;
+    const el = document.getElementById("ai-insight");
+    if (!el) return;
+    try {
+        const res = await fetch("/ai-insight");
+        const data = await res.json();
+        el.innerHTML = data.insight;
+    } catch {
+        el.innerHTML = "Could not load insight.";
+    }
 }
 
 document
