@@ -105,19 +105,88 @@ def calc_streak(unique_dates_desc: list[str], today: str) -> int:
     return streak
 
 
-def linear_slope(values: list[float]) -> float:
-    """Simple least-squares slope of values against their index (0,1,2...).
-    Positive = trending up, negative = trending down, ~0 = flat."""
-    n = len(values)
+def linear_slope(values: list) -> float:
+    clean = [float(v) for v in values if v is not None]
+
+    n = len(clean)
     if n < 2:
         return 0.0
+
     x_mean = (n - 1) / 2
-    y_mean = sum(values) / n
-    numerator = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(values))
+    y_mean = sum(clean) / n
+
+    numerator = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(clean))
     denominator = sum((i - x_mean) ** 2 for i in range(n))
-    if denominator == 0:
-        return 0.0
-    return numerator / denominator
+
+    return numerator / denominator if denominator else 0.0
+
+
+
+def safe_int(value, default=0):
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_rating(value, default=3):
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def compute_correlations(entries: list[dict]):
+    days = {i: {"moods": [], "goals": []} for i in range(7)}
+
+    for entry in entries:
+        created_at = entry.get("created_at")
+        if not created_at:
+            continue
+
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        dow = dt.weekday()
+
+        days[dow]["moods"].append(safe_rating(entry.get("mood")))
+        days[dow]["goals"].append(safe_int(entry.get("goal_progress")))
+
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    correlations = []
+
+    for i, name in enumerate(day_names):
+        if days[i]["moods"]:
+            correlations.append({
+                "day": name,
+                "avg_mood": round(sum(days[i]["moods"]) / len(days[i]["moods"]), 1),
+                "avg_goal": round(sum(days[i]["goals"]) / len(days[i]["goals"]), 1),
+            })
+        else:
+            correlations.append({"day": name, "avg_mood": 0, "avg_goal": 0})
+
+    return correlations
+
+
+def compute_streaks(habit_rows: list[dict]):
+    habit_dates = defaultdict(list)
+
+    for row in habit_rows:
+        habit_dates[row["name"]].append(row["completed_at"])
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    streaks = {}
+    for name, dates in habit_dates.items():
+        unique_dates = sorted(set(dates), reverse=True)
+        streaks[name] = {
+            "current_streak": calc_streak(unique_dates, today),
+            "total_logs": len(dates),
+        }
+
+    return streaks
 
 
 def describe_trend(slope: float, threshold: float = 0.05) -> str:
@@ -368,14 +437,27 @@ MAX_WEEKLY_SUMMARY_ROWS = 26  # ~6 months of weekly rows before we'd want to
 
 
 def fetch_all_entries_light():
-    """Fetch mood/goal/energy/focus/date for every entry for trend math."""
     result = (
         supabase.table("journal_entries")
         .select("id, mood, goal_progress, energy, focus, entry_type, created_at")
         .order("created_at")
         .execute()
     )
-    return result.data
+
+    entries = []
+
+    for e in result.data:
+        entries.append({
+            "id": e["id"],
+            "mood": safe_rating(e.get("mood")),
+            "goal_progress": safe_int(e.get("goal_progress")),
+            "energy": safe_rating(e.get("energy")),
+            "focus": safe_rating(e.get("focus")),
+            "entry_type": e.get("entry_type") or "free",
+            "created_at": e["created_at"],
+        })
+
+    return entries
 
 
 def build_recent_text_block(today_iso: str) -> str:
