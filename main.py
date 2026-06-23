@@ -1484,4 +1484,360 @@ Rules:
 
 
 
+
+# ---------------------------------------------------------------------------
+# Skill Trees
+#
+# Architecture:
+#   - Trees are defined as static JSON (per your v1 decision).
+#   - Each node has: id, name, xp_required, prerequisites (list of node ids)
+#   - XP feeding into nodes comes from completed goal tasks in the same
+#     category. 50 XP per completed quest (XP_PER_TASK).
+#   - A node is UNLOCKED when:
+#       (a) all prerequisite nodes are completed, AND
+#       (b) total category XP >= node.xp_required
+#   - A node is COMPLETED when the user manually marks it done
+#     (stored in Supabase: skill_progress table).
+#   - GET /skills          → full tree + unlock status for every node
+#   - POST /skills/{id}/complete  → mark a node complete
+#   - DELETE /skills/{id}/complete → unmark (undo)
+# ---------------------------------------------------------------------------
+
+SKILL_TREES: dict[str, dict] = {
+    "Study": {
+        "label": "Computer Science",
+        "icon": "📚",
+        "color": "#6c8ebf",
+        "nodes": [
+            {
+                "id": "cs_fundamentals",
+                "name": "Programming Fundamentals",
+                "xp_required": 0,
+                "prerequisites": [],
+                "description": "Variables, loops, functions, and basic problem solving.",
+            },
+            {
+                "id": "cs_python",
+                "name": "Python Basics",
+                "xp_required": 100,
+                "prerequisites": ["cs_fundamentals"],
+                "description": "Syntax, data types, list comprehensions, modules.",
+            },
+            {
+                "id": "cs_dsa",
+                "name": "Data Structures",
+                "xp_required": 200,
+                "prerequisites": ["cs_fundamentals"],
+                "description": "Arrays, linked lists, stacks, queues, hashmaps.",
+            },
+            {
+                "id": "cs_algorithms",
+                "name": "Algorithms",
+                "xp_required": 400,
+                "prerequisites": ["cs_dsa"],
+                "description": "Sorting, searching, recursion, dynamic programming.",
+            },
+            {
+                "id": "cs_oop",
+                "name": "Object-Oriented Programming",
+                "xp_required": 300,
+                "prerequisites": ["cs_python"],
+                "description": "Classes, inheritance, polymorphism, design patterns.",
+            },
+            {
+                "id": "cs_web",
+                "name": "Web Development",
+                "xp_required": 350,
+                "prerequisites": ["cs_oop"],
+                "description": "APIs, HTTP, frontend basics, backend frameworks.",
+            },
+            {
+                "id": "cs_ai",
+                "name": "AI & Machine Learning",
+                "xp_required": 600,
+                "prerequisites": ["cs_algorithms", "cs_oop"],
+                "description": "ML fundamentals, neural networks, model training.",
+            },
+            {
+                "id": "cs_security",
+                "name": "Cybersecurity",
+                "xp_required": 500,
+                "prerequisites": ["cs_web", "cs_algorithms"],
+                "description": "Threats, encryption, auth, secure coding.",
+            },
+        ],
+    },
+    "Fitness": {
+        "label": "Physical Mastery",
+        "icon": "💪",
+        "color": "#82b366",
+        "nodes": [
+            {
+                "id": "fit_consistency",
+                "name": "Consistency",
+                "xp_required": 0,
+                "prerequisites": [],
+                "description": "Exercise at least 3x/week for 4 consecutive weeks.",
+            },
+            {
+                "id": "fit_strength",
+                "name": "Strength Foundation",
+                "xp_required": 100,
+                "prerequisites": ["fit_consistency"],
+                "description": "Master compound lifts: squat, deadlift, press.",
+            },
+            {
+                "id": "fit_cardio",
+                "name": "Cardio Base",
+                "xp_required": 100,
+                "prerequisites": ["fit_consistency"],
+                "description": "Run 5km without stopping.",
+            },
+            {
+                "id": "fit_nutrition",
+                "name": "Nutrition Basics",
+                "xp_required": 150,
+                "prerequisites": ["fit_consistency"],
+                "description": "Track macros, meal prep, understand caloric balance.",
+            },
+            {
+                "id": "fit_advanced",
+                "name": "Advanced Training",
+                "xp_required": 400,
+                "prerequisites": ["fit_strength", "fit_cardio"],
+                "description": "Periodization, progressive overload, recovery.",
+            },
+        ],
+    },
+    "Finance": {
+        "label": "Financial Intelligence",
+        "icon": "💰",
+        "color": "#d6a73a",
+        "nodes": [
+            {
+                "id": "fin_budgeting",
+                "name": "Budgeting",
+                "xp_required": 0,
+                "prerequisites": [],
+                "description": "Track income and expenses, build a monthly budget.",
+            },
+            {
+                "id": "fin_emergency",
+                "name": "Emergency Fund",
+                "xp_required": 100,
+                "prerequisites": ["fin_budgeting"],
+                "description": "Save 3 months of expenses.",
+            },
+            {
+                "id": "fin_debt",
+                "name": "Debt Elimination",
+                "xp_required": 150,
+                "prerequisites": ["fin_budgeting"],
+                "description": "Avalanche or snowball method to eliminate debt.",
+            },
+            {
+                "id": "fin_investing",
+                "name": "Investing Basics",
+                "xp_required": 300,
+                "prerequisites": ["fin_emergency"],
+                "description": "Index funds, ETFs, compound interest, tax-advantaged accounts.",
+            },
+            {
+                "id": "fin_income",
+                "name": "Income Growth",
+                "xp_required": 400,
+                "prerequisites": ["fin_debt", "fin_investing"],
+                "description": "Side income, salary negotiation, skill monetization.",
+            },
+        ],
+    },
+    "Creativity": {
+        "label": "Creative Mastery",
+        "icon": "🎨",
+        "color": "#9c70c4",
+        "nodes": [
+            {
+                "id": "cr_basics",
+                "name": "Creative Foundations",
+                "xp_required": 0,
+                "prerequisites": [],
+                "description": "Daily practice habit, overcoming blank-page paralysis.",
+            },
+            {
+                "id": "cr_craft",
+                "name": "Craft Fundamentals",
+                "xp_required": 100,
+                "prerequisites": ["cr_basics"],
+                "description": "Core techniques for your chosen medium.",
+            },
+            {
+                "id": "cr_voice",
+                "name": "Personal Voice",
+                "xp_required": 250,
+                "prerequisites": ["cr_craft"],
+                "description": "Develop a distinct style others can recognise.",
+            },
+            {
+                "id": "cr_project",
+                "name": "Finish a Project",
+                "xp_required": 200,
+                "prerequisites": ["cr_craft"],
+                "description": "Complete one significant creative work end-to-end.",
+            },
+            {
+                "id": "cr_share",
+                "name": "Share Your Work",
+                "xp_required": 350,
+                "prerequisites": ["cr_voice", "cr_project"],
+                "description": "Publish, perform, or exhibit. Feedback loop matters.",
+            },
+        ],
+    },
+    "Personal Growth": {
+        "label": "Self Mastery",
+        "icon": "🌱",
+        "color": "#d07040",
+        "nodes": [
+            {
+                "id": "pg_awareness",
+                "name": "Self Awareness",
+                "xp_required": 0,
+                "prerequisites": [],
+                "description": "Daily journaling, identify core values and blind spots.",
+            },
+            {
+                "id": "pg_habits",
+                "name": "Habit Architecture",
+                "xp_required": 100,
+                "prerequisites": ["pg_awareness"],
+                "description": "Design habit stacks, track streaks, remove friction.",
+            },
+            {
+                "id": "pg_mindset",
+                "name": "Growth Mindset",
+                "xp_required": 150,
+                "prerequisites": ["pg_awareness"],
+                "description": "Reframe failure, embrace discomfort, learn from feedback.",
+            },
+            {
+                "id": "pg_focus",
+                "name": "Deep Focus",
+                "xp_required": 200,
+                "prerequisites": ["pg_habits"],
+                "description": "Deep work sessions, distraction elimination, flow state.",
+            },
+            {
+                "id": "pg_leadership",
+                "name": "Leadership",
+                "xp_required": 500,
+                "prerequisites": ["pg_mindset", "pg_focus"],
+                "description": "Influence, communication, accountability to others.",
+            },
+        ],
+    },
+}
+
+
+def get_category_xp(category: str) -> int:
+    """Total XP earned in a category from completed quest tasks."""
+    goal_data = build_goal_summary()
+    return sum(
+        g["xp"] for g in goal_data if g.get("category") == category
+    )
+
+
+def get_completed_node_ids(category: str) -> set[str]:
+    """Fetch which skill nodes the user has manually completed."""
+    result = (
+        supabase.table("skill_progress")
+        .select("node_id")
+        .eq("category", category)
+        .execute()
+    )
+    return {row["node_id"] for row in result.data}
+
+
+def resolve_tree(category: str) -> dict:
+    """
+    Return the tree definition with unlock/completion status resolved
+    for every node.
+    """
+    tree_def = SKILL_TREES.get(category)
+    if not tree_def:
+        return {}
+
+    xp = get_category_xp(category)
+    completed_ids = get_completed_node_ids(category)
+
+    resolved_nodes = []
+    for node in tree_def["nodes"]:
+        prereqs_met = all(p in completed_ids for p in node["prerequisites"])
+        xp_met = xp >= node["xp_required"]
+        unlocked = prereqs_met and xp_met
+        completed = node["id"] in completed_ids
+
+        resolved_nodes.append(
+            {
+                **node,
+                "unlocked": unlocked,
+                "completed": completed,
+                "prereqs_met": prereqs_met,
+                "xp_met": xp_met,
+                "category_xp": xp,
+            }
+        )
+
+    return {
+        **tree_def,
+        "category": category,
+        "category_xp": xp,
+        "nodes": resolved_nodes,
+    }
+
+
+@app.get("/skills")
+def get_skills():
+    """All trees with unlock/completion status resolved."""
+    return [resolve_tree(cat) for cat in SKILL_TREES]
+
+
+@app.get("/skills/{category}")
+def get_skill_tree(category: str):
+    """Single tree for a given category."""
+    tree = resolve_tree(category)
+    if not tree:
+        raise HTTPException(status_code=404, detail="Skill tree not found")
+    return tree
+
+
+@app.post("/skills/{node_id}/complete")
+def complete_skill_node(node_id: str, category: str):
+    """Mark a skill node as completed. Requires node to be unlocked."""
+    tree = resolve_tree(category)
+    if not tree:
+        raise HTTPException(status_code=404, detail="Skill tree not found")
+
+    node = next((n for n in tree["nodes"] if n["id"] == node_id), None)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    if not node["unlocked"]:
+        raise HTTPException(status_code=403, detail="Node not yet unlocked")
+
+    supabase.table("skill_progress").upsert(
+        {
+            "node_id": node_id,
+            "category": category,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).execute()
+
+    return {"status": "completed", "node_id": node_id}
+
+
+@app.delete("/skills/{node_id}/complete")
+def uncomplete_skill_node(node_id: str, category: str):
+    """Unmark a skill node (undo completion)."""
+    supabase.table("skill_progress").delete().eq("node_id", node_id).execute()
+    return {"status": "removed", "node_id": node_id}
+
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

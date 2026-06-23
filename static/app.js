@@ -17,6 +17,7 @@ function showPage(pageId) {
     if (pageId === "quests")   { loadGoals(); generateDailyQuest(); }
     if (pageId === "habits")   loadStreaks();
     if (pageId === "insights") { loadInsights(); loadCharts(); }
+    if (pageId === "skills")   loadSkillTrees();
 }
 
 document.querySelectorAll(".nav-item").forEach(item => {
@@ -718,6 +719,123 @@ goalForm.addEventListener("submit", async (e) => {
     goalForm.reset();
     loadGoals();
 });
+
+
+// ---------------------------------------------------------------------------
+// Skill Trees
+// ---------------------------------------------------------------------------
+
+async function loadSkillTrees() {
+    const container = document.getElementById("skill-trees");
+    container.innerHTML = `<p class="empty-state">Loading skill trees...</p>`;
+
+    const trees = await fetch("/skills").then(r => r.json());
+    container.innerHTML = trees.map(renderTree).join("");
+}
+
+function renderTree(tree) {
+    const nodes = tree.nodes;
+
+    // Build a lookup and child map for layout
+    const byId = {};
+    nodes.forEach(n => byId[n.id] = n);
+
+    // Separate roots (no prerequisites) from children
+    const roots = nodes.filter(n => n.prerequisites.length === 0);
+
+    // Render each node as a card
+    function renderNode(node, depth = 0) {
+        const children = nodes.filter(n => n.prerequisites.includes(node.id));
+        const stateClass = node.completed ? "node-complete"
+                         : node.unlocked  ? "node-unlocked"
+                         : "node-locked";
+
+        const stateIcon = node.completed ? "✓"
+                        : node.unlocked  ? "→"
+                        : "🔒";
+
+        // What's blocking unlock
+        let blockText = "";
+        if (!node.completed && !node.unlocked) {
+            const missingPrereqs = node.prerequisites
+                .filter(pid => !byId[pid]?.completed)
+                .map(pid => byId[pid]?.name || pid);
+            const parts = [];
+            if (missingPrereqs.length > 0)
+                parts.push(`Complete: ${missingPrereqs.join(", ")}`);
+            if (!node.xp_met)
+                parts.push(`${node.category_xp}/${node.xp_required} XP`);
+            blockText = parts.join(" · ");
+        }
+
+        const nodeHTML = `
+<div class="skill-node-wrapper" style="--depth:${depth}">
+    <div class="skill-node ${stateClass}" data-id="${node.id}">
+        <div class="sn-header">
+            <span class="sn-state">${stateIcon}</span>
+            <span class="sn-name">${node.name}</span>
+            ${node.xp_required > 0 ? `<span class="sn-xp-req">${node.xp_required} XP</span>` : ""}
+        </div>
+        <p class="sn-desc">${node.description}</p>
+        ${blockText ? `<div class="sn-block">${blockText}</div>` : ""}
+        ${node.unlocked && !node.completed
+            ? `<button class="sn-complete-btn" onclick="completeNode('${node.id}','${tree.category}')">Mark Complete</button>`
+            : ""}
+        ${node.completed
+            ? `<button class="sn-undo-btn" onclick="uncompleteNode('${node.id}','${tree.category}')">Undo</button>`
+            : ""}
+    </div>
+    ${children.length > 0
+        ? `<div class="skill-children">${children.map(c => renderNode(c, depth + 1)).join("")}</div>`
+        : ""}
+</div>`;
+        return nodeHTML;
+    }
+
+    const totalNodes   = nodes.length;
+    const doneNodes    = nodes.filter(n => n.completed).length;
+    const progress     = totalNodes > 0 ? Math.round(doneNodes / totalNodes * 100) : 0;
+    const categoryXP   = tree.category_xp || 0;
+
+    return `
+<div class="skill-tree" style="--tree-color:${tree.color}">
+    <div class="tree-header">
+        <span class="tree-icon">${tree.icon}</span>
+        <div class="tree-meta">
+            <div class="tree-label">${tree.label}</div>
+            <div class="tree-stats">${doneNodes}/${totalNodes} nodes · ${categoryXP} XP earned</div>
+        </div>
+        <div class="tree-progress-ring">
+            <svg viewBox="0 0 36 36">
+                <circle cx="18" cy="18" r="15" fill="none" stroke="var(--line)" stroke-width="3"/>
+                <circle cx="18" cy="18" r="15" fill="none"
+                    stroke="${tree.color}" stroke-width="3"
+                    stroke-dasharray="${progress} ${100 - progress}"
+                    stroke-linecap="round"
+                    transform="rotate(-90 18 18)"/>
+            </svg>
+            <span>${progress}%</span>
+        </div>
+    </div>
+    <div class="tree-nodes">
+        ${roots.map(r => renderNode(r, 0)).join("")}
+    </div>
+</div>`;
+}
+
+async function completeNode(nodeId, category) {
+    await fetch(`/skills/${nodeId}/complete?category=${encodeURIComponent(category)}`, {
+        method: "POST",
+    });
+    loadSkillTrees();
+}
+
+async function uncompleteNode(nodeId, category) {
+    await fetch(`/skills/${nodeId}/complete?category=${encodeURIComponent(category)}`, {
+        method: "DELETE",
+    });
+    loadSkillTrees();
+}
 
 // Boot: show journal page and load only what's needed for it
 showPage("journal");
