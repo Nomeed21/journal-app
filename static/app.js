@@ -122,25 +122,61 @@ async function loadNightChecklist() {
     }
     el.innerHTML = "<p class='plan-loading'>Loading today's plan…</p>";
     try {
-        const data = await (await fetch("/plans/today")).json();
-        if (!data.plan || (!data.plan.main_goal && !(data.plan.tasks || []).length)) {
-            el.innerHTML = "<p class='plan-loading'>No morning plan found — fill in a Morning entry first.</p>";
-            nightTasks = [];
-            return;
+        const [planRes, streaksRes] = await Promise.all([
+            fetch("/plans/today"),
+            fetch("/habits/balance"),
+        ]);
+        const data    = await planRes.json();
+        const habData = await streaksRes.json();
+        const streaks = habData.streaks || {};
+        const today   = new Date().toISOString().slice(0,10);
+
+        // Habit checklist
+        const habitNames = Object.keys(streaks);
+        let habitSection = "";
+        if (habitNames.length) {
+            habitSection = `
+                <div class="ms-label" style="margin-top:.75rem">Today's Habits</div>
+                ${habitNames.map(name => {
+                    const s = streaks[name];
+                    const cat = s.category || "Productivity";
+                    return `<label class="night-task-row">
+                        <input type="checkbox" class="night-habit-check" data-name="${name}" data-cat="${cat}">
+                        <span>${name} <em style="font-size:.75rem;color:var(--ink-faint)">${s.current_streak}-day streak</em></span>
+                    </label>`;
+                }).join("")}`;
         }
-        nightTasks = (data.plan.tasks || []).map(t => ({ ...t, completed: t.completed || false }));
-        const goalLine = data.plan.main_goal
-            ? `<div class="night-main-goal">🎯 <strong>${data.plan.main_goal}</strong></div>` : "";
-        const taskRows = nightTasks.map((t, i) => `
-            <label class="night-task-row">
-                <input type="checkbox" class="night-check" data-index="${i}" ${t.completed ? "checked" : ""}>
-                <span>${t.title}</span>
-            </label>`).join("");
-        el.innerHTML = `<label class="field-label">Today's Plan — How Did It Go?</label>${goalLine}
-            ${taskRows || "<p class='plan-loading'>No tasks were planned.</p>"}`;
+
+        if (!data.plan || (!data.plan.main_goal && !(data.plan.tasks || []).length)) {
+            el.innerHTML = `<p class='plan-loading'>No morning plan found.</p>${habitSection}`;
+            nightTasks = [];
+        } else {
+            nightTasks = (data.plan.tasks || []).map(t => ({ ...t, completed: t.completed || false }));
+            const goalLine = data.plan.main_goal
+                ? `<div class="night-main-goal">🎯 <strong>${data.plan.main_goal}</strong></div>` : "";
+            const taskRows = nightTasks.map((t, i) => `
+                <label class="night-task-row">
+                    <input type="checkbox" class="night-check" data-index="${i}" ${t.completed ? "checked" : ""}>
+                    <span>${t.title}</span>
+                </label>`).join("");
+            el.innerHTML = `<label class="field-label">Today's Plan — How Did It Go?</label>${goalLine}
+                ${taskRows || "<p class='plan-loading'>No tasks were planned.</p>"}
+                ${habitSection}`;
+        }
         el.querySelectorAll(".night-check").forEach(cb =>
             cb.addEventListener("change", () => { nightTasks[+cb.dataset.index].completed = cb.checked; })
         );
+        // Quick-log habits from night reflection
+        el.querySelectorAll(".night-habit-check").forEach(cb => {
+            cb.addEventListener("change", async () => {
+                if (cb.checked) {
+                    await fetch("/habits", {
+                        method: "POST", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ name: cb.dataset.name, category: cb.dataset.cat, difficulty: "Normal" }),
+                    });
+                }
+            });
+        });
     } catch (_) {
         el.innerHTML = "<p class='plan-loading'>Could not load today's plan.</p>";
     }
@@ -456,38 +492,203 @@ document.getElementById("clear-btn").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Habits
+// Habits — enhanced
 // ---------------------------------------------------------------------------
 const streaksDiv = document.getElementById("streaks");
 const habitForm  = document.getElementById("habit-form");
 
+const CATEGORY_ICONS = {
+    Physical: "🏃", Learning: "📚", Mind: "🧘",
+    Social: "👥", Productivity: "⚡", Creativity: "🎨",
+};
+const DIFF_COLORS = { Easy: "#4caf50", Normal: "#f7a94b", Hard: "#ff7043", Elite: "#9c27b0" };
+const MASTERY_COLORS = ["#c9a8b0","#d98aa0","#b8617c","#8b2252","#4a0e2a"];
+
 async function loadStreaks() {
-    const streaks  = await (await fetch("/habits/streaks")).json();
-    const entries  = Object.entries(streaks);
-    // Also show predictive streak risk
-    let riskData = {};
-    try { riskData = await (await fetch("/analytics/predictive")).json(); } catch (_) {}
-    const atRisk = riskData.streak_at_risk || [];
+    const [balanceRes, riskRes] = await Promise.all([
+        fetch("/habits/balance"),
+        fetch("/analytics/predictive"),
+    ]);
+    const balanceData = await balanceRes.json();
+    const riskData    = await riskRes.json();
+    const streaks     = balanceData.streaks || {};
+    const atRisk      = riskData.streak_at_risk || [];
+
+    // Life balance bars
+    const hbBars = document.getElementById("hb-bars");
+    if (hbBars && balanceData.balance) {
+        hbBars.innerHTML = balanceData.balance.map(b => `
+            <div class="hb-bar-col">
+                <div class="hb-bar-wrap">
+                    <div class="hb-bar-fill" style="height:${b.rate}%;background:${b.rate >= 70 ? 'var(--accent)' : b.rate >= 40 ? '#f7a94b' : '#ef5350'}"></div>
+                </div>
+                <div class="hb-bar-cat">${CATEGORY_ICONS[b.category] || ''} ${b.category}</div>
+                <div class="hb-bar-pct">${b.rate}%</div>
+            </div>`).join("");
+    }
+
+    // Habit cards
+    const entries = Object.entries(streaks);
     streaksDiv.innerHTML = entries.length === 0
-        ? "<p style='color:var(--ink-faint);font-style:italic'>No habits logged yet.</p>"
+        ? "<p class='empty-state'>No habits yet — add your first one above!</p>"
         : entries.map(([name, data]) => {
-            const risk = atRisk.includes(name);
-            return `<div class="entry-card ${risk ? 'streak-at-risk' : ''}">
-                <strong>${name}</strong>
-                ${risk ? '<span class="risk-badge">⚠️ At risk today!</span>' : ''}
-                — ${data.current_streak}-day streak (${data.total_logs} total logs)
+            const risk    = atRisk.includes(name);
+            const mLevel  = data.mastery_level || 1;
+            const mLabel  = data.mastery_label || "Beginner";
+            const cat     = data.category || "Productivity";
+            const diff    = data.difficulty || "Normal";
+            const tokens  = data.recovery_tokens || {available: 0};
+            const streak  = data.current_streak || 0;
+            const total   = data.total_logs || 0;
+            const xpp     = data.xp_per_log || 10;
+
+            // Progress ring SVG (mastery: level/5)
+            const pct    = (mLevel - 1) / 4;
+            const radius = 18;
+            const circ   = 2 * Math.PI * radius;
+            const dash   = circ * pct;
+
+            return `<div class="habit-card ${risk ? 'habit-card--risk' : ''}">
+                <div class="hc-top">
+                    <div class="hc-ring-wrap">
+                        <svg width="44" height="44" viewBox="0 0 44 44">
+                            <circle cx="22" cy="22" r="${radius}" fill="none" stroke="var(--line-strong)" stroke-width="3"/>
+                            <circle cx="22" cy="22" r="${radius}" fill="none"
+                                stroke="${MASTERY_COLORS[mLevel-1]}"
+                                stroke-width="3"
+                                stroke-dasharray="${dash} ${circ - dash}"
+                                stroke-dashoffset="${circ / 4}"
+                                stroke-linecap="round"/>
+                            <text x="22" y="26" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">${mLevel}</text>
+                        </svg>
+                    </div>
+                    <div class="hc-main">
+                        <div class="hc-name">${name} ${risk ? '<span class="risk-badge">⚠️ at risk</span>' : ''}</div>
+                        <div class="hc-badges">
+                            <span class="hc-badge" style="background:${DIFF_COLORS[diff]}20;color:${DIFF_COLORS[diff]};border-color:${DIFF_COLORS[diff]}40">${diff}</span>
+                            <span class="hc-badge hc-badge--cat">${CATEGORY_ICONS[cat] || ''} ${cat}</span>
+                            ${data.linked_skill ? `<span class="hc-badge hc-badge--skill">→ ${data.linked_skill}</span>` : ''}
+                        </div>
+                        <div class="hc-meta">
+                            <span class="hc-streak">🔥 ${streak}-day streak</span>
+                            <span class="hc-total">${total} total</span>
+                            <span class="hc-mastery">${mLabel}</span>
+                            <span class="hc-xp">+${xpp} XP</span>
+                        </div>
+                    </div>
+                    <button class="hc-log-btn" onclick="quickLogHabit('${name.replace(/'/g,"\\'")}','${cat}')">Log Today</button>
+                </div>
+                ${tokens.available > 0 ? `
+                    <div class="hc-tokens">
+                        <span class="hc-token-label">🛡️ ${tokens.available} recovery token${tokens.available > 1 ? 's' : ''}</span>
+                        <button class="hc-token-btn" onclick="useRecoveryToken('${name.replace(/'/g,"\\'")}')">Restore missed day</button>
+                    </div>` : ''}
             </div>`;
         }).join("");
+
+    // Load heatmap
+    loadHeatmap();
+
+    // Load AI insight (lazy)
+    const insightCard = document.getElementById("habit-ai-insight-card");
+    if (insightCard && entries.length >= 2) {
+        insightCard.style.display = "";
+        fetch("/habits/ai-insights").then(r => r.json()).then(d => {
+            document.getElementById("habit-ai-insight").textContent = d.insight;
+        }).catch(() => {});
+    }
 }
+
+async function loadHeatmap() {
+    const el = document.getElementById("habit-heatmap");
+    if (!el) return;
+    try {
+        const data  = await (await fetch("/habits/heatmap?days=365")).json();
+        const today = new Date();
+        const cells = [];
+        // Build map
+        const countMap = {};
+        data.forEach(d => { countMap[d.date] = d.count; });
+        // Last 52 weeks
+        for (let w = 51; w >= 0; w--) {
+            const col = [];
+            for (let d = 0; d < 7; d++) {
+                const dt   = new Date(today);
+                dt.setDate(dt.getDate() - (w * 7 + d));
+                const key  = dt.toISOString().slice(0, 10);
+                const cnt  = countMap[key] || 0;
+                const opacity = cnt === 0 ? 0.08 : Math.min(0.2 + cnt * 0.2, 1);
+                col.push(`<div class="hm-cell" title="${key}: ${cnt} habits" style="background:rgba(217,138,160,${opacity})"></div>`);
+            }
+            cells.push(`<div class="hm-col">${col.join("")}</div>`);
+        }
+        el.innerHTML = cells.join("");
+    } catch (_) { el.innerHTML = "<p style='color:var(--ink-faint);font-style:italic'>No data yet.</p>"; }
+}
+
+window.quickLogHabit = async function(name, category) {
+    const diff   = "Normal";
+    const res    = await fetch("/habits", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, category, difficulty: diff }),
+    });
+    const data = await res.json();
+    if (data.status === "already_logged") {
+        const toast = document.createElement("div");
+        toast.className = "achievement-toast show";
+        toast.innerHTML = `✓ Already logged today`;
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 2000);
+        return;
+    }
+    if (data.new_achievements) showAchievementToast(data.new_achievements);
+    if (data.xp_earned) showXPFlash(data.xp_earned, category);
+    if (data.evolution) {
+        const t = document.createElement("div");
+        t.className = "achievement-toast show";
+        t.innerHTML = `🌟 ${data.evolution.message}`;
+        document.body.appendChild(t);
+        setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 400); }, 4000);
+    }
+    loadStreaks();
+    loadXPHUD();
+};
+
+window.useRecoveryToken = async function(name) {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const date = yesterday.toISOString().slice(0, 10);
+    if (!confirm(`Restore '${name}' for ${date}? This uses 1 recovery token.`)) return;
+    const res = await fetch("/habits/recover", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, date }),
+    });
+    if (res.ok) {
+        showXPFlash(0, "Streak Restored!");
+        loadStreaks();
+    }
+};
 
 habitForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const name = document.getElementById("habit-name").value.trim();
+    const name       = document.getElementById("habit-name").value.trim();
+    const category   = document.getElementById("habit-category").value;
+    const difficulty = document.getElementById("habit-difficulty").value;
+    const skill      = document.getElementById("habit-skill").value || null;
+    if (!name) return;
     const data = await (await fetch("/habits", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, category, difficulty, linked_skill: skill }),
     })).json();
     if (data.new_achievements) showAchievementToast(data.new_achievements);
+    if (data.xp_earned)        showXPFlash(data.xp_earned, category);
+    if (data.evolution) {
+        const t = document.createElement("div");
+        t.className = "achievement-toast show";
+        t.innerHTML = `🌟 ${data.evolution.message}`;
+        document.body.appendChild(t);
+        setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 400); }, 4000);
+    }
     habitForm.reset();
     loadStreaks();
     loadXPHUD();
@@ -703,6 +904,9 @@ window.toggleTask = async function(taskId, cb, goalId) {
     const data = await (await fetch(`/tasks/${taskId}`, { method: "PUT" })).json();
     if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Goal");
     if (data.new_achievements) showAchievementToast(data.new_achievements);
+    if (data.skill_completion && data.skill_completion.skill_completed) {
+        showSkillCompleteModal(data.skill_completion);
+    }
     loadGoals();
     loadXPHUD();
 };
@@ -749,75 +953,54 @@ async function generateDailyQuest() {
 window.generateDailyQuest = generateDailyQuest;
 
 // ---------------------------------------------------------------------------
-// Skills
+// Skills — Skill-Driven Quest System
 // ---------------------------------------------------------------------------
+
+const DIFF_ICONS = { Beginner: "🟢", Intermediate: "🟡", Advanced: "🔴" };
+
 async function loadSkills() {
-    const [trees, achievementsData] = await Promise.all([
+    const [trees, achData] = await Promise.all([
         fetch("/skills").then(r => r.json()),
         fetch("/achievements").then(r => r.json()),
     ]);
 
     const container = document.getElementById("skill-trees");
+    const info = achData.level_info;
 
-    // Global level banner
-    const info = achievementsData.level_info;
     container.innerHTML = `
         <div class="skill-level-banner">
             <div class="slb-level">Level ${info.level}</div>
             <div class="slb-xp-bar-wrap">
-                <div class="slb-xp-bar-fill" style="width:${Math.round(info.xp_in_level/5)}%"></div>
+                <div class="slb-xp-bar-fill" style="width:${Math.round(info.xp_in_level / 5)}%"></div>
             </div>
             <div class="slb-xp-text">${info.xp_in_level} / 500 XP · ${info.xp_to_next} to next level</div>
         </div>
-        <div class="skill-explainer">
-            <strong>How Skills work:</strong>
-            Complete tasks in a category to earn XP → XP unlocks skill nodes → click
-            <em>Check Mastery</em> on an unlocked node → answer the prompt honestly →
-            pass to mark it Mastered and unlock the next tier.
-            <span class="skill-legend">
-                <span class="sleg sleg--unlocked">Unlocked</span>
-                <span class="sleg sleg--completed">Mastered</span>
-                <span class="sleg sleg--locked">Locked</span>
-            </span>
+        <div class="skill-how-it-works">
+            <strong>How it works:</strong>
+            Click <em>Start Learning</em> on any available node → a goal with structured tasks is created →
+            complete every task → the node is automatically mastered → XP is awarded → new nodes unlock.
         </div>`;
 
     trees.forEach(tree => {
         const treeEl = document.createElement("div");
-        treeEl.className = "skill-tree";
+        treeEl.className = "skt-tree";
         treeEl.innerHTML = `
-            <div class="skill-tree-header">
-                <span>${tree.icon} ${tree.label}</span>
-                <div style="display:flex;align-items:center;gap:.5rem">
-                    <span class="skill-xp">${tree.category_xp} XP</span>
-                    <button class="skill-path-btn" onclick="showProgressionPath('${tree.category}')">Path →</button>
-                </div>
+            <div class="skt-tree-header">
+                <span class="skt-tree-icon">${tree.icon}</span>
+                <span class="skt-tree-name">${tree.label}</span>
+                <span class="skt-tree-xp">${tree.category_xp} XP</span>
             </div>
-            <div class="skill-nodes">
-                ${tree.nodes.map(node => `
-                    <div class="skill-node ${node.completed ? "completed" : node.unlocked ? "unlocked" : "locked"}">
-                        <div class="skill-node-name">${node.name}</div>
-                        <div class="skill-node-desc">${node.description}</div>
-                        ${node.leads_to && node.leads_to.length ? `<div class="skill-leads-to">→ Unlocks: ${node.leads_to.join(", ")}</div>` : ""}
-                        ${node.unlocked && !node.completed
-                            ? `<button class="skill-complete-btn" onclick="openMasteryCheck('${node.id}','${tree.category}','${node.name.replace(/'/g,"\\'")}')">
-                                Check Mastery ✓</button>`
-                            : node.completed
-                            ? `<span class="skill-done">✓ Mastered</span>`
-                            : (() => {
-                                const needsXp = !node.xp_met ? `${node.xp_required} XP in ${tree.label}` : "";
-                                const needsPrereqs = !node.prereqs_met && node.prerequisites && node.prerequisites.length
-                                    ? `master: ${node.prerequisites.join(", ")}` : "";
-                                const reqs = [needsXp, needsPrereqs].filter(Boolean).join(" · ");
-                                return `<span class="skill-locked">🔒 Needs: ${reqs || "prerequisites"}</span>`;
-                              })()
-                        }
-                    </div>`).join("")}
-            </div>`;
+            <div class="skt-nodes" id="nodes-${tree.category}"></div>`;
         container.appendChild(treeEl);
+
+        const nodesEl = treeEl.querySelector(".skt-nodes");
+        tree.nodes.forEach(node => {
+            nodesEl.appendChild(buildNodeCard(node, tree));
+        });
     });
 
-    // Achievements section
-    const earned = achievementsData.earned || [];
+    // Achievements
+    const earned = achData.earned || [];
     if (earned.length) {
         const achEl = document.createElement("div");
         achEl.className = "achievements-section";
@@ -833,144 +1016,142 @@ async function loadSkills() {
     }
 }
 
-// Mastery check modal
-window.openMasteryCheck = async function(nodeId, category, nodeName) {
-    try {
-        const checkData = await (await fetch(`/skills/${nodeId}/mastery-check?category=${encodeURIComponent(category)}`)).json();
+function buildNodeCard(node, tree) {
+    const el = document.createElement("div");
 
-        if (checkData.already_passed) {
-            // Already passed — go straight to completion
-            await completeSkillNode(nodeId, category);
+    // Determine state
+    let state;
+    if (node.completed)                  state = "completed";
+    else if (node.active_goal)           state = "active";
+    else if (node.unlocked)              state = "available";
+    else                                 state = "locked";
+
+    el.className = `skt-node skt-node--${state}`;
+
+    // Prerequisites display
+    const prereqNames = (node.prerequisites || []).map(pid => {
+        const found = tree.nodes.find(n => n.id === pid);
+        return found ? found.name : pid;
+    });
+
+    // What this unlocks
+    const unlocksNames = (node.leads_to || []).map(uid => {
+        const found = tree.nodes.find(n => n.id === uid);
+        return found ? found.name : uid;
+    });
+
+    // Progress bar for active node
+    const ag = node.active_goal;
+    const progressHtml = ag
+        ? `<div class="skt-progress-wrap">
+               <div class="skt-progress-bar">
+                   <div class="skt-progress-fill" style="width:${ag.progress}%"></div>
+               </div>
+               <span class="skt-progress-label">${ag.completed_tasks}/${ag.total_tasks} tasks · ${ag.progress}%</span>
+           </div>`
+        : "";
+
+    // CTA button
+    let ctaHtml = "";
+    if (state === "completed") {
+        ctaHtml = `<div class="skt-done-badge">✓ Mastered</div>`;
+    } else if (state === "active") {
+        ctaHtml = `<button class="skt-btn skt-btn--active"
+            onclick="showPage('quests')">View Tasks →</button>`;
+    } else if (state === "available") {
+        ctaHtml = `<button class="skt-btn skt-btn--start"
+            onclick="startLearning('${node.id}','${tree.category}',this)">▶ Start Learning</button>`;
+    } else {
+        // Locked — show what's needed
+        const needsXP = !node.xp_met ? `${node.xp_required} XP in ${tree.label}` : "";
+        const needsNodes = !node.prereqs_met && prereqNames.length
+            ? `Complete: ${prereqNames.join(", ")}` : "";
+        const reqs = [needsXP, needsNodes].filter(Boolean).join(" · ");
+        ctaHtml = `<div class="skt-locked-msg">🔒 ${reqs || "Complete prerequisites"}</div>`;
+    }
+
+    el.innerHTML = `
+        <div class="skt-node-head">
+            <div class="skt-node-state-dot skt-dot--${state}"></div>
+            <div class="skt-node-title">${node.name}</div>
+            <div class="skt-node-badges">
+                <span class="skt-badge">${DIFF_ICONS[node.difficulty] || ""} ${node.difficulty || ""}</span>
+                <span class="skt-badge">⏱ ~${node.estimated_hours || "?"}h</span>
+                <span class="skt-badge skt-badge--xp">+${node.xp_reward || node.xp_required} XP</span>
+            </div>
+        </div>
+        <div class="skt-node-desc">${node.description}</div>
+        ${prereqNames.length ? `<div class="skt-node-meta">Requires: ${prereqNames.map(n => `<span class="skt-req">${n}</span>`).join("")}</div>` : ""}
+        ${unlocksNames.length ? `<div class="skt-node-meta">Unlocks: ${unlocksNames.map(n => `<span class="skt-unlocks">${n}</span>`).join("")}</div>` : ""}
+        ${progressHtml}
+        <div class="skt-node-foot">${ctaHtml}</div>`;
+
+    return el;
+}
+
+// Start Learning — creates goal + tasks then redirects to Quests
+window.startLearning = async function(nodeId, category, btn) {
+    btn.textContent = "Starting…";
+    btn.disabled = true;
+    try {
+        const data = await (await fetch(
+            `/skills/${nodeId}/start?category=${encodeURIComponent(category)}`,
+            { method: "POST" }
+        )).json();
+
+        if (data.status === "already_active") {
+            showPage("quests");
             return;
         }
-
-        // Build modal
-        let modal = document.getElementById("mastery-modal");
-        if (!modal) {
-            modal = document.createElement("div");
-            modal.id        = "mastery-modal";
-            modal.className = "mastery-modal-overlay";
-            document.body.appendChild(modal);
-        }
-        const typeLabel = { reflection: "📖 Reflection", quiz: "🧠 Quiz", challenge: "⚡ Challenge", proof: "📋 Proof of Learning" };
-        modal.innerHTML = `
-            <div class="mastery-modal-box">
-                <div class="mastery-modal-header">
-                    <div class="mastery-modal-title">${typeLabel[checkData.type] || "Mastery Check"}: ${nodeName}</div>
-                    <button class="mastery-modal-close" onclick="document.getElementById('mastery-modal').style.display='none'">✕</button>
-                </div>
-                <div class="mastery-modal-prompt">${checkData.prompt}</div>
-                <textarea id="mastery-response" class="mastery-response-input"
-                    placeholder="Write your response here. Be specific and honest — vague answers won't pass." rows="6"></textarea>
-                <div id="mastery-feedback" class="mastery-feedback hidden"></div>
-                <div style="display:flex;gap:.5rem;margin-top:1rem">
-                    <button class="mastery-submit-btn" onclick="submitMasteryCheck('${nodeId}','${category}','${nodeName.replace(/'/g,"\\'")}')">
-                        Submit for Evaluation</button>
-                    <button style="background:var(--paper);color:var(--ink-soft);border:1px solid var(--line)"
-                        onclick="document.getElementById('mastery-modal').style.display='none'">Cancel</button>
-                </div>
-            </div>`;
-        modal.style.display = "flex";
-    } catch (_) {}
-};
-
-window.submitMasteryCheck = async function(nodeId, category, nodeName) {
-    const response = document.getElementById("mastery-response").value.trim();
-    if (!response) { alert("Please write a response first."); return; }
-    const btn      = document.querySelector(".mastery-submit-btn");
-    btn.textContent = "Evaluating…";
-    btn.disabled    = true;
-    try {
-        const result = await (await fetch(
-            `/skills/${nodeId}/mastery-check?category=${encodeURIComponent(category)}`,
-            { method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ response }) }
-        )).json();
-        const fb = document.getElementById("mastery-feedback");
-        fb.classList.remove("hidden");
-        fb.className = `mastery-feedback ${result.passed ? "mastery-passed" : "mastery-failed"}`;
-        fb.innerHTML = `
-            <strong>${result.passed ? "✓ Passed!" : "✗ Not quite"}</strong> (Score: ${result.score}/100)
-            <p>${result.feedback}</p>
-            ${result.passed && result.what_was_good ? `<p>👍 ${result.what_was_good}</p>` : ""}
-            ${!result.passed && result.what_to_improve ? `<p>💡 ${result.what_to_improve}</p>` : ""}`;
-        if (result.passed) {
-            const completeBtn = document.createElement("button");
-            completeBtn.textContent = "✓ Mark as Mastered";
-            completeBtn.className   = "mastery-submit-btn";
-            completeBtn.style.marginTop = ".75rem";
-            completeBtn.onclick = async () => {
-                document.getElementById("mastery-modal").style.display = "none";
-                await completeSkillNode(nodeId, category);
-            };
-            fb.appendChild(completeBtn);
-        } else {
-            btn.textContent = "Try Again";
-            btn.disabled    = false;
+        if (data.status === "started") {
+            showXPFlash(0, "Quest Created!");
+            // Show a brief toast then go to quests
+            const toast = document.createElement("div");
+            toast.className = "achievement-toast show";
+            toast.innerHTML = `📚 <strong>Learning started!</strong> ${data.task_count} tasks added to Quests.`;
+            document.body.appendChild(toast);
+            setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 3000);
+            setTimeout(() => showPage("quests"), 600);
         }
     } catch (_) {
-        btn.textContent = "Submit for Evaluation";
-        btn.disabled    = false;
+        btn.textContent = "▶ Start Learning";
+        btn.disabled = false;
     }
 };
 
-async function completeSkillNode(nodeId, category) {
-    try {
-        const data = await (await fetch(
-            `/skills/${nodeId}/complete?category=${encodeURIComponent(category)}`,
-            { method: "POST" }
-        )).json();
-        showXPFlash(data.xp_earned, category);
-        if (data.new_achievements) showAchievementToast(data.new_achievements);
-        if (data.newly_unlocked && data.newly_unlocked.length) {
-            setTimeout(() => {
-                const toast = document.createElement("div");
-                toast.className = "achievement-toast achievement-toast--unlock";
-                toast.innerHTML = `🔓 Unlocked: <strong>${data.newly_unlocked.join(", ")}</strong>`;
-                document.body.appendChild(toast);
-                setTimeout(() => toast.classList.add("show"), 50);
-                setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 4000);
-            }, 800);
-        }
-        loadSkills();
-        loadXPHUD();
-    } catch (_) {}
-}
-
-// Progression path panel
-window.showProgressionPath = async function(category) {
-    try {
-        const data = await (await fetch(`/progression/${encodeURIComponent(category)}`)).json();
-        let panel  = document.getElementById("progression-panel");
-        if (!panel) {
-            panel = document.createElement("div");
-            panel.id = "progression-panel";
-            panel.className = "progression-panel";
-            document.getElementById("skill-trees").prepend(panel);
-        }
-        const recommended = data.recommended;
-        panel.innerHTML = `
-            <div class="progression-header">
-                <strong>${category} Path</strong>
-                <button onclick="this.closest('.progression-panel').remove()" style="background:none;border:none;color:var(--ink-soft);cursor:pointer">✕</button>
+// Skill complete celebration modal
+function showSkillCompleteModal(sc) {
+    let modal = document.getElementById("skill-complete-modal");
+    if (!modal) {
+        modal = document.createElement("div");
+        modal.id = "skill-complete-modal";
+        modal.className = "skill-complete-overlay";
+        document.body.appendChild(modal);
+    }
+    modal.innerHTML = `
+        <div class="skill-complete-box">
+            <div class="skill-complete-star">⭐</div>
+            <h2 class="skill-complete-title">Skill Mastered!</h2>
+            <p class="skill-complete-name">${sc.node_name}</p>
+            <div class="skill-complete-xp">+${sc.xp_earned} XP</div>
+            ${sc.newly_unlocked && sc.newly_unlocked.length
+                ? `<div class="skill-complete-unlocks">
+                    🔓 Now unlocked: <strong>${sc.newly_unlocked.join(", ")}</strong>
+                   </div>` : ""}
+            <div style="display:flex;gap:.75rem;margin-top:1.25rem;justify-content:center">
+                <button class="skt-btn skt-btn--start" onclick="
+                    document.getElementById('skill-complete-modal').style.display='none';
+                    showPage('skills');
+                    loadSkills();">View Skill Tree</button>
+                <button style="background:var(--paper);color:var(--ink-soft);border:1px solid var(--line);padding:.55rem 1rem;border-radius:10px;cursor:pointer"
+                    onclick="document.getElementById('skill-complete-modal').style.display='none'">
+                    Close</button>
             </div>
-            <div class="progression-body">
-                ${data.completed.length ? `<div class="prog-section"><div class="prog-label">✓ Mastered</div>
-                    ${data.completed.map(n => `<span class="prog-chip prog-chip--done">${n.name}</span>`).join("")}</div>` : ""}
-                ${data.in_progress.length ? `<div class="prog-section"><div class="prog-label">⚡ In Progress (Unlocked)</div>
-                    ${data.in_progress.map(n => `<span class="prog-chip prog-chip--active">${n.name}</span>`).join("")}</div>` : ""}
-                ${recommended ? `<div class="prog-section prog-recommended">
-                    <div class="prog-label">★ Recommended Next</div>
-                    <strong>${recommended.name}</strong> — ${recommended.description}
-                    <button class="skill-path-btn" style="margin-top:.4rem" 
-                        onclick="openMasteryCheck('${recommended.id}','${category}','${recommended.name.replace(/'/g,"\\'")}')">
-                        Start Mastery Check</button>
-                </div>` : ""}
-                ${data.locked.length ? `<div class="prog-section"><div class="prog-label">🔒 Locked</div>
-                    ${data.locked.map(n => `<span class="prog-chip prog-chip--locked" title="XP needed: ${n.unlocked_by?.xp_needed||0}">${n.name}</span>`).join("")}</div>` : ""}
-            </div>`;
-    } catch (_) {}
-};
+        </div>`;
+    modal.style.display = "flex";
+    // Also show XP flash
+    showXPFlash(sc.xp_earned, sc.category);
+}
 
 // ---------------------------------------------------------------------------
 // Boot

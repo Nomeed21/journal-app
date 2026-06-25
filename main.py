@@ -63,6 +63,13 @@ class ChatMessage(BaseModel):
 
 class HabitLog(BaseModel):
     name: str
+    category: str = "Productivity"
+    difficulty: str = "Normal"   # Easy | Normal | Hard | Elite
+    linked_skill: Optional[str] = None  # category name of a skill tree
+
+class RecoveryTokenUse(BaseModel):
+    name: str
+    date: str  # YYYY-MM-DD
 
 class GoalCreate(BaseModel):
     title: str
@@ -92,6 +99,21 @@ class PlanCreate(BaseModel):
 
 class MasteryCheckSubmit(BaseModel):
     response: str
+
+# ---------------------------------------------------------------------------
+# Skill-node tag helpers  (no schema migration needed)
+# ---------------------------------------------------------------------------
+
+SKILL_TAG_PREFIX = "skill_node:"
+
+def tag_for_node(node_id: str) -> str:
+    return f"{SKILL_TAG_PREFIX}{node_id}"
+
+def node_id_from_tags(tags: list):
+    for t in (tags or []):
+        if isinstance(t, str) and t.startswith(SKILL_TAG_PREFIX):
+            return t[len(SKILL_TAG_PREFIX):]
+    return None
 
 # ---------------------------------------------------------------------------
 # Pure math helpers (no LLM — used for reliable trend numbers)
@@ -528,36 +550,361 @@ def delete_entry(entry_id: int):
 # Habits
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Habit helpers
+# ---------------------------------------------------------------------------
+
+HABIT_DIFFICULTY_XP = {"Easy": 5, "Normal": 10, "Hard": 20, "Elite": 30}
+HABIT_CATEGORIES    = ["Physical", "Learning", "Mind", "Social", "Productivity", "Creativity"]
+
+# Mastery thresholds: (completions_needed, level_name)
+HABIT_MASTERY_LEVELS = [
+    (0,   "Beginner"),
+    (7,   "Apprentice"),
+    (30,  "Journeyman"),
+    (90,  "Expert"),
+    (180, "Master"),
+]
+
+# Evolution stages: {habit_name_lower_contains: [stage1, stage2, ...]}
+# Generic per-difficulty stages applied to all habits
+EVOLUTION_THRESHOLDS = [7, 30, 90, 180]   # completions to evolve
+
+def _habit_mastery_level(total_logs: int) -> dict:
+    level = 1
+    label = "Beginner"
+    for i, (threshold, lbl) in enumerate(HABIT_MASTERY_LEVELS):
+        if total_logs >= threshold:
+            level = i + 1
+            label = lbl
+    return {"level": level, "label": label}
+
+def _habit_xp(difficulty: str) -> int:
+    return HABIT_DIFFICULTY_XP.get(difficulty, 10)
+
+def _recovery_tokens(habit_name: str) -> dict:
+    """Count earned recovery tokens for a habit (1 per 14 consistent days, max 3)."""
+    try:
+        result = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
+        dates = sorted({r["completed_at"] for r in result.data})
+        tokens_earned = 0
+        streak = 0
+        for i, d in enumerate(dates):
+            if i == 0:
+                streak = 1
+            else:
+                prev = datetime.strptime(dates[i-1], "%Y-%m-%d")
+                curr = datetime.strptime(d, "%Y-%m-%d")
+                if (curr - prev).days == 1:
+                    streak += 1
+                else:
+                    streak = 1
+            if streak > 0 and streak % 14 == 0:
+                tokens_earned += 1
+        # Subtract used tokens
+        try:
+            used = supabase.table("habit_recovery_tokens").select("id").eq("habit_name", habit_name).execute()
+            tokens_used = len(used.data)
+        except Exception:
+            tokens_used = 0
+        return {"earned": min(tokens_earned, 3 + tokens_used), "used": tokens_used,
+                "available": max(0, min(3, tokens_earned - tokens_used))}
+    except Exception:
+        return {"earned": 0, "used": 0, "available": 0}
+
+def _fetch_habit_meta() -> dict:
+    """Try new columns; fall back gracefully if they do not exist yet."""
+    try:
+        result = supabase.table("habits").select("name, category, difficulty, linked_skill").execute()
+        meta: dict[str, dict] = {}
+        for row in result.data:
+            n = row["name"]
+            if n not in meta:
+                meta[n] = {
+                    "category":     row.get("category") or "Productivity",
+                    "difficulty":   row.get("difficulty") or "Normal",
+                    "linked_skill": row.get("linked_skill"),
+                }
+        return meta
+    except Exception:
+        return {}
+
 def _compute_streaks_raw() -> dict:
     result = supabase.table("habits").select("name, completed_at").order("completed_at", desc=True).execute()
     habit_dates: dict[str, list] = defaultdict(list)
     for row in result.data:
         habit_dates[row["name"]].append(row["completed_at"])
+    habit_meta = _fetch_habit_meta()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return {
-        name: {
-            "current_streak": calc_streak(sorted(set(dates), reverse=True), today),
-            "total_logs": len(dates),
+    out = {}
+    for name, dates in habit_dates.items():
+        unique_dates = sorted(set(dates), reverse=True)
+        total        = len(dates)
+        mastery      = _habit_mastery_level(total)
+        tokens       = _recovery_tokens(name)
+        meta         = habit_meta.get(name, {})
+        out[name] = {
+            "current_streak": calc_streak(unique_dates, today),
+            "total_logs":     total,
+            "category":       meta.get("category", "Productivity"),
+            "difficulty":     meta.get("difficulty", "Normal"),
+            "linked_skill":   meta.get("linked_skill"),
+            "xp_per_log":     _habit_xp(meta.get("difficulty", "Normal")),
+            "mastery_level":  mastery["level"],
+            "mastery_label":  mastery["label"],
+            "recovery_tokens": tokens,
         }
-        for name, dates in habit_dates.items()
-    }
+    return out
+
+def _build_life_balance(streaks: dict) -> list[dict]:
+    """Completion rate per category over last 14 days."""
+    start14  = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    expected = 14
+    by_cat: dict[str, list] = defaultdict(list)
+    try:
+        result = supabase.table("habits").select("name, completed_at").gte("completed_at", start14).execute()
+        meta   = _fetch_habit_meta()
+        for row in result.data:
+            cat = meta.get(row["name"], {}).get("category") or "Productivity"
+            by_cat[cat].append(row["completed_at"])
+    except Exception:
+        pass
+    all_cats = HABIT_CATEGORIES
+    out = []
+    for cat in all_cats:
+        dates  = by_cat.get(cat, [])
+        unique = len(set(dates))
+        rate   = round(unique / expected * 100)
+        out.append({"category": cat, "rate": min(rate, 100), "logs": unique})
+    return out
+
+def _build_habit_heatmap(days: int = 365) -> list[dict]:
+    """Return daily habit completion counts for heatmap."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    try:
+        result = supabase.table("habits").select("completed_at").gte("completed_at", start).execute()
+        counts: dict[str, int] = defaultdict(int)
+        for row in result.data:
+            counts[row["completed_at"]] += 1
+        return [{"date": d, "count": c} for d, c in sorted(counts.items())]
+    except Exception:
+        return []
+
+def _check_habit_quest_triggers(name: str, streak: int, total: int, category: str) -> list[dict]:
+    """Return quest suggestions triggered by habit milestones."""
+    triggers = []
+    if streak == 7:
+        triggers.append({"title": f"{name} — 7-Day Streak Milestone", "category": category or "Personal Growth"})
+    if total == 30:
+        triggers.append({"title": f"{name} — 30 Completions Mastery Quest", "category": category or "Personal Growth"})
+    if total == 90:
+        triggers.append({"title": f"Advanced {name} Practice", "category": category or "Personal Growth"})
+    return triggers
+
+def _maybe_evolve_habit(name: str, total: int) -> Optional[dict]:
+    """Check if habit should evolve."""
+    for threshold in EVOLUTION_THRESHOLDS:
+        if total == threshold:
+            stage = EVOLUTION_THRESHOLDS.index(threshold) + 2
+            return {
+                "evolves": True,
+                "stage": stage,
+                "message": f"'{name}' is ready to evolve to Stage {stage}! Consider increasing its difficulty or scope.",
+            }
+    return None
 
 @app.post("/habits")
 def log_habit(habit: HabitLog):
-    data = {
-        "name": habit.name,
-        "completed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    xp    = _habit_xp(habit.difficulty)
+
+    # Check if already logged today (idempotent per day per name)
+    existing = (
+        supabase.table("habits")
+        .select("id")
+        .eq("name", habit.name)
+        .eq("completed_at", today)
+        .execute()
+    )
+    if existing.data:
+        return {"status": "already_logged", "message": f"'{habit.name}' already logged today."}
+
+    # Try full insert with new columns; fall back to legacy schema if columns missing
+    data_full = {
+        "name":         habit.name,
+        "category":     habit.category,
+        "difficulty":   habit.difficulty,
+        "linked_skill": habit.linked_skill,
+        "completed_at": today,
+        "created_at":   datetime.now(timezone.utc).isoformat(),
     }
-    result = supabase.table("habits").insert(data).execute()
-    # Grant XP for logging a habit
-    ledger_add("habit", f"{habit.name}:{data['completed_at']}", "Personal Growth", 10)
+    try:
+        result = supabase.table("habits").insert(data_full).execute()
+    except Exception:
+        result = supabase.table("habits").insert({
+            "name":         habit.name,
+            "completed_at": today,
+            "created_at":   datetime.now(timezone.utc).isoformat(),
+        }).execute()
+
+    # XP to Personal Growth (always)
+    ledger_add("habit", f"{habit.name}:{today}", "Personal Growth", xp)
+
+    # XP to linked skill category too
+    if habit.linked_skill and habit.linked_skill in SKILL_TREES:
+        ledger_add("habit_skill", f"{habit.name}:{today}:skill", habit.linked_skill, xp)
+
     new_achievements = award_achievements()
-    return {"status": "logged", "habit": result.data[0], "new_achievements": new_achievements}
+
+    # Streaks + mastery for response
+    all_dates = sorted({r["completed_at"] for r in
+        supabase.table("habits").select("completed_at").eq("name", habit.name).execute().data},
+        reverse=True)
+    streak  = calc_streak(all_dates, today)
+    total   = len(all_dates)
+    mastery = _habit_mastery_level(total)
+    evolve  = _maybe_evolve_habit(habit.name, total)
+    quests  = _check_habit_quest_triggers(habit.name, streak, total, habit.category)
+
+    # Auto-create quest tasks if triggered
+    created_quests = []
+    for q in quests:
+        goal_data = build_goal_summary()
+        cat_goal  = next((g for g in goal_data if g["category"] == q["category"]), None)
+        if cat_goal:
+            t = supabase.table("goal_tasks").insert({
+                "goal_id": cat_goal["id"], "title": q["title"],
+                "is_completed": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            if t.data:
+                created_quests.append(t.data[0])
+
+    return {
+        "status":          "logged",
+        "habit":           result.data[0],
+        "xp_earned":       xp,
+        "streak":          streak,
+        "total_logs":      total,
+        "mastery":         mastery,
+        "evolution":       evolve,
+        "new_achievements": new_achievements,
+        "quest_triggers":  created_quests,
+    }
 
 @app.get("/habits/streaks")
 def get_streaks():
     return _compute_streaks_raw()
+
+@app.get("/habits/heatmap")
+def get_heatmap(days: int = 365):
+    return _build_habit_heatmap(days)
+
+@app.get("/habits/balance")
+def get_life_balance():
+    streaks = _compute_streaks_raw()
+    balance = _build_life_balance(streaks)
+    return {"balance": balance, "streaks": streaks}
+
+@app.post("/habits/recover")
+def use_recovery_token(req: RecoveryTokenUse):
+    """Use a recovery token to restore a missed day."""
+    tokens = _recovery_tokens(req.name)
+    if tokens["available"] < 1:
+        raise HTTPException(400, "No recovery tokens available.")
+    try:
+        supabase.table("habit_recovery_tokens").insert({
+            "habit_name":  req.name,
+            "restored_date": req.date,
+            "used_at":     datetime.now(timezone.utc).isoformat(),
+        }).execute()
+        # Insert the restored completion (legacy-safe)
+        try:
+            supabase.table("habits").insert({
+                "name":         req.name,
+                "completed_at": req.date,
+                "created_at":   datetime.now(timezone.utc).isoformat(),
+                "category":     "Productivity",
+                "difficulty":   "Normal",
+            }).execute()
+        except Exception:
+            supabase.table("habits").insert({
+                "name":         req.name,
+                "completed_at": req.date,
+                "created_at":   datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        return {"status": "restored", "date": req.date}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/habits/ai-insights")
+def habit_ai_insights():
+    """AI-generated insights about habit patterns and their correlations."""
+    streaks  = _compute_streaks_raw()
+    if not streaks:
+        return {"insight": "Log some habits first to unlock AI habit insights."}
+    balance  = _build_life_balance(streaks)
+    entries  = fetch_all_entries_light()
+    # Build correlation context: days with habits vs mood
+    mood_by_date: dict[str, list] = defaultdict(list)
+    for e in entries:
+        mood_by_date[e["created_at"][:10]].append(e["mood"])
+
+    habit_result = supabase.table("habits").select("name, completed_at").execute()
+    habits_by_date: dict[str, list] = defaultdict(list)
+    for r in habit_result.data:
+        habits_by_date[r["completed_at"]].append(r["name"])
+
+    # Simple correlation: mood on days with habits vs without
+    moods_with = []
+    moods_without = []
+    for date, moods in mood_by_date.items():
+        if habits_by_date.get(date):
+            moods_with.extend(moods)
+        else:
+            moods_without.extend(moods)
+
+    avg_with    = round(sum(moods_with)    / len(moods_with),    1) if moods_with    else None
+    avg_without = round(sum(moods_without) / len(moods_without), 1) if moods_without else None
+
+    strongest = max(streaks.items(), key=lambda x: x[1]["current_streak"], default=(None, {}))
+    weakest   = min(streaks.items(), key=lambda x: x[1]["current_streak"], default=(None, {}))
+    neglected = [c for c in balance if c["rate"] < 30]
+
+    prompt = f"""You are LiAInne analyzing habit data.
+
+Habit streaks: {_json.dumps({k: {"streak": v["current_streak"], "total": v["total_logs"], "category": v["category"]} for k,v in streaks.items()})}
+
+Life balance (last 14 days completion %): {_json.dumps(balance)}
+
+Strongest habit: {strongest[0]} ({strongest[1].get("current_streak",0)}-day streak)
+Weakest habit: {weakest[0]} ({weakest[1].get("current_streak",0)}-day streak)
+Neglected categories: {[c["category"] for c in neglected]}
+
+Mood on habit days: {avg_with}/5
+Mood on no-habit days: {avg_without}/5
+
+Write 2-3 sharp, specific observations (max 80 words total). Focus on:
+1. The most notable pattern
+2. A correlation if mood data shows one
+3. One action to take
+
+Be specific and personal. No generic advice."""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.8, max_tokens=150,
+    )
+    return {
+        "insight": response.choices[0].message.content,
+        "mood_with_habits":    avg_with,
+        "mood_without_habits": avg_without,
+        "neglected_categories": [c["category"] for c in neglected],
+        "strongest": strongest[0],
+        "weakest":   weakest[0],
+    }
 
 # ---------------------------------------------------------------------------
 # Goals + Milestones + Dependencies
@@ -650,10 +997,12 @@ def toggle_task(task_id: int):
 
     if is_completing:
         # Grant XP to the goal's category
-        goal = supabase.table("goals").select("category").eq("id", task.data["goal_id"]).single().execute()
+        goal = supabase.table("goals").select("*").eq("id", task.data["goal_id"]).single().execute()
         cat  = goal.data.get("category", "Personal Growth")
         ledger_add("task", str(task_id), cat, XP_PER_TASK)
         new_achievements = award_achievements()
+        # Check if this completes a skill node
+        skill_completion = _auto_complete_skill_node_if_done(task.data["goal_id"])
         # Check if any skill node just became unlockable
         newly_unlockable = _check_new_unlocks(cat)
         return {
@@ -662,6 +1011,7 @@ def toggle_task(task_id: int):
             "category": cat,
             "new_achievements": new_achievements,
             "newly_unlockable": newly_unlockable,
+            "skill_completion": skill_completion,
         }
     return updated.data[0]
 
@@ -767,138 +1117,474 @@ SKILL_TREES: dict[str, dict] = {
     "Study": {
         "label": "Computer Science", "icon": "📚", "color": "#6c8ebf",
         "nodes": [
-            {"id": "cs_fundamentals", "name": "Programming Fundamentals",
-             "xp_required": 0, "prerequisites": [],
-             "description": "Variables, loops, functions, and basic problem solving.",
-             "mastery_check": {"type": "reflection", "prompt": "Describe the difference between a loop and a function. Give a real example from your own study."}},
-            {"id": "cs_python", "name": "Python Basics",
-             "xp_required": 100, "prerequisites": ["cs_fundamentals"],
-             "description": "Syntax, data types, list comprehensions, modules.",
-             "mastery_check": {"type": "challenge", "prompt": "Write (or describe from memory) a Python function that takes a list of numbers and returns only the even ones using a list comprehension."}},
-            {"id": "cs_dsa", "name": "Data Structures",
-             "xp_required": 200, "prerequisites": ["cs_fundamentals"],
-             "description": "Arrays, linked lists, stacks, queues, hashmaps.",
-             "mastery_check": {"type": "quiz", "prompt": "Explain when you'd choose a hashmap over an array. Give a concrete use case you've encountered or studied."}},
-            {"id": "cs_algorithms", "name": "Algorithms",
-             "xp_required": 400, "prerequisites": ["cs_dsa"],
-             "description": "Sorting, searching, recursion, dynamic programming.",
-             "mastery_check": {"type": "challenge", "prompt": "Explain merge sort in your own words and describe why it's O(n log n). No need to write code — prove you understand it."}},
-            {"id": "cs_oop", "name": "Object-Oriented Programming",
-             "xp_required": 300, "prerequisites": ["cs_python"],
-             "description": "Classes, inheritance, polymorphism, design patterns.",
-             "mastery_check": {"type": "reflection", "prompt": "Describe a real project or exercise where you used inheritance or polymorphism. What problem did it solve?"}},
-            {"id": "cs_web", "name": "Web Development",
-             "xp_required": 350, "prerequisites": ["cs_oop"],
-             "description": "APIs, HTTP, frontend basics, backend frameworks.",
-             "mastery_check": {"type": "proof", "prompt": "Share a link to a project, GitHub repo, or describe in detail a web app you built. What does it do? What stack?"}},
-            {"id": "cs_ai", "name": "AI & Machine Learning",
-             "xp_required": 600, "prerequisites": ["cs_algorithms", "cs_oop"],
-             "description": "ML fundamentals, neural networks, model training.",
-             "mastery_check": {"type": "quiz", "prompt": "Explain overfitting: what causes it, how do you detect it, and two techniques to prevent it."}},
-            {"id": "cs_security", "name": "Cybersecurity",
-             "xp_required": 500, "prerequisites": ["cs_web", "cs_algorithms"],
-             "description": "Threats, encryption, auth, secure coding.",
-             "mastery_check": {"type": "challenge", "prompt": "Describe how SQL injection works and show (in pseudocode or plain English) how parameterized queries prevent it."}},
+            {
+                "id": "cs_fundamentals", "name": "Programming Fundamentals",
+                "xp_required": 0, "prerequisites": [],
+                "xp_reward": 100, "difficulty": "Beginner", "estimated_hours": 5,
+                "description": "Variables, loops, functions, and basic problem solving.",
+                "tasks": [
+                    "Understand what programming is and how computers execute code",
+                    "Install a development environment (VS Code + Python)",
+                    "Write your first program: Hello World",
+                    "Practice variables and data types",
+                    "Write a program using loops",
+                    "Write a program using functions",
+                    "Complete a reflection checkpoint in your journal",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "Describe the difference between a loop and a function. Give a real example from your own study."},
+            },
+            {
+                "id": "cs_python", "name": "Python Basics",
+                "xp_required": 100, "prerequisites": ["cs_fundamentals"],
+                "xp_reward": 150, "difficulty": "Beginner", "estimated_hours": 8,
+                "description": "Syntax, data types, list comprehensions, modules.",
+                "tasks": [
+                    "Learn Python syntax and indentation rules",
+                    "Master variables and data types (int, str, list, dict)",
+                    "Practice conditionals (if / elif / else)",
+                    "Write programs using for and while loops",
+                    "Define and call functions with parameters",
+                    "Use list comprehensions",
+                    "Import and use standard library modules",
+                    "Build a mini project (e.g. a calculator or to-do list)",
+                    "Pass the Python Basics quiz",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Write (or describe from memory) a Python function that takes a list of numbers and returns only the even ones using a list comprehension."},
+            },
+            {
+                "id": "cs_dsa", "name": "Data Structures",
+                "xp_required": 200, "prerequisites": ["cs_fundamentals"],
+                "xp_reward": 250, "difficulty": "Intermediate", "estimated_hours": 12,
+                "description": "Arrays, linked lists, stacks, queues, hashmaps.",
+                "tasks": [
+                    "Understand arrays and their time complexity",
+                    "Implement a singly linked list",
+                    "Build a stack using a list",
+                    "Build a queue using collections.deque",
+                    "Understand and use hashmaps (Python dicts)",
+                    "Solve 3 LeetCode Easy problems using arrays",
+                    "Solve 2 LeetCode Easy problems using hashmaps",
+                    "Build a mini project: implement a stack-based expression evaluator",
+                    "Pass the Data Structures quiz",
+                ],
+                "mastery_check": {"type": "quiz", "prompt": "Explain when you'd choose a hashmap over an array. Give a concrete use case you've encountered or studied."},
+            },
+            {
+                "id": "cs_oop", "name": "Object-Oriented Programming",
+                "xp_required": 300, "prerequisites": ["cs_python"],
+                "xp_reward": 200, "difficulty": "Intermediate", "estimated_hours": 10,
+                "description": "Classes, inheritance, polymorphism, design patterns.",
+                "tasks": [
+                    "Understand classes and objects",
+                    "Write a class with __init__, attributes, and methods",
+                    "Practice inheritance with a real example",
+                    "Understand polymorphism and method overriding",
+                    "Learn about encapsulation and private attributes",
+                    "Study 2 common design patterns (e.g. Factory, Singleton)",
+                    "Refactor an existing project to use OOP",
+                    "Pass the OOP reflection checkpoint",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "Describe a real project or exercise where you used inheritance or polymorphism. What problem did it solve?"},
+            },
+            {
+                "id": "cs_algorithms", "name": "Algorithms",
+                "xp_required": 400, "prerequisites": ["cs_dsa"],
+                "xp_reward": 300, "difficulty": "Advanced", "estimated_hours": 15,
+                "description": "Sorting, searching, recursion, dynamic programming.",
+                "tasks": [
+                    "Understand Big O notation",
+                    "Implement bubble sort and selection sort",
+                    "Implement merge sort and understand divide & conquer",
+                    "Implement binary search",
+                    "Understand and write recursive functions",
+                    "Solve 3 recursion problems (e.g. Fibonacci, factorial, tree traversal)",
+                    "Learn dynamic programming (memoization vs tabulation)",
+                    "Solve 2 DP problems (e.g. coin change, climbing stairs)",
+                    "Pass the Algorithms challenge",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Explain merge sort in your own words and describe why it's O(n log n). No need to write code — prove you understand it."},
+            },
+            {
+                "id": "cs_web", "name": "Web Development",
+                "xp_required": 350, "prerequisites": ["cs_oop"],
+                "xp_reward": 250, "difficulty": "Intermediate", "estimated_hours": 20,
+                "description": "APIs, HTTP, frontend basics, backend frameworks.",
+                "tasks": [
+                    "Understand how HTTP works (request/response, status codes)",
+                    "Learn HTML and CSS basics",
+                    "Build a static webpage",
+                    "Learn JavaScript fundamentals",
+                    "Consume a public REST API using fetch()",
+                    "Build a simple backend with FastAPI or Flask",
+                    "Connect frontend to backend API",
+                    "Deploy a project to a hosting platform",
+                    "Pass the Web Dev proof checkpoint",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "Share a link to a project, GitHub repo, or describe in detail a web app you built. What does it do? What stack?"},
+            },
+            {
+                "id": "cs_ai", "name": "AI & Machine Learning",
+                "xp_required": 600, "prerequisites": ["cs_algorithms", "cs_oop"],
+                "xp_reward": 400, "difficulty": "Advanced", "estimated_hours": 25,
+                "description": "ML fundamentals, neural networks, model training.",
+                "tasks": [
+                    "Understand supervised vs unsupervised learning",
+                    "Learn linear and logistic regression",
+                    "Train a model with scikit-learn",
+                    "Understand and handle overfitting (train/val/test split)",
+                    "Learn neural network fundamentals",
+                    "Build a neural network with PyTorch or Keras",
+                    "Study a real ML paper or Kaggle notebook",
+                    "Complete an end-to-end ML project",
+                    "Pass the ML quiz",
+                ],
+                "mastery_check": {"type": "quiz", "prompt": "Explain overfitting: what causes it, how do you detect it, and two techniques to prevent it."},
+            },
+            {
+                "id": "cs_security", "name": "Cybersecurity",
+                "xp_required": 500, "prerequisites": ["cs_web", "cs_algorithms"],
+                "xp_reward": 350, "difficulty": "Advanced", "estimated_hours": 18,
+                "description": "Threats, encryption, auth, secure coding.",
+                "tasks": [
+                    "Understand the OWASP Top 10 vulnerabilities",
+                    "Learn how SQL injection works and how to prevent it",
+                    "Learn about XSS and CSRF attacks",
+                    "Understand symmetric vs asymmetric encryption",
+                    "Implement JWT-based authentication",
+                    "Perform a security audit on one of your own projects",
+                    "Study one real-world security breach case study",
+                    "Pass the Cybersecurity challenge",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Describe how SQL injection works and show (in pseudocode or plain English) how parameterized queries prevent it."},
+            },
         ],
     },
     "Fitness": {
         "label": "Physical Mastery", "icon": "💪", "color": "#82b366",
         "nodes": [
-            {"id": "fit_consistency", "name": "Consistency",
-             "xp_required": 0, "prerequisites": [],
-             "description": "Exercise at least 3x/week for 4 consecutive weeks.",
-             "mastery_check": {"type": "proof", "prompt": "Describe your current weekly exercise schedule. How many consecutive weeks have you maintained it? Be honest."}},
-            {"id": "fit_strength", "name": "Strength Foundation",
-             "xp_required": 100, "prerequisites": ["fit_consistency"],
-             "description": "Master compound lifts: squat, deadlift, press.",
-             "mastery_check": {"type": "reflection", "prompt": "What are your current working weights for squat, deadlift, and press? What cues do you focus on for each?"}},
-            {"id": "fit_cardio", "name": "Cardio Base",
-             "xp_required": 100, "prerequisites": ["fit_consistency"],
-             "description": "Run 5km without stopping.",
-             "mastery_check": {"type": "proof", "prompt": "Have you run 5km without stopping? Share your approximate time or describe the experience."}},
-            {"id": "fit_nutrition", "name": "Nutrition Basics",
-             "xp_required": 150, "prerequisites": ["fit_consistency"],
-             "description": "Track macros, meal prep, understand caloric balance.",
-             "mastery_check": {"type": "quiz", "prompt": "Explain what a caloric deficit is and roughly how many calories are in 1g of protein, fat, and carbs."}},
-            {"id": "fit_advanced", "name": "Advanced Training",
-             "xp_required": 400, "prerequisites": ["fit_strength", "fit_cardio"],
-             "description": "Periodization, progressive overload, recovery.",
-             "mastery_check": {"type": "challenge", "prompt": "Design a 4-week progressive overload plan for one compound lift. Show the week-by-week progression."}},
+            {
+                "id": "fit_consistency", "name": "Consistency",
+                "xp_required": 0, "prerequisites": [],
+                "xp_reward": 100, "difficulty": "Beginner", "estimated_hours": 12,
+                "description": "Exercise at least 3x/week for 4 consecutive weeks.",
+                "tasks": [
+                    "Schedule 3 workout days per week in your calendar",
+                    "Complete week 1 (3 sessions)",
+                    "Complete week 2 (3 sessions)",
+                    "Complete week 3 (3 sessions)",
+                    "Complete week 4 (3 sessions)",
+                    "Log each session in your journal",
+                    "Write a reflection: what made it easy or hard to stay consistent?",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "Describe your current weekly exercise schedule. How many consecutive weeks have you maintained it? Be honest."},
+            },
+            {
+                "id": "fit_strength", "name": "Strength Foundation",
+                "xp_required": 100, "prerequisites": ["fit_consistency"],
+                "xp_reward": 150, "difficulty": "Intermediate", "estimated_hours": 10,
+                "description": "Master compound lifts: squat, deadlift, press.",
+                "tasks": [
+                    "Learn squat form (watch tutorial + practice with bodyweight)",
+                    "Learn deadlift form (start with Romanian deadlift)",
+                    "Learn overhead press form",
+                    "Establish starting weights for all 3 lifts",
+                    "Complete 4 strength sessions applying progressive overload",
+                    "Track all weights in a log",
+                    "Write a reflection on your current strengths and weaknesses",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "What are your current working weights for squat, deadlift, and press? What cues do you focus on for each?"},
+            },
+            {
+                "id": "fit_cardio", "name": "Cardio Base",
+                "xp_required": 100, "prerequisites": ["fit_consistency"],
+                "xp_reward": 100, "difficulty": "Beginner", "estimated_hours": 6,
+                "description": "Run 5km without stopping.",
+                "tasks": [
+                    "Run/walk 2km without stopping",
+                    "Run/walk 3km without stopping",
+                    "Complete 3 cardio sessions this week",
+                    "Run 4km without stopping",
+                    "Complete your first 5km without stopping",
+                    "Log your 5km time",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "Have you run 5km without stopping? Share your approximate time or describe the experience."},
+            },
+            {
+                "id": "fit_nutrition", "name": "Nutrition Basics",
+                "xp_required": 150, "prerequisites": ["fit_consistency"],
+                "xp_reward": 125, "difficulty": "Beginner", "estimated_hours": 4,
+                "description": "Track macros, meal prep, understand caloric balance.",
+                "tasks": [
+                    "Calculate your TDEE (Total Daily Energy Expenditure)",
+                    "Learn the calorie counts for protein, fat, and carbs per gram",
+                    "Track your food intake for 3 days using an app",
+                    "Plan and prep one week of meals",
+                    "Identify your top 3 nutrition habits to improve",
+                    "Pass the Nutrition quiz",
+                ],
+                "mastery_check": {"type": "quiz", "prompt": "Explain what a caloric deficit is and roughly how many calories are in 1g of protein, fat, and carbs."},
+            },
+            {
+                "id": "fit_advanced", "name": "Advanced Training",
+                "xp_required": 400, "prerequisites": ["fit_strength", "fit_cardio"],
+                "xp_reward": 300, "difficulty": "Advanced", "estimated_hours": 15,
+                "description": "Periodization, progressive overload, recovery.",
+                "tasks": [
+                    "Understand periodization (linear, undulating, block)",
+                    "Design a 4-week progressive overload plan for one lift",
+                    "Learn about deload weeks",
+                    "Study recovery: sleep, active rest, mobility",
+                    "Implement the 4-week plan and track results",
+                    "Adjust the plan based on performance",
+                    "Write a reflection: what improved? What needs work?",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Design a 4-week progressive overload plan for one compound lift. Show the week-by-week progression."},
+            },
         ],
     },
     "Finance": {
         "label": "Financial Intelligence", "icon": "💰", "color": "#d6a73a",
         "nodes": [
-            {"id": "fin_budgeting", "name": "Budgeting",
-             "xp_required": 0, "prerequisites": [],
-             "description": "Track income and expenses, build a monthly budget.",
-             "mastery_check": {"type": "reflection", "prompt": "What does your current monthly budget look like? What are your top 3 expense categories?"}},
-            {"id": "fin_emergency", "name": "Emergency Fund",
-             "xp_required": 100, "prerequisites": ["fin_budgeting"],
-             "description": "Save 3 months of expenses.",
-             "mastery_check": {"type": "proof", "prompt": "How many months of expenses do you currently have saved? What's your monthly expense baseline?"}},
-            {"id": "fin_debt", "name": "Debt Elimination",
-             "xp_required": 150, "prerequisites": ["fin_budgeting"],
-             "description": "Avalanche or snowball method to eliminate debt.",
-             "mastery_check": {"type": "quiz", "prompt": "Explain the difference between the avalanche and snowball debt repayment methods. Which would you choose and why?"}},
-            {"id": "fin_investing", "name": "Investing Basics",
-             "xp_required": 300, "prerequisites": ["fin_emergency"],
-             "description": "Index funds, ETFs, compound interest, tax-advantaged accounts.",
-             "mastery_check": {"type": "challenge", "prompt": "Explain compound interest with a concrete example: what happens to ₱10,000 invested at 8% annually for 10 years?"}},
-            {"id": "fin_income", "name": "Income Growth",
-             "xp_required": 400, "prerequisites": ["fin_debt", "fin_investing"],
-             "description": "Side income, salary negotiation, skill monetization.",
-             "mastery_check": {"type": "reflection", "prompt": "What's one concrete step you've taken or plan to take to grow your income this year?"}},
+            {
+                "id": "fin_budgeting", "name": "Budgeting",
+                "xp_required": 0, "prerequisites": [],
+                "xp_reward": 100, "difficulty": "Beginner", "estimated_hours": 3,
+                "description": "Track income and expenses, build a monthly budget.",
+                "tasks": [
+                    "List all your monthly income sources",
+                    "List all your monthly fixed expenses",
+                    "List all your monthly variable expenses",
+                    "Categorize expenses (needs vs wants)",
+                    "Build a monthly budget (use a spreadsheet or app)",
+                    "Track actual vs planned spending for 2 weeks",
+                    "Write a reflection: where does your money actually go?",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "What does your current monthly budget look like? What are your top 3 expense categories?"},
+            },
+            {
+                "id": "fin_emergency", "name": "Emergency Fund",
+                "xp_required": 100, "prerequisites": ["fin_budgeting"],
+                "xp_reward": 125, "difficulty": "Beginner", "estimated_hours": 2,
+                "description": "Save 3 months of expenses.",
+                "tasks": [
+                    "Calculate your monthly essential expenses",
+                    "Calculate your 3-month emergency fund target",
+                    "Open a separate savings account if you don't have one",
+                    "Set up automatic monthly transfers to savings",
+                    "Track your progress toward the target",
+                    "Reach 1 month of savings",
+                    "Reach 3 months of savings",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "How many months of expenses do you currently have saved? What's your monthly expense baseline?"},
+            },
+            {
+                "id": "fin_debt", "name": "Debt Elimination",
+                "xp_required": 150, "prerequisites": ["fin_budgeting"],
+                "xp_reward": 150, "difficulty": "Intermediate", "estimated_hours": 4,
+                "description": "Avalanche or snowball method to eliminate debt.",
+                "tasks": [
+                    "List all your debts (balance, interest rate, minimum payment)",
+                    "Learn the avalanche method",
+                    "Learn the snowball method",
+                    "Choose a method and write your payoff plan",
+                    "Make one extra payment toward your highest-priority debt",
+                    "Set a target debt-free date",
+                ],
+                "mastery_check": {"type": "quiz", "prompt": "Explain the difference between the avalanche and snowball debt repayment methods. Which would you choose and why?"},
+            },
+            {
+                "id": "fin_investing", "name": "Investing Basics",
+                "xp_required": 300, "prerequisites": ["fin_emergency"],
+                "xp_reward": 250, "difficulty": "Intermediate", "estimated_hours": 8,
+                "description": "Index funds, ETFs, compound interest, tax-advantaged accounts.",
+                "tasks": [
+                    "Understand compound interest with a concrete example",
+                    "Learn the difference between stocks, bonds, and index funds",
+                    "Learn what an ETF is",
+                    "Research low-cost index fund options in your country",
+                    "Open a brokerage or retirement account",
+                    "Make your first investment (even a small one)",
+                    "Set up recurring investment contributions",
+                    "Pass the Investing challenge",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Explain compound interest with a concrete example: what happens to ₱10,000 invested at 8% annually for 10 years?"},
+            },
+            {
+                "id": "fin_income", "name": "Income Growth",
+                "xp_required": 400, "prerequisites": ["fin_debt", "fin_investing"],
+                "xp_reward": 300, "difficulty": "Advanced", "estimated_hours": 10,
+                "description": "Side income, salary negotiation, skill monetization.",
+                "tasks": [
+                    "Identify 3 realistic income growth opportunities",
+                    "Research market salaries for your role",
+                    "Prepare a case for a salary negotiation or rate increase",
+                    "Take one action toward a side income stream",
+                    "Set a specific income goal with a deadline",
+                    "Write a reflection: what skills of yours have the most market value?",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "What's one concrete step you've taken or plan to take to grow your income this year?"},
+            },
         ],
     },
     "Creativity": {
         "label": "Creative Mastery", "icon": "🎨", "color": "#9c70c4",
         "nodes": [
-            {"id": "cr_basics", "name": "Creative Foundations",
-             "xp_required": 0, "prerequisites": [],
-             "description": "Daily practice habit, overcoming blank-page paralysis.",
-             "mastery_check": {"type": "reflection", "prompt": "Describe your current creative practice. How often do you create? What do you make?"}},
-            {"id": "cr_craft", "name": "Craft Fundamentals",
-             "xp_required": 100, "prerequisites": ["cr_basics"],
-             "description": "Core techniques for your chosen medium.",
-             "mastery_check": {"type": "proof", "prompt": "Share or describe a piece of work that demonstrates a core technique in your medium. What technique does it show?"}},
-            {"id": "cr_voice", "name": "Personal Voice",
-             "xp_required": 250, "prerequisites": ["cr_craft"],
-             "description": "Develop a distinct style others can recognise.",
-             "mastery_check": {"type": "reflection", "prompt": "How would you describe your creative style in 3 words? What influences it most?"}},
-            {"id": "cr_project", "name": "Finish a Project",
-             "xp_required": 200, "prerequisites": ["cr_craft"],
-             "description": "Complete one significant creative work end-to-end.",
-             "mastery_check": {"type": "proof", "prompt": "Describe a complete creative project you've finished recently. What was the hardest part of finishing it?"}},
-            {"id": "cr_share", "name": "Share Your Work",
-             "xp_required": 350, "prerequisites": ["cr_voice", "cr_project"],
-             "description": "Publish, perform, or exhibit. Feedback loop matters.",
-             "mastery_check": {"type": "proof", "prompt": "Where did you share your work? What was the response? (A link, a description of a performance, or a screenshot description works.)"}},
+            {
+                "id": "cr_basics", "name": "Creative Foundations",
+                "xp_required": 0, "prerequisites": [],
+                "xp_reward": 100, "difficulty": "Beginner", "estimated_hours": 4,
+                "description": "Daily practice habit, overcoming blank-page paralysis.",
+                "tasks": [
+                    "Choose your primary creative medium",
+                    "Set a daily practice time (even 15 minutes counts)",
+                    "Complete 5 consecutive days of creative practice",
+                    "Make something bad on purpose (kill perfectionism)",
+                    "Fill one page / screen / canvas with free experimentation",
+                    "Write a reflection: what does your creative practice look like right now?",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "Describe your current creative practice. How often do you create? What do you make?"},
+            },
+            {
+                "id": "cr_craft", "name": "Craft Fundamentals",
+                "xp_required": 100, "prerequisites": ["cr_basics"],
+                "xp_reward": 150, "difficulty": "Intermediate", "estimated_hours": 10,
+                "description": "Core techniques for your chosen medium.",
+                "tasks": [
+                    "Identify 3 core techniques essential to your medium",
+                    "Study and practice technique 1 with focused repetition",
+                    "Study and practice technique 2 with focused repetition",
+                    "Study and practice technique 3 with focused repetition",
+                    "Analyze a master work in your medium and identify the techniques used",
+                    "Create one piece that deliberately applies all 3 techniques",
+                    "Pass the Craft proof checkpoint",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "Share or describe a piece of work that demonstrates a core technique in your medium. What technique does it show?"},
+            },
+            {
+                "id": "cr_voice", "name": "Personal Voice",
+                "xp_required": 250, "prerequisites": ["cr_craft"],
+                "xp_reward": 200, "difficulty": "Intermediate", "estimated_hours": 8,
+                "description": "Develop a distinct style others can recognise.",
+                "tasks": [
+                    "List 5 creators whose work resonates with you and why",
+                    "Identify the patterns in what you're drawn to",
+                    "Create 3 pieces exploring a consistent theme or aesthetic",
+                    "Share your work with someone and ask what word comes to mind",
+                    "Describe your style in 3 words and write about what shapes it",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "How would you describe your creative style in 3 words? What influences it most?"},
+            },
+            {
+                "id": "cr_project", "name": "Finish a Project",
+                "xp_required": 200, "prerequisites": ["cr_craft"],
+                "xp_reward": 175, "difficulty": "Intermediate", "estimated_hours": 15,
+                "description": "Complete one significant creative work end-to-end.",
+                "tasks": [
+                    "Define the scope of one significant creative project",
+                    "Create an outline or plan for the project",
+                    "Complete 25% of the project",
+                    "Complete 50% of the project",
+                    "Complete 75% of the project",
+                    "Complete and finalize the project",
+                    "Write a reflection: what was hardest about finishing?",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "Describe a complete creative project you've finished recently. What was the hardest part of finishing it?"},
+            },
+            {
+                "id": "cr_share", "name": "Share Your Work",
+                "xp_required": 350, "prerequisites": ["cr_voice", "cr_project"],
+                "xp_reward": 250, "difficulty": "Advanced", "estimated_hours": 5,
+                "description": "Publish, perform, or exhibit. Feedback loop matters.",
+                "tasks": [
+                    "Choose a platform or venue to share your work",
+                    "Prepare one piece for public sharing",
+                    "Share your work publicly",
+                    "Collect at least 3 pieces of feedback",
+                    "Write a reflection: how did sharing feel? What did you learn?",
+                ],
+                "mastery_check": {"type": "proof", "prompt": "Where did you share your work? What was the response? (A link, a description of a performance, or a screenshot description works.)"},
+            },
         ],
     },
     "Personal Growth": {
         "label": "Self Mastery", "icon": "🌱", "color": "#d07040",
         "nodes": [
-            {"id": "pg_awareness", "name": "Self Awareness",
-             "xp_required": 0, "prerequisites": [],
-             "description": "Daily journaling, identify core values and blind spots.",
-             "mastery_check": {"type": "reflection", "prompt": "Name 3 of your core values and one blind spot you've identified through journaling. Be specific."}},
-            {"id": "pg_habits", "name": "Habit Architecture",
-             "xp_required": 100, "prerequisites": ["pg_awareness"],
-             "description": "Design habit stacks, track streaks, remove friction.",
-             "mastery_check": {"type": "challenge", "prompt": "Describe one habit you've built successfully. What cue triggers it, what's the routine, and what's the reward?"}},
-            {"id": "pg_mindset", "name": "Growth Mindset",
-             "xp_required": 150, "prerequisites": ["pg_awareness"],
-             "description": "Reframe failure, embrace discomfort, learn from feedback.",
-             "mastery_check": {"type": "reflection", "prompt": "Describe a recent failure or setback. How did you respond to it? What did you learn?"}},
-            {"id": "pg_focus", "name": "Deep Focus",
-             "xp_required": 200, "prerequisites": ["pg_habits"],
-             "description": "Deep work sessions, distraction elimination, flow state.",
-             "mastery_check": {"type": "challenge", "prompt": "Describe your current deep work setup. How long can you focus without distraction? What's your best session length this week?"}},
-            {"id": "pg_leadership", "name": "Leadership",
-             "xp_required": 500, "prerequisites": ["pg_mindset", "pg_focus"],
-             "description": "Influence, communication, accountability to others.",
-             "mastery_check": {"type": "reflection", "prompt": "Describe a situation where you led, influenced, or held someone (including yourself) accountable. What was the outcome?"}},
+            {
+                "id": "pg_awareness", "name": "Self Awareness",
+                "xp_required": 0, "prerequisites": [],
+                "xp_reward": 100, "difficulty": "Beginner", "estimated_hours": 3,
+                "description": "Daily journaling, identify core values and blind spots.",
+                "tasks": [
+                    "Journal every day for 7 days",
+                    "Write down your top 5 core values",
+                    "Identify one significant blind spot through journaling",
+                    "Ask someone you trust for one honest piece of feedback",
+                    "Write a reflection: who are you, really?",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "Name 3 of your core values and one blind spot you've identified through journaling. Be specific."},
+            },
+            {
+                "id": "pg_habits", "name": "Habit Architecture",
+                "xp_required": 100, "prerequisites": ["pg_awareness"],
+                "xp_reward": 150, "difficulty": "Intermediate", "estimated_hours": 6,
+                "description": "Design habit stacks, track streaks, remove friction.",
+                "tasks": [
+                    "Read about habit loops (cue, routine, reward)",
+                    "Identify one habit you want to build",
+                    "Define the cue, routine, and reward for that habit",
+                    "Remove 3 sources of friction for that habit",
+                    "Complete the habit for 14 consecutive days",
+                    "Design a habit stack (attach new habit to an existing one)",
+                    "Write a reflection: describe exactly how you built this habit",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Describe one habit you've built successfully. What cue triggers it, what's the routine, and what's the reward?"},
+            },
+            {
+                "id": "pg_mindset", "name": "Growth Mindset",
+                "xp_required": 150, "prerequisites": ["pg_awareness"],
+                "xp_reward": 125, "difficulty": "Beginner", "estimated_hours": 4,
+                "description": "Reframe failure, embrace discomfort, learn from feedback.",
+                "tasks": [
+                    "Study the concept of fixed vs growth mindset",
+                    "Identify one area where you have a fixed mindset",
+                    "Take on one challenge that is slightly beyond your comfort zone",
+                    "Write about a recent failure: what did it teach you?",
+                    "Actively seek critical feedback on something you made",
+                    "Write a reflection: how do you respond to failure now vs before?",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "Describe a recent failure or setback. How did you respond to it? What did you learn?"},
+            },
+            {
+                "id": "pg_focus", "name": "Deep Focus",
+                "xp_required": 200, "prerequisites": ["pg_habits"],
+                "xp_reward": 200, "difficulty": "Intermediate", "estimated_hours": 8,
+                "description": "Deep work sessions, distraction elimination, flow state.",
+                "tasks": [
+                    "Audit your current distractions (phone, notifications, environment)",
+                    "Remove or silence your top 3 distractions",
+                    "Complete a 45-minute deep work session without interruption",
+                    "Complete a 90-minute deep work session",
+                    "Build a consistent deep work routine (same time, same place)",
+                    "Complete 10 deep work sessions total",
+                    "Write a reflection: describe your best focus session this week",
+                ],
+                "mastery_check": {"type": "challenge", "prompt": "Describe your current deep work setup. How long can you focus without distraction? What's your best session length this week?"},
+            },
+            {
+                "id": "pg_leadership", "name": "Leadership",
+                "xp_required": 500, "prerequisites": ["pg_mindset", "pg_focus"],
+                "xp_reward": 350, "difficulty": "Advanced", "estimated_hours": 12,
+                "description": "Influence, communication, accountability to others.",
+                "tasks": [
+                    "Read one book or resource on leadership or communication",
+                    "Identify one person you can mentor, support, or lead",
+                    "Have one honest accountability conversation with someone",
+                    "Lead or initiate one group project or initiative",
+                    "Practice public speaking or presenting (even to a small group)",
+                    "Write a reflection: describe a moment you influenced someone positively",
+                ],
+                "mastery_check": {"type": "reflection", "prompt": "Describe a situation where you led, influenced, or held someone (including yourself) accountable. What was the outcome?"},
+            },
         ],
     },
 }
@@ -910,18 +1596,45 @@ def get_completed_node_ids(category: str) -> set[str]:
     )
     return {row["node_id"] for row in result.data}
 
+def _get_active_skill_goals(category: str) -> dict:
+    """Returns {node_id: {goal_id, completed_tasks, total_tasks, progress}} for active skill goals."""
+    try:
+        goals = supabase.table("goals").select("id, tags").eq("category", category).execute()
+        tasks = supabase.table("goal_tasks").select("goal_id, is_completed").execute()
+        tasks_by_goal = defaultdict(list)
+        for t in tasks.data:
+            tasks_by_goal[t["goal_id"]].append(t["is_completed"])
+        result = {}
+        for g in goals.data:
+            nid = node_id_from_tags(g.get("tags") or [])
+            if nid:
+                tlist = tasks_by_goal.get(g["id"], [])
+                done  = sum(1 for x in tlist if x)
+                total = len(tlist)
+                result[nid] = {
+                    "goal_id":         g["id"],
+                    "completed_tasks":  done,
+                    "total_tasks":      total,
+                    "progress":         round(done / total * 100) if total else 0,
+                }
+        return result
+    except Exception:
+        return {}
+
 def resolve_tree(category: str) -> dict:
     tree_def = SKILL_TREES.get(category)
     if not tree_def:
         return {}
-    xp           = get_category_xp(category)
+    xp            = get_category_xp(category)
     completed_ids = get_completed_node_ids(category)
-    resolved     = []
+    active_goals  = _get_active_skill_goals(category)
+    resolved      = []
     for node in tree_def["nodes"]:
         prereqs_met = all(p in completed_ids for p in node["prerequisites"])
         xp_met      = xp >= node["xp_required"]
         unlocked    = prereqs_met and xp_met
         completed   = node["id"] in completed_ids
+        active      = active_goals.get(node["id"])
         resolved.append({
             **node,
             "unlocked":    unlocked,
@@ -929,6 +1642,7 @@ def resolve_tree(category: str) -> dict:
             "prereqs_met": prereqs_met,
             "xp_met":      xp_met,
             "category_xp": xp,
+            "active_goal": active,   # None or {goal_id, completed_tasks, total_tasks, progress}
             "leads_to": [n["id"] for n in tree_def["nodes"] if node["id"] in n["prerequisites"]],
         })
     return {**tree_def, "category": category, "category_xp": xp, "nodes": resolved}
@@ -1102,6 +1816,124 @@ def complete_skill_node(node_id: str, category: str):
 def uncomplete_skill_node(node_id: str, category: str):
     supabase.table("skill_progress").delete().eq("node_id", node_id).execute()
     return {"status": "removed", "node_id": node_id}
+
+# ---------------------------------------------------------------------------
+# Skill-Driven Quest System — Start Learning
+# ---------------------------------------------------------------------------
+
+@app.post("/skills/{node_id}/start")
+def start_learning(node_id: str, category: str):
+    """
+    Creates a Goal + Tasks from a skill node template.
+    Idempotent: if a goal already exists for this node, returns it.
+    """
+    tree = resolve_tree(category)
+    if not tree:
+        raise HTTPException(404, "Tree not found")
+    node = next((n for n in tree["nodes"] if n["id"] == node_id), None)
+    if not node:
+        raise HTTPException(404, "Node not found")
+    if not node["unlocked"]:
+        raise HTTPException(403, "Node is locked. Complete prerequisites first.")
+    if node["completed"]:
+        raise HTTPException(400, "Node already completed.")
+
+    # Idempotency: return existing active goal if already started
+    if node.get("active_goal"):
+        ag = node["active_goal"]
+        return {
+            "status":  "already_active",
+            "goal_id": ag["goal_id"],
+            "message": f"You already have an active learning goal for {node['name']}.",
+        }
+
+    # Create the goal, tagged with the skill node id
+    goal_result = supabase.table("goals").insert({
+        "title":        f"Learn {node['name']}",
+        "category":     category,
+        "is_completed":  False,
+        "tags":         [tag_for_node(node_id)],
+        "created_at":   datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    goal_id = goal_result.data[0]["id"]
+
+    # Create tasks from the node blueprint
+    task_rows = [
+        {
+            "goal_id":      goal_id,
+            "title":        task_title,
+            "is_completed": False,
+            "created_at":   datetime.now(timezone.utc).isoformat(),
+        }
+        for task_title in node.get("tasks", [])
+    ]
+    if task_rows:
+        supabase.table("goal_tasks").insert(task_rows).execute()
+
+    return {
+        "status":   "started",
+        "goal_id":  goal_id,
+        "node_id":  node_id,
+        "category": category,
+        "goal_title": f"Learn {node['name']}",
+        "task_count": len(task_rows),
+        "xp_reward":  node.get("xp_reward", 100),
+    }
+
+def _auto_complete_skill_node_if_done(goal_id: int):
+    """
+    Called after every task toggle.
+    If all tasks in a skill-linked goal are complete, automatically
+    completes the skill node (bypassing mastery check — tasks ARE the proof).
+    """
+    try:
+        goal = supabase.table("goals").select("*").eq("id", goal_id).single().execute()
+        if not goal.data:
+            return None
+        node_id = node_id_from_tags(goal.data.get("tags") or [])
+        if not node_id:
+            return None  # Not a skill-linked goal
+
+        tasks = supabase.table("goal_tasks").select("is_completed").eq("goal_id", goal_id).execute()
+        if not tasks.data:
+            return None
+        if not all(t["is_completed"] for t in tasks.data):
+            return None  # Not all done yet
+
+        category = goal.data["category"]
+        tree = resolve_tree(category)
+        node = next((n for n in tree["nodes"] if n["id"] == node_id), None)
+        if not node or node["completed"]:
+            return None  # Already done
+
+        # Mark node completed
+        supabase.table("skill_progress").upsert({
+            "node_id":      node_id,
+            "category":     category,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+
+        xp_bonus = node.get("xp_reward", node["xp_required"] // 2 + 50)
+        ledger_add("skill_node", node_id, category, xp_bonus)
+        new_achievements = award_achievements()
+
+        updated_tree = resolve_tree(category)
+        newly_unlocked = [
+            n["name"] for n in updated_tree["nodes"]
+            if n["unlocked"] and not n["completed"] and n["id"] != node_id
+        ]
+
+        return {
+            "skill_completed": True,
+            "node_id":         node_id,
+            "node_name":       node["name"],
+            "category":        category,
+            "xp_earned":       xp_bonus,
+            "new_achievements": new_achievements,
+            "newly_unlocked":  newly_unlocked,
+        }
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # Achievements
@@ -1513,11 +2345,12 @@ def build_habit_block() -> str:
     habit_dates: dict[str, list] = defaultdict(list)
     for row in result.data:
         habit_dates[row["name"]].append(row["completed_at"])
+    habit_meta = _fetch_habit_meta()
     if not habit_dates:
         return "No habits tracked yet."
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return "\n".join(
-        f"- {name}: {calc_streak(sorted(set(dates), reverse=True), today)}-day streak, "
+        f"- {name} [{habit_meta.get(name,{}).get('category','?')}]: {calc_streak(sorted(set(dates), reverse=True), today)}-day streak, "
         f"{len(dates)} total, last done {sorted(set(dates), reverse=True)[0] if dates else 'never'}"
         for name, dates in habit_dates.items()
     )

@@ -196,10 +196,56 @@
         <!-- PAGE: Habits -->
         <section class="page" id="page-habits">
             <div class="page-header"><h1>Habits</h1><p class="page-sub">Build your streaks</p></div>
-            <form id="habit-form" class="inline-form">
-                <input type="text" id="habit-name" placeholder="Habit name (e.g. Exercise)..." required>
-                <button type="submit">Log Habit</button>
+
+            <!-- Life Balance Dashboard -->
+            <div class="habit-balance-card" id="habit-balance-card">
+                <div class="hb-label">⚖️ Life Balance</div>
+                <div class="hb-bars" id="hb-bars">Loading…</div>
+            </div>
+
+            <!-- AI Habit Insights -->
+            <div class="ai-coach-card" id="habit-ai-insight-card" style="display:none">
+                <div class="ai-coach-label">✦ Habit AI Insights</div>
+                <div id="habit-ai-insight">Loading…</div>
+            </div>
+
+            <!-- Log Habit Form -->
+            <form id="habit-form" class="habit-log-form">
+                <div class="hlf-row">
+                    <input type="text" id="habit-name" placeholder="Habit name…" required class="hlf-name">
+                    <select id="habit-category" class="hlf-select">
+                        <option value="Physical">🏃 Physical</option>
+                        <option value="Learning">📚 Learning</option>
+                        <option value="Mind">🧘 Mind</option>
+                        <option value="Social">👥 Social</option>
+                        <option value="Productivity" selected>⚡ Productivity</option>
+                        <option value="Creativity">🎨 Creativity</option>
+                    </select>
+                    <select id="habit-difficulty" class="hlf-select">
+                        <option value="Easy">🟢 Easy (+5 XP)</option>
+                        <option value="Normal" selected>🟡 Normal (+10 XP)</option>
+                        <option value="Hard">🟠 Hard (+20 XP)</option>
+                        <option value="Elite">🔴 Elite (+30 XP)</option>
+                    </select>
+                    <select id="habit-skill" class="hlf-select">
+                        <option value="">No skill link</option>
+                        <option value="Study">📚 Study</option>
+                        <option value="Fitness">💪 Fitness</option>
+                        <option value="Finance">💰 Finance</option>
+                        <option value="Creativity">🎨 Creativity</option>
+                        <option value="Personal Growth">🌱 Personal Growth</option>
+                    </select>
+                    <button type="submit" class="hlf-btn">Log Habit</button>
+                </div>
             </form>
+
+            <!-- Heatmap -->
+            <div class="habit-heatmap-card">
+                <div class="hm-label">📅 Activity Heatmap</div>
+                <div id="habit-heatmap" class="hm-grid"></div>
+            </div>
+
+            <!-- Streaks / Habit cards -->
             <div id="streaks"></div>
         </section>
 
