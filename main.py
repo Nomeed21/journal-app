@@ -47,7 +47,6 @@ class EntryCreate(BaseModel):
     title: str
     content: str
     mood: int
-    goal_progress: int
     tags: list[str] = []
     entry_type: str = "free"
     energy: int = 3
@@ -80,7 +79,6 @@ class TaskCreate(BaseModel):
 
 class ActionEngineRequest(BaseModel):
     mood: int
-    goal_progress: int
     content: str
     energy: int = 3
     focus: int = 3
@@ -318,14 +316,14 @@ def predictive_analytics() -> dict:
     consistency_score = round(len(days_logged) / 14 * 100)
     declining_consistency = consistency_score < 50
 
-    # Stagnation: last 7 entries mood + goal both flat
+    # Stagnation: last 7 entries mood + energy both flat
     all_light = fetch_all_entries_light()
     stagnating = False
     if len(all_light) >= 7:
         last7 = all_light[-7:]
-        m_slope = linear_slope([e["mood"] for e in last7])
-        g_slope = linear_slope([e["goal_progress"] for e in last7])
-        stagnating = abs(m_slope) < 0.05 and abs(g_slope) < 0.3
+        m_slope = linear_slope([e["mood"]   for e in last7])
+        e_slope = linear_slope([e["energy"] for e in last7])
+        stagnating = abs(m_slope) < 0.05 and abs(e_slope) < 0.05
 
     return {
         "streak_at_risk":        streak_at_risk,
@@ -428,16 +426,43 @@ def reflect_on_plan(data: dict):
 def generate_embedding(text: str) -> list[float]:
     return embedding_model.encode(text).tolist()
 
+@app.get("/entries/today-status")
+def today_entry_status():
+    """Return which entry types have already been written today."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    result = (
+        supabase.table("journal_entries")
+        .select("entry_type")
+        .gte("created_at", today + "T00:00:00+00:00")
+        .execute()
+    )
+    done = {row["entry_type"] for row in result.data}
+    return {"done": list(done), "morning": "morning" in done, "night": "night" in done, "free": "free" in done}
+
 @app.post("/entries")
 def create_entry(entry: EntryCreate):
+    # Enforce one entry per type per day (skip check when editing)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    existing = (
+        supabase.table("journal_entries")
+        .select("id")
+        .eq("entry_type", entry.entry_type)
+        .gte("created_at", today + "T00:00:00+00:00")
+        .execute()
+    )
+    if existing.data:
+        existing_id = existing.data[0]["id"]
+        return {"status": "already_exists", "entry_type": entry.entry_type, "existing_id": existing_id,
+                "message": f"A {entry.entry_type} entry already exists for today. Edit it instead."}
+
     combined = (
         f"Title: {entry.title}. Content: {entry.content}. "
         f"Mood: {entry.mood}/5. Energy: {entry.energy}/5. "
-        f"Focus: {entry.focus}/5. Goal progress: {entry.goal_progress}%."
+        f"Focus: {entry.focus}/5."
     )
     data = {
         "title": entry.title, "content": entry.content,
-        "mood": entry.mood, "goal_progress": entry.goal_progress,
+        "mood": entry.mood,
         "energy": entry.energy, "focus": entry.focus,
         "entry_type": entry.entry_type,
         "embedding": generate_embedding(combined),
@@ -460,7 +485,7 @@ def create_entry(entry: EntryCreate):
 def get_entries(tag: Optional[str] = None, keyword: Optional[str] = None,
                 start_date: Optional[str] = None, end_date: Optional[str] = None):
     q = supabase.table("journal_entries").select(
-        "id, title, content, mood, goal_progress, energy, focus, entry_type, tags, created_at"
+        "id, title, content, mood, energy, focus, entry_type, tags, created_at"
     )
     if tag:        q = q.contains("tags", [tag])
     if keyword:    q = q.or_(f"title.ilike.%{keyword}%,content.ilike.%{keyword}%")
@@ -473,21 +498,19 @@ def get_trends(days: int = 30):
     start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     result = (
         supabase.table("journal_entries")
-        .select("mood, goal_progress, energy, focus, created_at")
+        .select("mood, energy, focus, created_at")
         .gte("created_at", start).order("created_at").execute()
     )
     daily = {}
     for e in result.data:
         date = e["created_at"][:10]
-        daily.setdefault(date, {"moods": [], "goals": [], "energies": [], "focuses": []})
+        daily.setdefault(date, {"moods": [], "energies": [], "focuses": []})
         daily[date]["moods"].append(e["mood"])
-        daily[date]["goals"].append(e["goal_progress"])
         daily[date]["energies"].append(e.get("energy") or 3)
         daily[date]["focuses"].append(e.get("focus") or 3)
     return [
         {"date": d,
          "avg_mood":   round(sum(v["moods"])    / len(v["moods"]), 1),
-         "avg_goal":   round(sum(v["goals"])    / len(v["goals"]), 1),
          "avg_energy": round(sum(v["energies"]) / len(v["energies"]), 1),
          "avg_focus":  round(sum(v["focuses"])  / len(v["focuses"]), 1)}
         for d, v in sorted(daily.items())
@@ -495,17 +518,15 @@ def get_trends(days: int = 30):
 
 @app.get("/entries/correlations")
 def get_correlations():
-    result = supabase.table("journal_entries").select("mood, goal_progress, created_at").execute()
-    days = {i: {"moods": [], "goals": []} for i in range(7)}
+    result = supabase.table("journal_entries").select("mood, created_at").execute()
+    days = {i: {"moods": []} for i in range(7)}
     for e in result.data:
         dow = datetime.fromisoformat(e["created_at"].replace("Z", "+00:00")).weekday()
         days[dow]["moods"].append(e["mood"])
-        days[dow]["goals"].append(e["goal_progress"])
     day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return [
         {"day": name,
-         "avg_mood": round(sum(days[i]["moods"]) / len(days[i]["moods"]), 1) if days[i]["moods"] else 0,
-         "avg_goal": round(sum(days[i]["goals"]) / len(days[i]["goals"]), 1) if days[i]["goals"] else 0}
+         "avg_mood": round(sum(days[i]["moods"]) / len(days[i]["moods"]), 1) if days[i]["moods"] else 0}
         for i, name in enumerate(day_names)
     ]
 
@@ -513,7 +534,7 @@ def get_correlations():
 def get_entry(entry_id: int):
     result = (
         supabase.table("journal_entries")
-        .select("id, title, content, mood, goal_progress, tags, created_at")
+        .select("id, title, content, mood, tags, created_at")
         .eq("id", entry_id).single().execute()
     )
     if not result.data:
@@ -525,11 +546,11 @@ def update_entry(entry_id: int, entry: EntryCreate):
     combined = (
         f"Title: {entry.title}. Content: {entry.content}. "
         f"Mood: {entry.mood}/5. Energy: {entry.energy}/5. "
-        f"Focus: {entry.focus}/5. Goal progress: {entry.goal_progress}%."
+        f"Focus: {entry.focus}/5."
     )
     data = {
         "title": entry.title, "content": entry.content,
-        "mood": entry.mood, "goal_progress": entry.goal_progress,
+        "mood": entry.mood,
         "energy": entry.energy, "focus": entry.focus,
         "entry_type": entry.entry_type, "tags": entry.tags,
         "embedding": generate_embedding(combined),
@@ -582,33 +603,43 @@ def _habit_mastery_level(total_logs: int) -> dict:
 def _habit_xp(difficulty: str) -> int:
     return HABIT_DIFFICULTY_XP.get(difficulty, 10)
 
-def _recovery_tokens(habit_name: str) -> dict:
-    """Count earned recovery tokens for a habit (1 per 14 consistent days, max 3)."""
-    try:
-        result = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
-        dates = sorted({r["completed_at"] for r in result.data})
-        tokens_earned = 0
-        streak = 0
-        for i, d in enumerate(dates):
-            if i == 0:
-                streak = 1
-            else:
+def _recovery_tokens_from_dates(dates: list[str]) -> int:
+    """Count earned tokens from a pre-fetched sorted list of unique dates."""
+    tokens_earned = 0
+    streak = 0
+    for i, d in enumerate(dates):
+        if i == 0:
+            streak = 1
+        else:
+            try:
                 prev = datetime.strptime(dates[i-1], "%Y-%m-%d")
                 curr = datetime.strptime(d, "%Y-%m-%d")
-                if (curr - prev).days == 1:
-                    streak += 1
-                else:
-                    streak = 1
-            if streak > 0 and streak % 14 == 0:
-                tokens_earned += 1
-        # Subtract used tokens
+                streak = streak + 1 if (curr - prev).days == 1 else 1
+            except Exception:
+                streak = 1
+        if streak > 0 and streak % 14 == 0:
+            tokens_earned += 1
+    return tokens_earned
+
+def _recovery_tokens(habit_name: str, prefetched_dates: list[str] | None = None) -> dict:
+    """Count earned recovery tokens. Accepts pre-fetched dates to avoid extra DB call."""
+    try:
+        if prefetched_dates is None:
+            result = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
+            prefetched_dates = sorted({r["completed_at"] for r in result.data})
+        tokens_earned = _recovery_tokens_from_dates(prefetched_dates)
+        # habit_recovery_tokens table may not exist yet — silently default to 0
+        tokens_used = 0
         try:
             used = supabase.table("habit_recovery_tokens").select("id").eq("habit_name", habit_name).execute()
             tokens_used = len(used.data)
         except Exception:
             tokens_used = 0
-        return {"earned": min(tokens_earned, 3 + tokens_used), "used": tokens_used,
-                "available": max(0, min(3, tokens_earned - tokens_used))}
+        return {
+            "earned":    min(tokens_earned, 3 + tokens_used),
+            "used":      tokens_used,
+            "available": max(0, min(3, tokens_earned - tokens_used)),
+        }
     except Exception:
         return {"earned": 0, "used": 0, "available": 0}
 
@@ -638,11 +669,12 @@ def _compute_streaks_raw() -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     out = {}
     for name, dates in habit_dates.items():
-        unique_dates = sorted(set(dates), reverse=True)
-        total        = len(dates)
-        mastery      = _habit_mastery_level(total)
-        tokens       = _recovery_tokens(name)
-        meta         = habit_meta.get(name, {})
+        unique_dates       = sorted(set(dates), reverse=True)
+        unique_dates_asc   = list(reversed(unique_dates))
+        total              = len(dates)
+        mastery            = _habit_mastery_level(total)
+        tokens             = _recovery_tokens(name, prefetched_dates=unique_dates_asc)
+        meta               = habit_meta.get(name, {})
         out[name] = {
             "current_streak": calc_streak(unique_dates, today),
             "total_logs":     total,
@@ -803,8 +835,14 @@ def get_heatmap(days: int = 365):
 
 @app.get("/habits/balance")
 def get_life_balance():
-    streaks = _compute_streaks_raw()
-    balance = _build_life_balance(streaks)
+    try:
+        streaks = _compute_streaks_raw()
+    except Exception:
+        streaks = {}
+    try:
+        balance = _build_life_balance(streaks)
+    except Exception:
+        balance = [{"category": c, "rate": 0, "logs": 0} for c in HABIT_CATEGORIES]
     return {"balance": balance, "streaks": streaks}
 
 @app.post("/habits/recover")
@@ -1985,7 +2023,7 @@ def proactive_coaching():
     if analytics["declining_consistency"]:
         alerts.append(f"Journaling consistency dropped to {analytics['consistency_score']}%")
     if analytics["stagnating"]:
-        alerts.append("Mood and goal progress both flat for 7+ entries")
+        alerts.append("Mood and energy both flat for 7+ entries")
 
     # Stalled goal categories
     cat_health   = build_category_health(goal_data)
@@ -2261,14 +2299,13 @@ Reply ONLY in this JSON:
 def fetch_all_entries_light():
     result = (
         supabase.table("journal_entries")
-        .select("id, mood, goal_progress, energy, focus, entry_type, created_at")
+        .select("id, mood, energy, focus, entry_type, created_at")
         .order("created_at").execute()
     )
     return [
         {
             "id": e["id"],
             "mood": safe_rating(e.get("mood")),
-            "goal_progress": safe_int(e.get("goal_progress")),
             "energy": safe_rating(e.get("energy")),
             "focus": safe_rating(e.get("focus")),
             "entry_type": e.get("entry_type") or "free",
@@ -2281,7 +2318,7 @@ def build_recent_text_block(today_iso: str) -> str:
     start = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).isoformat()
     result = (
         supabase.table("journal_entries")
-        .select("id, title, content, mood, goal_progress, energy, focus, entry_type, tags, created_at")
+        .select("id, title, content, mood, energy, focus, entry_type, tags, created_at")
         .gte("created_at", start).order("created_at", desc=True).execute()
     )
     if not result.data:
@@ -2292,7 +2329,7 @@ def build_recent_text_block(today_iso: str) -> str:
         parts.append(
             f"[{e['created_at'][:10]}] [{e.get('entry_type','free')}] "
             f"(Mood: {e['mood']}/5, Energy: {e.get('energy',3)}/5, "
-            f"Focus: {e.get('focus',3)}/5, Goal: {e['goal_progress']}%){tags} "
+            f"Focus: {e.get('focus',3)}/5){tags} "
             f"{e['title']}: {e['content']}"
         )
     return "\n\n".join(parts)
@@ -2305,17 +2342,15 @@ def build_weekly_summary_block(all_light_entries: list[dict]) -> str:
     ]
     if not older:
         return "No older entries yet."
-    weekly = defaultdict(lambda: {"moods": [], "goals": [], "count": 0})
+    weekly = defaultdict(lambda: {"moods": [], "count": 0})
     for e in older:
         dt = datetime.fromisoformat(e["created_at"].replace("Z", "+00:00"))
         year, week, _ = dt.isocalendar()
         key = f"{year}-W{week:02d}"
         weekly[key]["moods"].append(e["mood"])
-        weekly[key]["goals"].append(e["goal_progress"])
         weekly[key]["count"] += 1
     rows = [
-        f"{k}: avg mood {round(sum(v['moods'])/len(v['moods']),1)}/5, "
-        f"avg goal {round(sum(v['goals'])/len(v['goals']),1)}%, {v['count']} entries"
+        f"{k}: avg mood {round(sum(v['moods'])/len(v['moods']),1)}/5, {v['count']} entries"
         for k in sorted(weekly.keys())
     ]
     if len(rows) > MAX_WEEKLY_ROWS:
@@ -2326,17 +2361,23 @@ def build_weekly_summary_block(all_light_entries: list[dict]) -> str:
 def build_trend_stats_block(all_light_entries: list[dict]) -> str:
     if not all_light_entries:
         return "No data yet."
-    moods  = [e["mood"] for e in all_light_entries]
-    goals  = [e["goal_progress"] for e in all_light_entries]
+    moods    = [e["mood"]   for e in all_light_entries]
+    energies = [e["energy"] for e in all_light_entries]
+    focuses  = [e["focus"]  for e in all_light_entries]
     r7, p7 = all_light_entries[-7:], all_light_entries[-14:-7] if len(all_light_entries) >= 14 else []
-    lines  = [
+    lines = [
         f"Overall mood trend: {describe_trend(linear_slope(moods))} over {len(moods)} entries.",
-        f"Overall goal trend: {describe_trend(linear_slope(goals), 0.5)} over {len(goals)} entries.",
+        f"Overall energy trend: {describe_trend(linear_slope(energies))} over {len(energies)} entries.",
+        f"Overall focus trend: {describe_trend(linear_slope(focuses))} over {len(focuses)} entries.",
     ]
     if p7:
         lines.append(
-            f"Last 7 avg: mood {avg([e['mood'] for e in r7])}/5, goal {avg([e['goal_progress'] for e in r7])}%. "
-            f"Prev 7 avg: mood {avg([e['mood'] for e in p7])}/5, goal {avg([e['goal_progress'] for e in p7])}%."
+            f"Last 7 avg: mood {avg([e['mood'] for e in r7])}/5, "
+            f"energy {avg([e['energy'] for e in r7])}/5, "
+            f"focus {avg([e['focus'] for e in r7])}/5. "
+            f"Prev 7 avg: mood {avg([e['mood'] for e in p7])}/5, "
+            f"energy {avg([e['energy'] for e in p7])}/5, "
+            f"focus {avg([e['focus'] for e in p7])}/5."
         )
     return "\n".join(lines)
 
@@ -2364,7 +2405,7 @@ def build_semantic_matches_block(message: str, exclude_ids: set[int]) -> str:
     if not relevant:
         return ""
     return "\n\n".join(
-        f"[{e['created_at'][:10]}] (Mood: {e['mood']}/5, Goal: {e['goal_progress']}%) "
+        f"[{e['created_at'][:10]}] (Mood: {e['mood']}/5) "
         f"{e['title']}: {e['content']}"
         for e in relevant
     )
@@ -2458,10 +2499,12 @@ def get_insights():
             "message": "Keep journaling. More entries needed before patterns emerge.",
             "recommendation": "Aim for at least 7 entries to unlock meaningful insights."}]}
     insights = []
-    moods = [e["mood"] for e in all_light]
-    goals = [e["goal_progress"] for e in all_light]
-    m_slope = linear_slope(moods)
-    g_slope = linear_slope(goals)
+    moods    = [e["mood"]   for e in all_light]
+    energies = [e["energy"] for e in all_light]
+    focuses  = [e["focus"]  for e in all_light]
+    m_slope  = linear_slope(moods)
+    e_slope  = linear_slope(energies)
+    f_slope  = linear_slope(focuses)
     if m_slope > 0.05:
         insights.append({"type": "success", "title": "Mood Trend",
             "message": "Your mood has been improving over time.",
@@ -2470,14 +2513,22 @@ def get_insights():
         insights.append({"type": "warning", "title": "Mood Trend",
             "message": "Your mood has been gradually declining.",
             "recommendation": "Look for recurring stressors in your last few entries."})
-    if g_slope > 0.5:
-        insights.append({"type": "success", "title": "Goal Progress",
-            "message": "Goal progress is trending upward.",
-            "recommendation": "Keep the current pace."})
-    elif g_slope < -0.5:
-        insights.append({"type": "warning", "title": "Goal Progress",
-            "message": "Goal progress has slowed.",
-            "recommendation": "Break goals into smaller daily actions."})
+    if e_slope > 0.05:
+        insights.append({"type": "success", "title": "Energy Trend",
+            "message": "Your energy levels are trending upward.",
+            "recommendation": "Keep up the habits that are sustaining this."})
+    elif e_slope < -0.05:
+        insights.append({"type": "warning", "title": "Energy Trend",
+            "message": "Your energy has been declining.",
+            "recommendation": "Check your sleep, movement, and workload this week."})
+    if f_slope > 0.05:
+        insights.append({"type": "success", "title": "Focus Trend",
+            "message": "Your focus is on the rise.",
+            "recommendation": "Note what environment and routines are helping."})
+    elif f_slope < -0.05:
+        insights.append({"type": "warning", "title": "Focus Trend",
+            "message": "Your focus has been slipping.",
+            "recommendation": "Try a distraction audit — what's competing for your attention?"})
     correlations = get_correlations()
     valid_days   = [d for d in correlations if d["avg_mood"] > 0]
     if valid_days:
@@ -2512,7 +2563,7 @@ def get_insights():
             "recommendation": "Even a 2-minute entry keeps the streak alive."})
     if analytics["stagnating"]:
         insights.append({"type": "warning", "title": "Growth Plateau",
-            "message": "Mood and goal progress have been flat for 7+ entries.",
+            "message": "Mood and energy have both been flat for 7+ entries.",
             "recommendation": "Try something different today — a new habit, a harder quest, or a conversation."})
     if not insights:
         insights.append({"type": "info", "title": "No Strong Patterns Yet",
@@ -2528,8 +2579,9 @@ def build_ai_insight_context():
     all_light = fetch_all_entries_light()
     if len(all_light) < 3:
         return None
-    moods     = [e["mood"] for e in all_light]
-    goals     = [e["goal_progress"] for e in all_light]
+    moods     = [e["mood"]   for e in all_light]
+    energies  = [e["energy"] for e in all_light]
+    focuses   = [e["focus"]  for e in all_light]
     corr      = get_correlations()
     valid     = [d for d in corr if d["avg_mood"] > 0]
     best_day  = max(valid, key=lambda d: d["avg_mood"]) if valid else None
@@ -2538,19 +2590,21 @@ def build_ai_insight_context():
     analytics = predictive_analytics()
     total_xp  = get_total_xp()
     return {
-        "entries":            len(all_light),
-        "avg_mood":           round(sum(moods) / len(moods), 1),
-        "avg_goal_progress":  round(sum(goals) / len(goals), 1),
-        "mood_trend":         describe_trend(linear_slope(moods)),
-        "goal_trend":         describe_trend(linear_slope(goals), 0.5),
-        "best_day":           best_day["day"] if best_day else None,
-        "best_day_mood":      best_day["avg_mood"] if best_day else None,
-        "strongest_habit":    best_h[0],
-        "habit_streak":       best_h[1]["current_streak"],
-        "total_xp":           total_xp,
-        "level":              xp_to_level(total_xp)["level"],
-        "streak_at_risk":     analytics["streak_at_risk"],
-        "stagnating":         analytics["stagnating"],
+        "entries":          len(all_light),
+        "avg_mood":         round(sum(moods)    / len(moods),    1),
+        "avg_energy":       round(sum(energies) / len(energies), 1),
+        "avg_focus":        round(sum(focuses)  / len(focuses),  1),
+        "mood_trend":       describe_trend(linear_slope(moods)),
+        "energy_trend":     describe_trend(linear_slope(energies)),
+        "focus_trend":      describe_trend(linear_slope(focuses)),
+        "best_day":         best_day["day"] if best_day else None,
+        "best_day_mood":    best_day["avg_mood"] if best_day else None,
+        "strongest_habit":  best_h[0],
+        "habit_streak":     best_h[1]["current_streak"],
+        "total_xp":         total_xp,
+        "level":            xp_to_level(total_xp)["level"],
+        "streak_at_risk":   analytics["streak_at_risk"],
+        "stagnating":       analytics["stagnating"],
     }
 
 @app.get("/ai-insight")
@@ -2586,7 +2640,7 @@ def get_current_month_entries():
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     return (
         supabase.table("journal_entries")
-        .select("title, content, mood, goal_progress, created_at")
+        .select("title, content, mood, energy, focus, created_at")
         .gte("created_at", start.isoformat()).order("created_at").execute()
     ).data
 
@@ -2595,18 +2649,19 @@ def monthly_review():
     entries = get_current_month_entries()
     if not entries:
         return {"review": "Not enough journal entries this month yet."}
-    moods     = [e["mood"] for e in entries]
-    goals     = [e["goal_progress"] for e in entries]
-    corr      = get_correlations()
-    valid     = [d for d in corr if d["avg_mood"] > 0]
-    best_day  = max(valid, key=lambda d: d["avg_mood"])["day"] if valid else None
-    streaks   = _compute_streaks_raw()
-    best_h    = max(streaks.items(), key=lambda x: x[1]["current_streak"])[0] if streaks else None
-    goal_data = build_goal_summary()
+    moods    = [e["mood"]   for e in entries]
+    energies = [e.get("energy", 3) for e in entries]
+    focuses  = [e.get("focus",  3) for e in entries]
+    corr     = get_correlations()
+    valid    = [d for d in corr if d["avg_mood"] > 0]
+    best_day = max(valid, key=lambda d: d["avg_mood"])["day"] if valid else None
+    streaks  = _compute_streaks_raw()
+    best_h   = max(streaks.items(), key=lambda x: x[1]["current_streak"])[0] if streaks else None
+    goal_data  = build_goal_summary()
     cat_health = build_category_health(goal_data)
     total_xp   = sum(g["xp"] for g in goal_data)
     completed_q = sum(g["completed_tasks"] for g in goal_data)
-    total_q     = sum(g["total_tasks"] for g in goal_data)
+    total_q     = sum(g["total_tasks"]    for g in goal_data)
     best_cat    = cat_health[0]["category"] if cat_health else None
     stale_cats  = [c["category"] for c in cat_health if c["stale"]]
     achievements = []
@@ -2617,11 +2672,13 @@ def monthly_review():
     except Exception:
         pass
     context = {
-        "entry_count": len(entries),
-        "avg_mood": round(sum(moods)/len(moods), 1),
-        "avg_goal": round(sum(goals)/len(goals), 1),
-        "mood_trend": describe_trend(linear_slope(moods)),
-        "goal_trend": describe_trend(linear_slope(goals), 0.5),
+        "entry_count":   len(entries),
+        "avg_mood":      round(sum(moods)    / len(moods),    1),
+        "avg_energy":    round(sum(energies) / len(energies), 1),
+        "avg_focus":     round(sum(focuses)  / len(focuses),  1),
+        "mood_trend":    describe_trend(linear_slope(moods)),
+        "energy_trend":  describe_trend(linear_slope(energies)),
+        "focus_trend":   describe_trend(linear_slope(focuses)),
         "best_day": best_day, "strongest_habit": best_h,
         "completed_quests": completed_q, "total_quests": total_q,
         "total_xp": total_xp, "best_category": best_cat,
@@ -2648,6 +2705,627 @@ Give actionable focus areas. Natural language, not statistics lists."""
         temperature=0.7, max_tokens=500,
     )
     return {"review": response.choices[0].message.content}
+
+# ---------------------------------------------------------------------------
+# Life Domains — aggregate XP/goals/habits/skills per domain
+# ---------------------------------------------------------------------------
+
+# Mapping: domain name → categories/skill-tree keys that contribute to it
+DOMAIN_DEFINITIONS = {
+    "Computer Science": {
+        "icon": "💻", "color": "#6c8ebf",
+        "skill_keys":   ["Study"],
+        "goal_cats":    ["Study", "Computer Science"],
+        "habit_cats":   ["Learning", "Productivity"],
+        "description":  "Programming, algorithms, systems thinking.",
+    },
+    "Health": {
+        "icon": "💪", "color": "#82b366",
+        "skill_keys":   ["Fitness"],
+        "goal_cats":    ["Fitness", "Health", "Wellness"],
+        "habit_cats":   ["Physical", "Mind"],
+        "description":  "Physical fitness, sleep, nutrition, mental health.",
+    },
+    "Music": {
+        "icon": "🎵", "color": "#9c70c4",
+        "skill_keys":   ["Creativity"],
+        "goal_cats":    ["Music", "Creativity"],
+        "habit_cats":   ["Creativity"],
+        "description":  "Instruments, composition, ear training.",
+    },
+    "Relationships": {
+        "icon": "❤️", "color": "#d98aa0",
+        "skill_keys":   ["Personal Growth"],
+        "goal_cats":    ["Relationship", "Social", "Relationships"],
+        "habit_cats":   ["Social"],
+        "description":  "Friendships, family, communication, empathy.",
+    },
+    "Personal Growth": {
+        "icon": "🌱", "color": "#d07040",
+        "skill_keys":   ["Personal Growth"],
+        "goal_cats":    ["Personal Growth", "Mindset"],
+        "habit_cats":   ["Mind", "Productivity"],
+        "description":  "Habits, mindset, leadership, self-awareness.",
+    },
+    "Finance": {
+        "icon": "💰", "color": "#d6a73a",
+        "skill_keys":   ["Finance"],
+        "goal_cats":    ["Finance", "Career"],
+        "habit_cats":   ["Productivity"],
+        "description":  "Budgeting, investing, income growth.",
+    },
+    "Creativity": {
+        "icon": "🎨", "color": "#b8617c",
+        "skill_keys":   ["Creativity"],
+        "goal_cats":    ["Creativity", "Art", "Writing"],
+        "habit_cats":   ["Creativity"],
+        "description":  "Art, writing, design, creative expression.",
+    },
+}
+
+def build_domain(name: str, defn: dict) -> dict:
+    """Build full domain snapshot by aggregating from all sub-systems."""
+    # XP: sum ledger for all skill_keys + goal_cats
+    xp = 0
+    all_cats = set(defn["skill_keys"] + defn["goal_cats"])
+    for cat in all_cats:
+        xp += get_category_xp(cat)
+
+    level_info = xp_to_level(xp)
+
+    # Goals in domain
+    all_goals = build_goal_summary()
+    domain_goals = [
+        g for g in all_goals
+        if g.get("category") in set(defn["goal_cats"])
+    ]
+    total_tasks     = sum(g["total_tasks"] for g in domain_goals)
+    completed_tasks = sum(g["completed_tasks"] for g in domain_goals)
+    progress        = round(completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+
+    # Habits in domain
+    try:
+        habit_result = supabase.table("habits").select("name, completed_at, category").execute()
+        today        = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        domain_habits: dict[str, dict] = {}
+        for row in habit_result.data:
+            cat = row.get("category") or "Productivity"
+            if cat in set(defn["habit_cats"]):
+                n = row["name"]
+                if n not in domain_habits:
+                    domain_habits[n] = {"dates": []}
+                domain_habits[n]["dates"].append(row["completed_at"])
+        habit_summary = []
+        for hname, hdata in domain_habits.items():
+            unique = sorted(set(hdata["dates"]), reverse=True)
+            habit_summary.append({
+                "name":           hname,
+                "streak":         calc_streak(unique, today),
+                "total":          len(unique),
+                "done_today":     today in unique,
+            })
+    except Exception:
+        habit_summary = []
+
+    # Skill tree nodes
+    skill_stats = []
+    for sk in defn["skill_keys"]:
+        tree = resolve_tree(sk)
+        if tree and tree.get("nodes"):
+            nodes     = tree["nodes"]
+            completed = sum(1 for n in nodes if n["completed"])
+            total     = len(nodes)
+            skill_stats.append({
+                "tree":      sk,
+                "label":     tree.get("label", sk),
+                "completed": completed,
+                "total":     total,
+                "pct":       round(completed / total * 100) if total else 0,
+            })
+
+    # Achievements earned in domain categories
+    try:
+        ach_rows = supabase.table("achievements").select("name, earned_at").execute().data
+        # Use XP ledger to approximate domain achievements (by source_type=achievement)
+        domain_ach_count = len(ach_rows)  # simplified — all achievements count
+    except Exception:
+        domain_ach_count = 0
+
+    # Boss battle this week
+    boss = _get_current_boss_for_domain(name)
+
+    return {
+        "name":          name,
+        "icon":          defn["icon"],
+        "color":         defn["color"],
+        "description":   defn["description"],
+        "xp":            xp,
+        "level":         level_info["level"],
+        "xp_in_level":   level_info["xp_in_level"],
+        "xp_to_next":    level_info["xp_to_next"],
+        "progress":      progress,
+        "goals":         domain_goals,
+        "active_goals":  len([g for g in domain_goals if g["progress"] < 100]),
+        "habits":        habit_summary,
+        "skill_trees":   skill_stats,
+        "weekly_boss":   boss,
+    }
+
+def _get_current_boss_for_domain(domain: str) -> Optional[dict]:
+    """Return the current week's boss for a domain, if any."""
+    try:
+        now      = datetime.now(timezone.utc)
+        year, week, _ = now.isocalendar()
+        week_key = f"{year}-W{week:02d}"
+        result   = (
+            supabase.table("weekly_bosses")
+            .select("*")
+            .eq("week_key", week_key)
+            .eq("domain", domain)
+            .execute()
+        )
+        if not result.data:
+            return None
+        boss = result.data[0]
+        # Check if completed
+        completed = (
+            supabase.table("boss_completions")
+            .select("id")
+            .eq("boss_id", boss["id"])
+            .execute()
+        )
+        boss["completed"] = len(completed.data) > 0
+        boss["requirements"] = boss.get("requirements") or []
+        return boss
+    except Exception:
+        return None
+
+@app.get("/domains")
+def get_domains():
+    """Return all life domains with aggregated stats."""
+    return [build_domain(name, defn) for name, defn in DOMAIN_DEFINITIONS.items()]
+
+@app.get("/domains/{domain_name}")
+def get_domain(domain_name: str):
+    defn = DOMAIN_DEFINITIONS.get(domain_name)
+    if not defn:
+        raise HTTPException(404, "Domain not found")
+    return build_domain(domain_name, defn)
+
+# ---------------------------------------------------------------------------
+# Weekly Boss Battles
+# ---------------------------------------------------------------------------
+
+class BossCompleteRequest(BaseModel):
+    boss_id: int
+
+@app.post("/bosses/generate")
+def generate_weekly_boss():
+    """AI generates a boss battle for the current week across all domains."""
+    now          = datetime.now(timezone.utc)
+    year, week, _ = now.isocalendar()
+    week_key     = f"{year}-W{week:02d}"
+    deadline     = (now + timedelta(days=(6 - now.weekday()))).strftime("%Y-%m-%d")
+
+    # Check if already generated this week
+    existing = supabase.table("weekly_bosses").select("*").eq("week_key", week_key).execute()
+    if existing.data:
+        return {"bosses": existing.data, "week_key": week_key, "status": "existing"}
+
+    # Gather context for AI
+    goal_data  = build_goal_summary()
+    streaks    = _compute_streaks_raw()
+    analytics  = predictive_analytics()
+
+    active_skill_cats = []
+    for cat in SKILL_TREES:
+        tree = resolve_tree(cat)
+        if tree and any(n["unlocked"] and not n["completed"] for n in tree["nodes"]):
+            active_skill_cats.append(cat)
+
+    pending_goals = [
+        {"title": g["title"], "category": g["category"], "progress": g["progress"]}
+        for g in goal_data if g["progress"] < 100
+    ][:6]
+
+    top_habits = sorted(streaks.items(), key=lambda x: x[1]["current_streak"], reverse=True)[:4]
+    habit_context = [{"name": n, "streak": d["current_streak"], "category": d["category"]} for n, d in top_habits]
+
+    prompt = f"""You are LiAInne generating weekly boss battles for a personal growth RPG.
+
+Current week: {week_key}
+Active goals: {_json.dumps(pending_goals)}
+Top habits: {_json.dumps(habit_context)}
+Active skill trees: {active_skill_cats}
+Stagnating: {analytics.get('stagnating', False)}
+Streak risks: {analytics.get('streak_at_risk', [])}
+
+Generate exactly 3 boss battles for different life domains from: {list(DOMAIN_DEFINITIONS.keys())}
+
+Each boss should:
+- Be achievable in one week
+- Require 3-5 specific actions
+- Feel epic but realistic
+- Connect to the user's actual active goals/habits
+
+Reply ONLY in this JSON (no markdown):
+[
+  {{
+    "name": "Boss name (dramatic, like 'The Algorithm Gauntlet')",
+    "description": "2 sentences of epic flavor text",
+    "domain": "exact domain name from the list",
+    "requirements": [
+      {{"label": "action description", "target": 1, "type": "count"}}
+    ],
+    "xp_reward": 150
+  }}
+]
+
+Max 3 bosses. Make them distinct domains."""
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.85, max_tokens=600,
+    )
+    raw = response.choices[0].message.content.strip()
+    # Strip markdown fences if present
+    if raw.startswith("```"):
+        raw = "\n".join(raw.split("\n")[1:])
+    if raw.endswith("```"):
+        raw = "\n".join(raw.split("\n")[:-1])
+    try:
+        bosses_raw = _json.loads(raw.strip())
+    except _json.JSONDecodeError:
+        raise HTTPException(500, "Boss generation failed")
+
+    created = []
+    for b in bosses_raw[:3]:
+        domain = b.get("domain", "Personal Growth")
+        if domain not in DOMAIN_DEFINITIONS:
+            domain = "Personal Growth"
+        result = supabase.table("weekly_bosses").insert({
+            "week_key":     week_key,
+            "name":         b.get("name", "Weekly Boss"),
+            "description":  b.get("description", ""),
+            "domain":       domain,
+            "requirements": _json.dumps(b.get("requirements", [])),
+            "xp_reward":    min(max(int(b.get("xp_reward", 150)), 100), 400),
+            "deadline":     deadline,
+        }).execute()
+        if result.data:
+            created.append(result.data[0])
+
+    return {"bosses": created, "week_key": week_key, "status": "created"}
+
+@app.get("/bosses/current")
+def get_current_bosses():
+    """Get this week's boss battles with completion status."""
+    now          = datetime.now(timezone.utc)
+    year, week, _ = now.isocalendar()
+    week_key     = f"{year}-W{week:02d}"
+    result       = supabase.table("weekly_bosses").select("*").eq("week_key", week_key).execute()
+    bosses       = []
+    for boss in result.data:
+        completed = supabase.table("boss_completions").select("id").eq("boss_id", boss["id"]).execute()
+        req = boss.get("requirements")
+        if isinstance(req, str):
+            try:    req = _json.loads(req)
+            except: req = []
+        bosses.append({
+            **boss,
+            "requirements": req or [],
+            "completed":    len(completed.data) > 0,
+        })
+    return {"bosses": bosses, "week_key": week_key}
+
+@app.post("/bosses/{boss_id}/complete")
+def complete_boss(boss_id: int):
+    """Mark a boss battle as defeated."""
+    boss = supabase.table("weekly_bosses").select("*").eq("id", boss_id).execute()
+    if not boss.data:
+        raise HTTPException(404, "Boss not found")
+    # Idempotent
+    existing = supabase.table("boss_completions").select("id").eq("boss_id", boss_id).execute()
+    if existing.data:
+        return {"status": "already_completed"}
+    b        = boss.data[0]
+    xp       = b.get("xp_reward", 200)
+    domain   = b.get("domain", "Personal Growth")
+    # Map domain → ledger category
+    skill_keys = DOMAIN_DEFINITIONS.get(domain, {}).get("skill_keys", ["Personal Growth"])
+    ledger_cat = skill_keys[0] if skill_keys else "Personal Growth"
+    supabase.table("boss_completions").insert({
+        "boss_id":      boss_id,
+        "xp_earned":    xp,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    ledger_add("boss", str(boss_id), ledger_cat, xp)
+    new_achievements = award_achievements()
+    return {
+        "status":          "defeated",
+        "xp_earned":       xp,
+        "domain":          domain,
+        "new_achievements": new_achievements,
+    }
+
+# ---------------------------------------------------------------------------
+# Proactive GET /action-engine (structured recommendations, no journal entry required)
+# ---------------------------------------------------------------------------
+
+@app.get("/action-engine")
+def get_action_engine():
+    """
+    Proactive structured recommendations — runs without needing a journal entry.
+    Detects stagnation, burnout risk, broken streaks, skill bottlenecks, goal failure.
+    Returns problem + evidence + recommended action + suggested quest/habit/node.
+    """
+    analytics  = predictive_analytics()
+    all_light  = fetch_all_entries_light()
+    goal_data  = build_goal_summary()
+    streaks    = _compute_streaks_raw()
+    cat_health = build_category_health(goal_data)
+
+    problems = []
+
+    # 1. Stagnation
+    if analytics.get("stagnating"):
+        problems.append({
+            "type":     "stagnation",
+            "severity": "high",
+            "title":    "Growth Plateau Detected",
+            "evidence": ["Mood flat for 7+ entries", "Energy flat for 7+ entries"],
+            "action":   "Pick one hard task you've been avoiding and spend 30 minutes on it today.",
+        })
+
+    # 2. Burnout risk: energy slope declining
+    if len(all_light) >= 5:
+        energies = [e["energy"] for e in all_light[-7:]]
+        e_slope  = linear_slope(energies)
+        if e_slope < -0.15:
+            problems.append({
+                "type":     "burnout_risk",
+                "severity": "medium",
+                "title":    "Energy Declining — Burnout Risk",
+                "evidence": [f"Energy trending down over last {len(energies)} entries",
+                             f"Average energy: {round(sum(energies)/len(energies),1)}/5"],
+                "action":   "Take one rest day. Reduce active goals to 2 max this week.",
+            })
+
+    # 3. Broken streaks
+    if analytics.get("streak_at_risk"):
+        at_risk = analytics["streak_at_risk"]
+        problems.append({
+            "type":     "broken_streak",
+            "severity": "high",
+            "title":    f"Streak at Risk: {', '.join(at_risk)}",
+            "evidence": [f"Logged {h} yesterday but not today" for h in at_risk[:3]],
+            "action":   f"Log '{at_risk[0]}' right now. It takes 2 minutes.",
+            "suggested_habit": at_risk[0],
+        })
+
+    # 4. Goal failure risk
+    if analytics.get("goal_failure_risk"):
+        risky = analytics["goal_failure_risk"][:2]
+        problems.append({
+            "type":     "goal_failure",
+            "severity": "medium",
+            "title":    "Goals Drifting Toward Failure",
+            "evidence": [f"'{g['title']}' — {g['progress']}% after {g['days']} days" for g in risky],
+            "action":   f"Open '{risky[0]['title']}' and complete one task right now.",
+            "suggested_quest": risky[0]["title"],
+        })
+
+    # 5. Skill bottleneck: unlocked node with no active goal
+    bottleneck_node = None
+    for cat, tree_def in SKILL_TREES.items():
+        tree = resolve_tree(cat)
+        if not tree:
+            continue
+        for node in tree["nodes"]:
+            if node["unlocked"] and not node["completed"] and not node.get("active_goal"):
+                bottleneck_node = {"node": node["name"], "category": cat}
+                break
+        if bottleneck_node:
+            break
+    if bottleneck_node:
+        problems.append({
+            "type":     "skill_bottleneck",
+            "severity": "low",
+            "title":    "Skill Node Available but Untouched",
+            "evidence": [f"'{bottleneck_node['node']}' in {bottleneck_node['category']} is unlocked but not started"],
+            "action":   f"Start the '{bottleneck_node['node']}' learning path to keep progressing.",
+            "suggested_skill_node": bottleneck_node,
+        })
+
+    # 6. Declining consistency
+    if analytics.get("declining_consistency"):
+        score = analytics["consistency_score"]
+        problems.append({
+            "type":     "declining_consistency",
+            "severity": "medium",
+            "title":    "Journal Consistency Dropping",
+            "evidence": [f"Only {score}% journaling rate in past 2 weeks",
+                         f"Missed {analytics['missed_days_count']} days"],
+            "action":   "Write a 2-sentence journal entry right now. It resets the pattern.",
+        })
+
+    # If nothing bad, return a positive nudge
+    if not problems:
+        total_xp = get_total_xp()
+        li       = xp_to_level(total_xp)
+        return {
+            "needs_attention": False,
+            "problems":        [],
+            "summary":         f"Everything looks good. You're Level {li['level']} with {total_xp} XP. Keep it up.",
+        }
+
+    # Sort by severity
+    sev_order = {"high": 0, "medium": 1, "low": 2}
+    problems.sort(key=lambda p: sev_order.get(p["severity"], 3))
+
+    return {
+        "needs_attention": True,
+        "problems":        problems,
+        "primary":         problems[0],
+        "summary":         f"{len(problems)} issue(s) detected. Most urgent: {problems[0]['title']}",
+    }
+
+# ---------------------------------------------------------------------------
+# Bottleneck Detector — "Why Am I Stuck?"
+# ---------------------------------------------------------------------------
+
+@app.get("/bottleneck")
+def get_bottleneck():
+    """
+    Analyzes mood, energy, focus trends + habits + goals to identify the
+    primary bottleneck and generate an AI recovery plan.
+    """
+    all_light = fetch_all_entries_light()
+    if len(all_light) < 3:
+        return {
+            "bottleneck": None,
+            "message":    "Need at least 3 journal entries to detect bottlenecks.",
+        }
+
+    recent = all_light[-10:]
+    moods    = [e["mood"]   for e in recent]
+    energies = [e["energy"] for e in recent]
+    focuses  = [e["focus"]  for e in recent]
+
+    m_slope = linear_slope(moods)
+    e_slope = linear_slope(energies)
+    f_slope = linear_slope(focuses)
+
+    avg_mood   = round(sum(moods)    / len(moods),    1)
+    avg_energy = round(sum(energies) / len(energies), 1)
+    avg_focus  = round(sum(focuses)  / len(focuses),  1)
+
+    analytics = predictive_analytics()
+    streaks   = _compute_streaks_raw()
+    goal_data = build_goal_summary()
+
+    # Score each potential bottleneck
+    candidates = []
+
+    if avg_energy <= 2.5 or e_slope < -0.1:
+        score = round((3 - avg_energy) * 30 + max(0, -e_slope * 100))
+        candidates.append(("Low Energy", score, [
+            f"Average energy: {avg_energy}/5",
+            f"Energy trend: {describe_trend(e_slope)}",
+            "Missed habits correlate with low energy days",
+        ], [
+            "Prioritize sleep — aim for 7-8 hours tonight",
+            "Complete only one small quest today",
+            "Reduce active goals to 2 maximum this week",
+            "Add a 10-minute walk to your morning routine",
+        ]))
+
+    if avg_mood <= 2.5 or m_slope < -0.1:
+        score = round((3 - avg_mood) * 30 + max(0, -m_slope * 100))
+        candidates.append(("Low Mood", score, [
+            f"Average mood: {avg_mood}/5",
+            f"Mood trend: {describe_trend(m_slope)}",
+        ], [
+            "Write about what's bothering you in your next journal entry",
+            "Complete one physical habit today (movement improves mood)",
+            "Reach out to someone you trust",
+            "Lower goal expectations for this week — rest is productive",
+        ]))
+
+    if avg_focus <= 2.5 or f_slope < -0.1:
+        score = round((3 - avg_focus) * 25 + max(0, -f_slope * 80))
+        candidates.append(("Poor Focus", score, [
+            f"Average focus: {avg_focus}/5",
+            f"Focus trend: {describe_trend(f_slope)}",
+        ], [
+            "Turn off all notifications for 45 minutes and do one task",
+            "Start with the smallest possible action on your main goal",
+            "Use the Pomodoro technique: 25 min work, 5 min break",
+            "Identify and remove your top 2 distractions",
+        ]))
+
+    # Goal stagnation from quests (not journal)
+    cat_health = build_category_health(goal_data)
+    stale_count = sum(1 for c in cat_health if c["stale"])
+    if stale_count > 0:
+        score = stale_count * 40
+        candidates.append(("Goal Stagnation", score, [
+            f"{stale_count} goal categor{'y' if stale_count==1 else 'ies'} inactive for 7+ days",
+            f"Goals at failure risk: {len(analytics.get('goal_failure_risk', []))}",
+        ], [
+            "Break your biggest goal into tasks under 30 minutes each",
+            "Delete or pause one goal you haven't touched in 2 weeks",
+            "Set a specific time block today for your most important quest",
+            "Ask yourself: is this goal still meaningful to you?",
+        ]))
+
+    if analytics.get("streak_at_risk"):
+        score = len(analytics["streak_at_risk"]) * 35
+        candidates.append(("Habit Inconsistency", score, [
+            f"Habits at risk: {', '.join(analytics['streak_at_risk'])}",
+            f"Consistency score: {analytics.get('consistency_score', 0)}%",
+        ], [
+            f"Log '{analytics['streak_at_risk'][0]}' right now — it takes 2 minutes",
+            "Set a phone reminder at a fixed time daily for your habits",
+            "Reduce to 2 keystone habits if you're logging more than 5",
+            "Use your recovery tokens if a streak is worth saving",
+        ]))
+
+    if not candidates:
+        candidates.append(("No Clear Bottleneck", 0, [
+            f"Mood: {avg_mood}/5 — OK",
+            f"Energy: {avg_energy}/5 — OK",
+            f"Focus: {avg_focus}/5 — OK",
+        ], [
+            "Keep the momentum going",
+            "Consider adding a harder challenge or new skill node",
+            "Review your monthly goals and raise the bar",
+        ]))
+
+    # Sort by score descending, take top
+    candidates.sort(key=lambda c: c[1], reverse=True)
+    primary_name, confidence_raw, evidence, recovery = candidates[0]
+    confidence = min(round(confidence_raw / max(c[1] for c in candidates) * 100) if candidates and candidates[0][1] > 0 else 50, 99)
+
+    # AI generates a personalized recovery plan
+    try:
+        prompt = f"""You are LiAInne, a personal growth coach.
+
+Bottleneck analysis:
+Primary issue: {primary_name}
+Evidence: {evidence}
+User stats: mood {avg_mood}/5, energy {avg_energy}/5, focus {avg_focus}/5
+
+Write a 3-sentence personalized recovery message:
+1. Acknowledge what the data shows (be specific, not generic)
+2. Give the single most impactful action for TODAY
+3. One encouraging sentence about why this will pass
+
+Be direct, warm, and specific. Max 80 words. Sound like a coach who cares."""
+
+        ai_response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.75, max_tokens=150,
+        )
+        ai_message = ai_response.choices[0].message.content.strip()
+    except Exception:
+        ai_message = None
+
+    return {
+        "bottleneck":    primary_name,
+        "confidence":    confidence,
+        "evidence":      evidence,
+        "recovery_plan": recovery,
+        "ai_message":    ai_message,
+        "all_scores":    [{"name": c[0], "score": c[1]} for c in candidates],
+        "stats": {
+            "avg_mood":   avg_mood,
+            "avg_energy": avg_energy,
+            "avg_focus":  avg_focus,
+        },
+    }
 
 # ---------------------------------------------------------------------------
 # Serve static files

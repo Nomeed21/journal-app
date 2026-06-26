@@ -19,7 +19,8 @@ function showPage(pageId) {
     if (pageId === "habits")   loadStreaks();
     if (pageId === "insights") { loadCharts(); loadInsights(); }
     if (pageId === "review")   {}
-    if (pageId === "journal")  loadProactiveCoaching();
+    if (pageId === "journal")  { loadProactiveCoaching(); loadTodayStatus(); }
+    if (pageId === "domains")  loadDomains();
 }
 
 navItems.forEach(item =>
@@ -84,6 +85,57 @@ const entryTabs = document.querySelectorAll(".entry-tab");
 const submitBtn = document.getElementById("entry-submit");
 const TAB_LABELS = { morning: "Save Morning Entry", night: "Save Night Reflection", free: "Save Entry" };
 
+let todayDone = { morning: false, night: false, free: false };
+
+async function loadTodayStatus() {
+    try {
+        const data = await (await fetch("/entries/today-status")).json();
+        todayDone = { morning: data.morning, night: data.night, free: data.free };
+        // Update tab badges
+        entryTabs.forEach(tab => {
+            const type = tab.dataset.type;
+            const done = todayDone[type];
+            tab.classList.toggle("entry-tab--done", done);
+            // Update label: add checkmark if done
+            const base = { morning: "🌅 Morning", night: "🌙 Night", free: "📓 Free" }[type];
+            tab.textContent = done ? base + " ✓" : base;
+        });
+        // Refresh current tab state
+        applyTabDoneState(currentEntryType);
+    } catch (_) {}
+}
+
+function applyTabDoneState(type) {
+    const done = !editingId && todayDone[type];
+    submitBtn.disabled = done;
+    submitBtn.textContent = editingId
+        ? "Update Entry"
+        : done
+            ? `${type.charAt(0).toUpperCase()+type.slice(1)} entry already saved today`
+            : (TAB_LABELS[type] || "Save Entry");
+
+    // Show/hide the "edit today's entry" link
+    let editLink = document.getElementById("edit-today-link");
+    if (done && !editingId) {
+        if (!editLink) {
+            editLink = document.createElement("div");
+            editLink.id = "edit-today-link";
+            editLink.className = "edit-today-link";
+            submitBtn.parentNode.insertBefore(editLink, submitBtn.nextSibling);
+        }
+        editLink.innerHTML = `<a href="#" id="edit-today-btn">Edit today's ${type} entry instead →</a>`;
+        document.getElementById("edit-today-btn").addEventListener("click", async (e) => {
+            e.preventDefault();
+            const today = new Date().toISOString().slice(0,10);
+            const entries = await (await fetch(`/entries?start_date=${today}T00:00:00Z`)).json();
+            const match = entries.find(en => en.entry_type === type);
+            if (match) window.editEntry(match.id, match.title, match.content, match.mood, (match.tags||[]).join(","), match.entry_type);
+        });
+    } else if (editLink) {
+        editLink.remove();
+    }
+}
+
 function switchEntryTab(type) {
     currentEntryType = type;
     document.getElementById("entry-type").value = type;
@@ -91,15 +143,15 @@ function switchEntryTab(type) {
     document.getElementById("fields-morning").classList.toggle("hidden", type !== "morning");
     document.getElementById("fields-night").classList.toggle("hidden",   type !== "night");
     document.getElementById("fields-free").classList.toggle("hidden",    type !== "free");
-    submitBtn.textContent = editingId ? "Update Entry" : (TAB_LABELS[type] || "Save Entry");
     if (type === "night") loadNightChecklist();
+    applyTabDoneState(type);
 }
 
 entryTabs.forEach(tab => tab.addEventListener("click", () => switchEntryTab(tab.dataset.type)));
 
 // Slider wiring
 [["m-mood","m-mood-val"],["m-energy","m-energy-val"],["m-focus","m-focus-val"],
- ["n-mood","n-mood-val"],["n-goal","n-goal-val"],["n-energy","n-energy-val"],["n-focus","n-focus-val"],
+ ["n-mood","n-mood-val"],["n-energy","n-energy-val"],["n-focus","n-focus-val"],
  ["f-mood","f-mood-val"],["f-energy","f-energy-val"],["f-focus","f-focus-val"]
 ].forEach(([sid, vid]) => {
     const slider = document.getElementById(sid), val = document.getElementById(vid);
@@ -122,15 +174,19 @@ async function loadNightChecklist() {
     }
     el.innerHTML = "<p class='plan-loading'>Loading today's plan…</p>";
     try {
-        const [planRes, streaksRes] = await Promise.all([
-            fetch("/plans/today"),
-            fetch("/habits/balance"),
-        ]);
-        const data    = await planRes.json();
-        const habData = await streaksRes.json();
-        const streaks = habData.streaks || {};
-        const today   = new Date().toISOString().slice(0,10);
-
+        // Fetch plan and habits independently so one failure doesn't kill the other
+        let data = { plan: null }, streaks = {};
+        try {
+            const planRes = await fetch("/plans/today");
+            if (planRes.ok) data = await planRes.json();
+        } catch (_) {}
+        try {
+            const streaksRes = await fetch("/habits/balance");
+            if (streaksRes.ok) {
+                const habData = await streaksRes.json();
+                streaks = habData.streaks || {};
+            }
+        } catch (_) {}
         // Habit checklist
         const habitNames = Object.keys(streaks);
         let habitSection = "";
@@ -178,7 +234,7 @@ async function loadNightChecklist() {
             });
         });
     } catch (_) {
-        el.innerHTML = "<p class='plan-loading'>Could not load today's plan.</p>";
+        el.innerHTML = "<p class='plan-loading'>Error rendering night checklist. Check the console.</p>";
     }
 }
 
@@ -204,7 +260,7 @@ entryForm.addEventListener("submit", async (e) => {
                             gv("morning-obstacles") ? `Obstacles: ${gv("morning-obstacles")}` : "",
                             gv("morning-counterattack") ? `Plan: ${gv("morning-counterattack")}` : ""]
                            .filter(Boolean).join("\n"),
-            mood: gi("m-mood"), goal_progress: 0,
+            mood: gi("m-mood"),
             energy: gi("m-energy"), focus: gi("m-focus"), tags: [], entry_type: "morning",
         };
         if (gv("morning-main-goal").trim() || tasks.length) {
@@ -225,7 +281,7 @@ entryForm.addEventListener("submit", async (e) => {
         entryData = {
             title: gv("night-win").trim().slice(0, 60) || "Night Reflection",
             content: parts.join("\n"),
-            mood: gi("n-mood"), goal_progress: gi("n-goal", 50),
+            mood: gi("n-mood"),
             energy: gi("n-energy"), focus: gi("n-focus"), tags: [], entry_type: "night",
         };
         if (nightTasks.length) {
@@ -239,7 +295,7 @@ entryForm.addEventListener("submit", async (e) => {
         entryData = {
             title: gv("free-title").trim() || "Journal Entry",
             content: gv("free-content"),
-            mood: gi("f-mood"), goal_progress: 0,
+            mood: gi("f-mood"),
             energy: gi("f-energy"), focus: gi("f-focus"),
             tags: tagsRaw ? tagsRaw.split(",").map(t => t.trim()).filter(Boolean) : [],
             entry_type: "free",
@@ -261,6 +317,18 @@ entryForm.addEventListener("submit", async (e) => {
     if (!res.ok) return;
     const saved = await res.json();
 
+    // Guard: already written today — offer to edit instead
+    if (saved.status === "already_exists") {
+        const toast = document.createElement("div");
+        toast.className = "achievement-toast show";
+        toast.style.background = "#e65100";
+        toast.innerHTML = `📝 ${saved.message}`;
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 4000);
+        loadTodayStatus();
+        return;
+    }
+
     // Show achievement toasts from the entry creation response
     if (saved.new_achievements) showAchievementToast(saved.new_achievements);
 
@@ -268,7 +336,7 @@ entryForm.addEventListener("submit", async (e) => {
     fetch("/action-engine", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-            mood: entryData.mood, goal_progress: entryData.goal_progress,
+            mood: entryData.mood,
             content: entryData.content, energy: entryData.energy || 3,
             focus: entryData.focus || 3, entry_type: currentEntryType,
         }),
@@ -287,6 +355,7 @@ entryForm.addEventListener("submit", async (e) => {
     }
 
     resetEntryForm();
+    loadTodayStatus();
     loadAIInsight();
     loadXPHUD();
     loadProactiveCoaching();
@@ -399,10 +468,10 @@ async function loadProactiveCoaching() {
 function resetEntryForm() {
     editingId = null;
     entryForm.reset();
-    ["m-mood-val","m-energy-val","m-focus-val","n-mood-val","n-goal-val",
+    ["m-mood-val","m-energy-val","m-focus-val","n-mood-val",
      "n-energy-val","n-focus-val","f-mood-val","f-energy-val","f-focus-val"].forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.textContent = id.includes("goal") ? "50" : "3";
+        if (el) el.textContent = "3";
     });
     nightTasks = [];
     switchEntryTab("morning");
@@ -428,19 +497,19 @@ async function loadEntries(filters = {}) {
                 <span class="entry-type-badge entry-type-badge--${type}">${badge}</span>
             </div>
             <p>${e.content.replace(/\n/g, "<br>")}</p>
-            <div class="meta">${e.created_at.slice(0,10)} | Mood: ${e.mood}/5 | Goal: ${e.goal_progress}%</div>
+            <div class="meta">${e.created_at.slice(0,10)} | Mood: ${e.mood}/5</div>
             ${e.tags && e.tags.length ? `<div class="tags">${e.tags.map(t => `<span>${t}</span>`).join("")}</div>` : ""}
             <div class="actions">
                 <button onclick="window.editEntry(${e.id},'${e.title.replace(/'/g,"\\'")}',
                     '${e.content.replace(/'/g,"\\'").replace(/\n/g,"\\n")}',
-                    ${e.mood},${e.goal_progress},'${(e.tags||[]).join(",")}','${type}')">Edit</button>
+                    ${e.mood},'${(e.tags||[]).join(",")}','${type}')">Edit</button>
                 <button class="delete-btn" onclick="window.deleteEntry(${e.id})">Delete</button>
             </div>
         </div>`;
     }).join("") || "<p style='color:var(--ink-faint);font-style:italic'>No entries yet.</p>";
 }
 
-window.editEntry = async function(id, title, content, mood, goalProgress, tags, entryType) {
+window.editEntry = async function(id, title, content, mood, tags, entryType) {
     editingId = id;
     showPage("journal");
     switchEntryTab(entryType || "free");
@@ -464,8 +533,6 @@ window.editEntry = async function(id, title, content, mood, goalProgress, tags, 
         document.getElementById("night-tomorrow").value  = get("Tomorrow: ");
         document.getElementById("n-mood").value          = mood;
         document.getElementById("n-mood-val").textContent = mood;
-        document.getElementById("n-goal").value          = goalProgress;
-        document.getElementById("n-goal-val").textContent = goalProgress;
     } else {
         document.getElementById("free-title").value   = title || "";
         document.getElementById("free-content").value = content.replace(/\\n/g,"\n");
@@ -505,18 +572,25 @@ const DIFF_COLORS = { Easy: "#4caf50", Normal: "#f7a94b", Hard: "#ff7043", Elite
 const MASTERY_COLORS = ["#c9a8b0","#d98aa0","#b8617c","#8b2252","#4a0e2a"];
 
 async function loadStreaks() {
-    const [balanceRes, riskRes] = await Promise.all([
-        fetch("/habits/balance"),
-        fetch("/analytics/predictive"),
-    ]);
-    const balanceData = await balanceRes.json();
-    const riskData    = await riskRes.json();
-    const streaks     = balanceData.streaks || {};
-    const atRisk      = riskData.streak_at_risk || [];
+    // Fetch balance (new endpoint) with fallback to legacy streaks endpoint
+    let streaks = {}, atRisk = [], balanceData = { balance: null, streaks: {} };
+    try {
+        const [balanceRes, riskRes] = await Promise.all([
+            fetch("/habits/balance"),
+            fetch("/analytics/predictive"),
+        ]);
+        if (balanceRes.ok) balanceData = await balanceRes.json();
+        if (riskRes.ok)    atRisk = (await riskRes.json()).streak_at_risk || [];
+    } catch (_) {}
+
+    // If balance endpoint failed or returned no streaks, fall back to /habits/streaks
+    streaks = balanceData.streaks && Object.keys(balanceData.streaks).length
+        ? balanceData.streaks
+        : await fetch("/habits/streaks").then(r => r.json()).catch(() => ({}));
 
     // Life balance bars
     const hbBars = document.getElementById("hb-bars");
-    if (hbBars && balanceData.balance) {
+    if (hbBars && balanceData.balance && balanceData.balance.length) {
         hbBars.innerHTML = balanceData.balance.map(b => `
             <div class="hb-bar-col">
                 <div class="hb-bar-wrap">
@@ -732,15 +806,15 @@ async function loadCharts() {
         data: {
             labels: trends.map(t => t.date),
             datasets: [
-                { label: "Mood (1-5)",        data: trends.map(t => t.avg_mood), borderColor: "#d98aa0", backgroundColor: "rgba(217,138,160,0.1)", yAxisID: "y",  tension: 0.3 },
-                { label: "Goal Progress (%)", data: trends.map(t => t.avg_goal), borderColor: "#b8617c", backgroundColor: "rgba(184,97,124,0.1)",   yAxisID: "y1", tension: 0.3 },
+                { label: "Mood (1-5)",   data: trends.map(t => t.avg_mood),   borderColor: "#d98aa0", backgroundColor: "rgba(217,138,160,0.1)", tension: 0.3 },
+                { label: "Energy (1-5)", data: trends.map(t => t.avg_energy), borderColor: "#b8617c", backgroundColor: "rgba(184,97,124,0.1)",   tension: 0.3 },
+                { label: "Focus (1-5)",  data: trends.map(t => t.avg_focus),  borderColor: "#82b366", backgroundColor: "rgba(130,179,102,0.1)",   tension: 0.3 },
             ],
         },
-        options: { responsive: true, maintainAspectRatio: false,
-            scales: {
-                y:  { min: 1, max: 5,   position: "left",  title: { display: true, text: "Mood" } },
-                y1: { min: 0, max: 100, position: "right", title: { display: true, text: "Goal %" }, grid: { drawOnChartArea: false } },
-            }},
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            scales: { y: { min: 1, max: 5, title: { display: true, text: "Rating (1–5)" } } },
+        },
     });
 
     new Chart(document.getElementById("correlation-chart").getContext("2d"), {
@@ -1154,10 +1228,230 @@ function showSkillCompleteModal(sc) {
 }
 
 // ---------------------------------------------------------------------------
+// Life Domains — full page logic
+// ---------------------------------------------------------------------------
+
+async function loadDomains() {
+    const container = document.getElementById("domain-cards");
+    container.innerHTML = "<p class='empty-state'>Loading domains…</p>";
+    try {
+        const domains = await (await fetch("/domains")).json();
+        if (!domains.length) { container.innerHTML = "<p class='empty-state'>No domain data yet.</p>"; return; }
+        container.innerHTML = domains.map(d => buildDomainCard(d)).join("");
+    } catch (_) {
+        container.innerHTML = "<p class='empty-state'>Could not load domains.</p>";
+    }
+    loadActionEngine();
+    loadCurrentBosses();
+}
+
+function buildDomainCard(d) {
+    const pct      = Math.round(d.xp_in_level / 5);  // xp_in_level out of 500
+    const habits   = (d.habits || []).slice(0, 4);
+    const skills   = (d.skill_trees || []);
+    const goals    = (d.goals || []).filter(g => g.progress < 100).slice(0, 3);
+    const boss     = d.weekly_boss;
+
+    const habitPills = habits.map(h =>
+        `<span class="dom-pill ${h.done_today ? 'dom-pill--done' : ''}">${h.done_today ? '✓' : '○'} ${h.name} (${h.streak}🔥)</span>`
+    ).join("") || `<span class="dom-pill dom-pill--empty">No habits linked</span>`;
+
+    const skillBars = skills.map(s =>
+        `<div class="dom-skill-row">
+            <span class="dom-skill-name">${s.label}</span>
+            <div class="dom-skill-bar"><div class="dom-skill-fill" style="width:${s.pct}%;background:${d.color}"></div></div>
+            <span class="dom-skill-pct">${s.completed}/${s.total}</span>
+         </div>`
+    ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">No skill trees</span>`;
+
+    const goalList = goals.map(g =>
+        `<div class="dom-goal-row">
+            <span class="dom-goal-title">${g.title}</span>
+            <div class="dom-goal-bar"><div class="dom-goal-fill" style="width:${g.progress}%;background:${d.color}"></div></div>
+            <span class="dom-goal-pct">${g.progress}%</span>
+         </div>`
+    ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">No active goals</span>`;
+
+    const bossHtml = boss
+        ? `<div class="dom-boss ${boss.completed ? 'dom-boss--done' : ''}">
+               <span class="dom-boss-icon">${boss.completed ? '✅' : '⚔️'}</span>
+               <span class="dom-boss-name">${boss.name}</span>
+               ${!boss.completed ? `<button class="dom-boss-btn" onclick="defeatBoss(${boss.id}, this)">Defeat</button>` : '<span class="dom-boss-defeated">Defeated!</span>'}
+           </div>`
+        : `<span style="font-size:.8rem;color:var(--ink-faint)">No boss this week</span>`;
+
+    return `<div class="domain-card" style="--dom-color:${d.color}">
+        <div class="dom-header">
+            <span class="dom-icon">${d.icon}</span>
+            <div class="dom-title-block">
+                <div class="dom-name">${d.name}</div>
+                <div class="dom-desc">${d.description}</div>
+            </div>
+            <div class="dom-level-badge">Lv ${d.level}</div>
+        </div>
+        <div class="dom-xp-row">
+            <div class="dom-xp-bar-wrap">
+                <div class="dom-xp-bar-fill" style="width:${pct}%;background:${d.color}"></div>
+            </div>
+            <span class="dom-xp-text">${d.xp_in_level}/500 XP · ${d.xp_to_next} to next</span>
+        </div>
+        <div class="dom-progress-pct">${d.progress}% quest completion · ${d.active_goals} active goal${d.active_goals !== 1 ? 's' : ''}</div>
+
+        <div class="dom-section-label">Habits</div>
+        <div class="dom-pills">${habitPills}</div>
+
+        <div class="dom-section-label">Skill Trees</div>
+        ${skillBars}
+
+        <div class="dom-section-label">Active Goals</div>
+        ${goalList}
+
+        <div class="dom-section-label">This Week's Boss</div>
+        ${bossHtml}
+    </div>`;
+}
+
+async function loadActionEngine() {
+    const el = document.getElementById("aep-content");
+    try {
+        const data = await (await fetch("/action-engine")).json();
+        if (!data.needs_attention) {
+            el.innerHTML = `<div class="aep-ok">✦ ${data.summary}</div>`;
+            return;
+        }
+        const primary = data.primary;
+        el.innerHTML = `
+            <div class="aep-primary">
+                <div class="aep-severity aep-sev--${primary.severity}">${primary.severity.toUpperCase()}</div>
+                <div class="aep-problem-title">${primary.title}</div>
+                <div class="aep-action">→ ${primary.action}</div>
+            </div>
+            ${data.problems.length > 1 ? `<div class="aep-other-list">
+                ${data.problems.slice(1).map(p =>
+                    `<div class="aep-other-item"><span class="aep-sev--${p.severity} aep-severity">${p.severity.toUpperCase()}</span> ${p.title}</div>`
+                ).join("")}
+            </div>` : ""}`;
+    } catch (_) {
+        el.innerHTML = `<div class="aep-ok">Action Engine unavailable.</div>`;
+    }
+}
+
+async function loadBottleneck() {
+    const el = document.getElementById("bottleneck-content");
+    el.innerHTML = "<span style='color:var(--ink-faint);font-style:italic'>Analyzing…</span>";
+    try {
+        const data = await (await fetch("/bottleneck")).json();
+        if (!data.bottleneck) {
+            el.innerHTML = `<p style="color:var(--ink-soft)">${data.message}</p>`;
+            return;
+        }
+        const scores = (data.all_scores || []).slice(0, 4);
+        el.innerHTML = `
+            <div class="btn-primary-block">
+                <div class="btn-bottleneck-name">${data.bottleneck}</div>
+                <div class="btn-confidence">Confidence: ${data.confidence}%</div>
+                ${data.ai_message ? `<div class="btn-ai-msg">${data.ai_message}</div>` : ""}
+            </div>
+            <div class="btn-evidence">
+                <div class="btn-sub-label">Evidence</div>
+                ${data.evidence.map(e => `<div class="btn-ev-item">• ${e}</div>`).join("")}
+            </div>
+            <div class="btn-recovery">
+                <div class="btn-sub-label">Recovery Plan</div>
+                ${(data.recovery_plan || []).map((r, i) =>
+                    `<div class="btn-rec-item"><span class="btn-rec-num">${i + 1}</span>${r}</div>`
+                ).join("")}
+            </div>
+            ${scores.length > 1 ? `<div class="btn-scores">
+                ${scores.map(s =>
+                    `<div class="btn-score-row">
+                        <span class="btn-score-name">${s.name}</span>
+                        <div class="btn-score-bar-wrap"><div class="btn-score-bar" style="width:${Math.min(s.score, 100)}%"></div></div>
+                     </div>`
+                ).join("")}
+            </div>` : ""}`;
+    } catch (_) {
+        el.innerHTML = "<p style='color:var(--ink-soft)'>Could not run analysis.</p>";
+    }
+}
+window.loadBottleneck = loadBottleneck;
+
+// Weekly Boss Battles
+async function loadCurrentBosses() {
+    const el = document.getElementById("boss-battles");
+    try {
+        const data = await (await fetch("/bosses/current")).json();
+        if (!data.bosses || !data.bosses.length) {
+            el.innerHTML = `<div class="boss-empty">No boss battles this week yet. <button class="btn-ghost btn-sm" onclick="generateBosses()">Generate Now</button></div>`;
+            return;
+        }
+        el.innerHTML = data.bosses.map(b => buildBossCard(b)).join("");
+    } catch (_) {
+        el.innerHTML = `<div class="boss-empty">Could not load boss battles.</div>`;
+    }
+}
+
+function buildBossCard(b) {
+    const req  = Array.isArray(b.requirements) ? b.requirements : [];
+    const done = b.completed;
+    return `<div class="boss-card ${done ? 'boss-card--done' : ''}">
+        <div class="boss-card-header">
+            <span class="boss-icon">${done ? '☠️' : '👹'}</span>
+            <div class="boss-title-block">
+                <div class="boss-name">${b.name}</div>
+                <div class="boss-domain">${b.domain}</div>
+            </div>
+            <div class="boss-xp">+${b.xp_reward} XP</div>
+        </div>
+        <div class="boss-desc">${b.description || ''}</div>
+        ${req.length ? `<div class="boss-reqs">
+            ${req.map(r => `<div class="boss-req-item">☐ ${r.label}</div>`).join("")}
+        </div>` : ""}
+        <div class="boss-deadline">Deadline: ${b.deadline}</div>
+        ${done
+            ? `<div class="boss-defeated-badge">✅ Defeated!</div>`
+            : `<button class="boss-defeat-btn" onclick="defeatBoss(${b.id}, this)">⚔️ Mark Defeated</button>`}
+    </div>`;
+}
+
+window.generateBosses = async function() {
+    const el = document.getElementById("boss-battles");
+    el.innerHTML = "<p style='color:var(--ink-faint);font-style:italic'>Generating boss battles…</p>";
+    try {
+        const data = await (await fetch("/bosses/generate", { method: "POST" })).json();
+        loadCurrentBosses();
+        const toast = document.createElement("div");
+        toast.className = "achievement-toast show";
+        toast.innerHTML = `⚔️ ${data.bosses.length} Boss Battles generated for ${data.week_key}!`;
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 3500);
+    } catch (_) {
+        el.innerHTML = "<p style='color:var(--ink-soft)'>Boss generation failed.</p>";
+    }
+};
+
+window.defeatBoss = async function(bossId, btn) {
+    btn.disabled = true;
+    btn.textContent = "Processing…";
+    try {
+        const data = await (await fetch(`/bosses/${bossId}/complete`, { method: "POST" })).json();
+        if (data.xp_earned) showXPFlash(data.xp_earned, data.domain);
+        if (data.new_achievements) showAchievementToast(data.new_achievements);
+        loadCurrentBosses();
+        loadDomains();
+        loadXPHUD();
+    } catch (_) {
+        btn.disabled = false;
+        btn.textContent = "⚔️ Mark Defeated";
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 loadAIInsight();
 loadXPHUD();
+loadTodayStatus();
 switchEntryTab("morning");
 loadProactiveCoaching();
 

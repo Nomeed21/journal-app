@@ -18,6 +18,7 @@
         </div>
         <ul class="nav-links">
             <li><a href="#" class="nav-item active" data-page="journal"><span class="nav-icon">📝</span><span class="nav-label">Journal</span></a></li>
+            <li><a href="#" class="nav-item" data-page="domains"><span class="nav-icon">🌐</span><span class="nav-label">Domains</span></a></li>
             <li><a href="#" class="nav-item" data-page="entries"><span class="nav-icon">📖</span><span class="nav-label">Entries</span></a></li>
             <li><a href="#" class="nav-item" data-page="quests"><span class="nav-icon">⚔️</span><span class="nav-label">Quests</span></a></li>
             <li><a href="#" class="nav-item" data-page="skills"><span class="nav-icon">🌳</span><span class="nav-label">Skills</span></a></li>
@@ -33,6 +34,42 @@
 
     <!-- ── Main content ────────────────────────── -->
     <main class="main-content">
+
+        <!-- PAGE: Domains -->
+        <section class="page" id="page-domains">
+            <div class="page-header">
+                <h1>Life Domains</h1>
+                <p class="page-sub">Your personal growth operating system</p>
+            </div>
+
+            <!-- Action Engine Panel -->
+            <div id="action-engine-panel" class="action-engine-panel">
+                <div class="aep-label">⚡ Action Engine</div>
+                <div id="aep-content">Loading recommendations…</div>
+            </div>
+
+            <!-- Bottleneck Detector -->
+            <div class="bottleneck-card" id="bottleneck-card">
+                <div class="btn-header">
+                    <span class="btn-label">🔍 Why Am I Stuck?</span>
+                    <button class="btn-ghost btn-sm" onclick="loadBottleneck()">Analyze</button>
+                </div>
+                <div id="bottleneck-content" class="btn-body">Click Analyze to detect your primary bottleneck.</div>
+            </div>
+
+            <!-- Weekly Bosses -->
+            <div class="section-header-row">
+                <h2 class="section-h2">⚔️ Weekly Boss Battles</h2>
+                <button class="btn-ghost btn-sm" onclick="generateBosses()">Generate This Week's Bosses</button>
+            </div>
+            <div id="boss-battles" class="boss-grid">Loading…</div>
+
+            <!-- Domain Cards -->
+            <div class="section-header-row" style="margin-top:2rem">
+                <h2 class="section-h2">🌐 Domain Overview</h2>
+            </div>
+            <div id="domain-cards" class="domain-grid">Loading…</div>
+        </section>
 
         <!-- PAGE: Journal -->
         <section class="page active" id="page-journal">
@@ -119,8 +156,6 @@
                     <div class="sliders">
                         <label>Mood <span class="slider-val" id="n-mood-val">3</span>/5
                             <input type="range" id="n-mood" min="1" max="5" value="3"></label>
-                        <label>Goal Progress <span class="slider-val" id="n-goal-val">50</span>%
-                            <input type="range" id="n-goal" min="0" max="100" value="50"></label>
                         <label>Energy <span class="slider-val" id="n-energy-val">3</span>/5
                             <input type="range" id="n-energy" min="1" max="5" value="3"></label>
                         <label>Focus <span class="slider-val" id="n-focus-val">3</span>/5
