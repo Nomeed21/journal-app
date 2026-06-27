@@ -98,6 +98,13 @@ class PlanCreate(BaseModel):
 class MasteryCheckSubmit(BaseModel):
     response: str
 
+
+class QuestCreate(BaseModel):
+    title: str
+    description: str = ""
+    difficulty: str = "Normal"
+    milestone_id: Optional[int] = None
+
 # ---------------------------------------------------------------------------
 # Skill-node tag helpers  (no schema migration needed)
 # ---------------------------------------------------------------------------
@@ -566,153 +573,437 @@ def delete_entry(entry_id: int):
     if not result.data:
         raise HTTPException(404, "Entry not found")
     return {"status": "deleted"}
-
 # ---------------------------------------------------------------------------
-# Habits
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Habit helpers
+# Habits V2 — Core Gameplay System
+# Habits feed Skill Trees, Quests, Domains, AI Coaching, Weekly Bosses
 # ---------------------------------------------------------------------------
 
-HABIT_DIFFICULTY_XP = {"Easy": 5, "Normal": 10, "Hard": 20, "Elite": 30}
-HABIT_CATEGORIES    = ["Physical", "Learning", "Mind", "Social", "Productivity", "Creativity"]
+# ── Pydantic additions ────────────────────────────────────────────────────
 
-# Mastery thresholds: (completions_needed, level_name)
-HABIT_MASTERY_LEVELS = [
+class HabitLog(BaseModel):
+    name: str
+    skill_node_id: str = ""        # e.g. "cs_python"
+    skill_tree:    str = ""        # e.g. "Study"
+    # Legacy compat fields (ignored if skill_node_id provided)
+    category:      str = "Productivity"
+    difficulty:    str = "Normal"
+    linked_skill:  Optional[str] = None
+
+class HabitCreate(BaseModel):
+    name:          str
+    skill_node_id: str
+    skill_tree:    str
+
+class RecoveryTokenUse(BaseModel):
+    name:       str
+    date:       str        # YYYY-MM-DD
+    token_type: str = "restore"
+    # restore | skip | freeze | reroll | bonus_xp | boss_reduce | quest_recover
+
+class EvolutionConfirm(BaseModel):
+    confirmed: bool
+    new_stage_title: str = ""
+
+# ── Constants ─────────────────────────────────────────────────────────────
+
+MASTERY_LEVELS = [
     (0,   "Beginner"),
     (7,   "Apprentice"),
     (30,  "Journeyman"),
     (90,  "Expert"),
     (180, "Master"),
+    (365, "Legend"),
 ]
 
-# Evolution stages: {habit_name_lower_contains: [stage1, stage2, ...]}
-# Generic per-difficulty stages applied to all habits
-EVOLUTION_THRESHOLDS = [7, 30, 90, 180]   # completions to evolve
+EVOLUTION_THRESHOLDS = [7, 21, 60, 120, 200]   # completions to unlock next stage
 
-def _habit_mastery_level(total_logs: int) -> dict:
-    level = 1
-    label = "Beginner"
-    for i, (threshold, lbl) in enumerate(HABIT_MASTERY_LEVELS):
-        if total_logs >= threshold:
-            level = i + 1
-            label = lbl
+# Synergy definitions: (sorted frozenset of habit names containing key) → bonus
+SYNERGY_RULES = [
+    {
+        "key":      "mental_clarity",
+        "name":     "Mental Clarity",
+        "keywords": ["journal", "meditat"],
+        "bonus":    "+15% XP for next 24h · Focus insights unlocked",
+        "days":     1,
+    },
+    {
+        "key":      "recovery_boost",
+        "name":     "Recovery Boost",
+        "keywords": ["exercise", "workout", "run", "gym", "sleep"],
+        "bonus":    "+20% XP · Streak protection active",
+        "days":     1,
+    },
+    {
+        "key":      "learning_momentum",
+        "name":     "Learning Momentum",
+        "keywords": ["read", "program", "code", "study", "learn"],
+        "bonus":    "+25% XP · Skill XP doubled for 24h",
+        "days":     1,
+    },
+    {
+        "key":      "creative_flow",
+        "name":     "Creative Flow",
+        "keywords": ["write", "draw", "music", "piano", "guitar", "art", "creat"],
+        "bonus":    "+20% XP · Creative domain XP boosted",
+        "days":     1,
+    },
+    {
+        "key":      "warrior_protocol",
+        "name":     "Warrior Protocol",
+        "keywords": ["exercise", "workout", "run", "gym", "cold", "fast"],
+        "bonus":    "+30% XP · Boss battle difficulty reduced",
+        "days":     1,
+    },
+]
+
+TOKEN_COSTS = {
+    "restore":      1,   # Restore a missed day
+    "skip":         1,   # Skip today without breaking streak
+    "freeze":       2,   # Freeze streak for 3 days
+    "reroll":       1,   # Reroll today's daily quest
+    "bonus_xp":     1,   # +50% XP for next log
+    "boss_reduce":  2,   # Reduce weekly boss difficulty
+    "quest_recover":2,   # Recover a failed weekly quest
+}
+
+# ── Node → Domain lookup ──────────────────────────────────────────────────
+
+def _domain_for_skill_tree(skill_tree: str) -> str:
+    """Map skill tree key → domain name."""
+    for domain, defn in DOMAIN_DEFINITIONS.items():
+        if skill_tree in defn.get("skill_keys", []):
+            return domain
+    return "Personal Growth"
+
+def _node_name(skill_tree: str, node_id: str) -> str:
+    """Resolve a human-readable node name from tree + node_id."""
+    tree = SKILL_TREES.get(skill_tree, {})
+    for n in tree.get("nodes", []):
+        if n["id"] == node_id:
+            return n["name"]
+    return node_id
+
+def _all_skill_nodes_flat() -> list[dict]:
+    """Flat list of {tree, node_id, name, domain} for the habit-creation picker."""
+    result = []
+    for tree_key, tree_def in SKILL_TREES.items():
+        domain = _domain_for_skill_tree(tree_key)
+        for node in tree_def.get("nodes", []):
+            result.append({
+                "tree":   tree_key,
+                "id":     node["id"],
+                "name":   node["name"],
+                "domain": domain,
+                "icon":   tree_def.get("icon", ""),
+                "color":  tree_def.get("color", ""),
+            })
+    return result
+
+# ── XP Modifiers ──────────────────────────────────────────────────────────
+
+def _compute_xp(
+    habit_name: str,
+    base_xp: int,
+    streak: int,
+    today: str,
+    domain: str,
+    first_today: bool,
+    ai_recommended: bool = False,
+) -> tuple[int, list[dict]]:
+    """Compute final XP with all modifiers. Returns (total_xp, modifiers_list)."""
+    mods = []
+    total = base_xp
+
+    # Morning completion (before 10am UTC)
+    hour = datetime.now(timezone.utc).hour
+    if hour < 10:
+        bonus = round(base_xp * 0.25)
+        mods.append({"key": "morning", "label": "☀️ Morning", "bonus": bonus})
+        total += bonus
+
+    # First habit of the day
+    if first_today:
+        bonus = round(base_xp * 0.15)
+        mods.append({"key": "first_habit", "label": "⚡ First Today", "bonus": bonus})
+        total += bonus
+
+    # Perfect week (7-day streak)
+    if streak > 0 and streak % 7 == 0:
+        bonus = round(base_xp * 0.5)
+        mods.append({"key": "perfect_week", "label": "🔥 Perfect Week", "bonus": bonus})
+        total += bonus
+
+    # AI recommended
+    if ai_recommended:
+        bonus = round(base_xp * 0.3)
+        mods.append({"key": "ai_rec", "label": "✦ AI Recommended", "bonus": bonus})
+        total += bonus
+
+    # Domain underdeveloped — check if domain has low XP
+    try:
+        dom_defn = DOMAIN_DEFINITIONS.get(domain, {})
+        dom_cats = set(dom_defn.get("skill_keys", []) + dom_defn.get("goal_cats", []))
+        dom_xp = sum(get_category_xp(c) for c in dom_cats)
+        all_xp = get_total_xp()
+        if all_xp > 0 and dom_xp / all_xp < 0.1:  # less than 10% share
+            bonus = round(base_xp * 0.4)
+            mods.append({"key": "underdog", "label": "📈 Domain Boost", "bonus": bonus})
+            total += bonus
+    except Exception:
+        pass
+
+    # Active synergy bonus from today
+    try:
+        synergies = supabase.table("habit_synergies").select("key").eq("earned_at", today).execute().data
+        if synergies:
+            bonus = round(base_xp * 0.2)
+            mods.append({"key": "synergy", "label": "⚗️ Synergy Active", "bonus": bonus})
+            total += bonus
+    except Exception:
+        pass
+
+    # Bonus XP token active
+    try:
+        bonus_token = supabase.table("habit_recovery_tokens_v2").select("id").eq("habit_name", habit_name).eq("token_type", "bonus_xp").is_("used_at", None).limit(1).execute().data
+        if bonus_token:
+            bonus = round(base_xp * 0.5)
+            mods.append({"key": "token_bonus", "label": "🛡️ XP Token", "bonus": bonus})
+            total += bonus
+            # Mark used
+            supabase.table("habit_recovery_tokens_v2").update({"used_at": datetime.now(timezone.utc).isoformat()}).eq("id", bonus_token[0]["id"]).execute()
+    except Exception:
+        pass
+
+    return max(total, base_xp), mods
+
+# ── Synergy Detection ─────────────────────────────────────────────────────
+
+def _detect_synergies(habits_logged_today: list[str], today: str) -> list[dict]:
+    """Check if today's habit completions triggered any synergies."""
+    combined = " ".join(h.lower() for h in habits_logged_today)
+    new_synergies = []
+    for rule in SYNERGY_RULES:
+        keywords_hit = sum(1 for kw in rule["keywords"] if kw in combined)
+        if keywords_hit >= 2:
+            # Check not already awarded today
+            try:
+                existing = supabase.table("habit_synergies").select("id").eq("synergy_key", rule["key"]).eq("earned_at", today).execute()
+                if existing.data:
+                    continue
+            except Exception:
+                pass
+            expires = (datetime.now(timezone.utc) + timedelta(days=rule["days"])).strftime("%Y-%m-%d")
+            try:
+                supabase.table("habit_synergies").insert({
+                    "synergy_key":     rule["key"],
+                    "name":            rule["name"],
+                    "bonus_desc":      rule["bonus"],
+                    "habits_involved": habits_logged_today,
+                    "earned_at":       today,
+                    "expires_at":      expires,
+                }).execute()
+            except Exception:
+                pass
+            new_synergies.append({"name": rule["name"], "bonus": rule["bonus"]})
+    return new_synergies
+
+# ── Mastery + Evolution ───────────────────────────────────────────────────
+
+def _mastery(total: int) -> dict:
+    level, label = 1, "Beginner"
+    for i, (threshold, lbl) in enumerate(MASTERY_LEVELS):
+        if total >= threshold:
+            level, label = i + 1, lbl
     return {"level": level, "label": label}
 
-def _habit_xp(difficulty: str) -> int:
-    return HABIT_DIFFICULTY_XP.get(difficulty, 10)
+def _evolution_stage_index(total: int) -> int:
+    """Which evolution threshold has been reached (0-based)."""
+    for i, t in enumerate(EVOLUTION_THRESHOLDS):
+        if total < t:
+            return i
+    return len(EVOLUTION_THRESHOLDS)
 
-def _recovery_tokens_from_dates(dates: list[str]) -> int:
-    """Count earned tokens from a pre-fetched sorted list of unique dates."""
-    tokens_earned = 0
-    streak = 0
-    for i, d in enumerate(dates):
-        if i == 0:
-            streak = 1
-        else:
-            try:
-                prev = datetime.strptime(dates[i-1], "%Y-%m-%d")
-                curr = datetime.strptime(d, "%Y-%m-%d")
-                streak = streak + 1 if (curr - prev).days == 1 else 1
-            except Exception:
-                streak = 1
-        if streak > 0 and streak % 14 == 0:
-            tokens_earned += 1
-    return tokens_earned
+def _check_evolution_ready(name: str, total: int) -> Optional[dict]:
+    """Returns evolution proposal if the habit just hit a threshold."""
+    for threshold in EVOLUTION_THRESHOLDS:
+        if total == threshold:
+            return {
+                "ready":     True,
+                "threshold": threshold,
+                "message":   f"After {total} completions, '{name}' is ready to evolve.",
+            }
+    return None
 
-def _recovery_tokens(habit_name: str, prefetched_dates: list[str] | None = None) -> dict:
-    """Count earned recovery tokens. Accepts pre-fetched dates to avoid extra DB call."""
+def _get_or_create_profile(name: str, skill_node_id: str = "", skill_tree: str = "", domain: str = "") -> dict:
+    """Fetch habit profile, creating it if absent."""
     try:
-        if prefetched_dates is None:
-            result = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
-            prefetched_dates = sorted({r["completed_at"] for r in result.data})
-        tokens_earned = _recovery_tokens_from_dates(prefetched_dates)
-        # habit_recovery_tokens table may not exist yet — silently default to 0
-        tokens_used = 0
-        try:
-            used = supabase.table("habit_recovery_tokens").select("id").eq("habit_name", habit_name).execute()
-            tokens_used = len(used.data)
-        except Exception:
-            tokens_used = 0
-        return {
-            "earned":    min(tokens_earned, 3 + tokens_used),
-            "used":      tokens_used,
-            "available": max(0, min(3, tokens_earned - tokens_used)),
-        }
+        result = supabase.table("habit_profiles").select("*").eq("name", name).limit(1).execute()
+        if result.data:
+            return result.data[0]
     except Exception:
-        return {"earned": 0, "used": 0, "available": 0}
-
-def _fetch_habit_meta() -> dict:
-    """Try new columns; fall back gracefully if they do not exist yet."""
+        pass
+    # Create a minimal profile
+    base_xp = 10
+    new_profile = {
+        "name":             name,
+        "skill_node_id":    skill_node_id,
+        "skill_tree":       skill_tree,
+        "domain":           domain or _domain_for_skill_tree(skill_tree) if skill_tree else "Personal Growth",
+        "evolution_stage":  1,
+        "evolution_stages": [],
+        "pending_evolution": False,
+        "base_xp":          base_xp,
+    }
     try:
-        result = supabase.table("habits").select("name, category, difficulty, linked_skill").execute()
-        meta: dict[str, dict] = {}
-        for row in result.data:
-            n = row["name"]
-            if n not in meta:
-                meta[n] = {
-                    "category":     row.get("category") or "Productivity",
-                    "difficulty":   row.get("difficulty") or "Normal",
-                    "linked_skill": row.get("linked_skill"),
-                }
-        return meta
+        r = supabase.table("habit_profiles").insert(new_profile).execute()
+        return r.data[0] if r.data else new_profile
+    except Exception:
+        return new_profile
+
+# ── Recovery Tokens ───────────────────────────────────────────────────────
+
+def _count_tokens(habit_name: str) -> dict:
+    """Count earned vs used tokens for a habit."""
+    try:
+        # Earned: 1 per 14-day streak segment (legacy formula)
+        log = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
+        dates_asc = sorted({r["completed_at"] for r in log.data})
+        earned = _recovery_tokens_from_dates(dates_asc)
+
+        # Used V2 tokens
+        used_rows = supabase.table("habit_recovery_tokens_v2").select("token_type").eq("habit_name", habit_name).execute().data
+        used_count = len(used_rows)
+
+        available = max(0, earned - used_count)
+        return {"earned": earned, "used": used_count, "available": available, "history": used_rows}
+    except Exception:
+        return {"earned": 0, "used": 0, "available": 0, "history": []}
+
+# ── Full Habit Snapshot ───────────────────────────────────────────────────
+
+def _build_habit_snapshot(name: str, profile: dict, dates_desc: list[str], today: str) -> dict:
+    """Build the rich habit card data for the frontend."""
+    total   = len(dates_desc)
+    streak  = calc_streak(dates_desc, today)
+    mastery = _mastery(total)
+    tokens  = _count_tokens(name)
+
+    # Success rate: completed days / days since first log
+    try:
+        if dates_desc:
+            first = datetime.strptime(dates_desc[-1], "%Y-%m-%d")
+            days_active = (datetime.now(timezone.utc).replace(tzinfo=None) - first).days + 1
+            success_rate = round(total / max(days_active, 1) * 100)
+        else:
+            success_rate = 0
+    except Exception:
+        success_rate = 0
+
+    # Best streak
+    best_streak = 0
+    if dates_desc:
+        cur = 1
+        best_streak = 1
+        for i in range(1, len(dates_desc)):
+            try:
+                a = datetime.strptime(dates_desc[i-1], "%Y-%m-%d")
+                b = datetime.strptime(dates_desc[i],   "%Y-%m-%d")
+                if (a - b).days == 1:
+                    cur += 1
+                    best_streak = max(best_streak, cur)
+                else:
+                    cur = 1
+            except Exception:
+                cur = 1
+
+    # Evolution info
+    stage_idx      = _evolution_stage_index(total)
+    stages         = profile.get("evolution_stages") or []
+    current_stage  = stages[profile.get("evolution_stage", 1) - 1] if stages else {}
+    next_threshold = EVOLUTION_THRESHOLDS[stage_idx] if stage_idx < len(EVOLUTION_THRESHOLDS) else None
+    progress_to_next = round(total / next_threshold * 100) if next_threshold else 100
+
+    # Active synergies
+    try:
+        active_syn = supabase.table("habit_synergies").select("name, bonus_desc").gte("expires_at", today).execute().data
+    except Exception:
+        active_syn = []
+
+    return {
+        "name":              name,
+        "skill_node_id":     profile.get("skill_node_id", ""),
+        "skill_node_name":   _node_name(profile.get("skill_tree", ""), profile.get("skill_node_id", "")),
+        "skill_tree":        profile.get("skill_tree", ""),
+        "domain":            profile.get("domain", ""),
+        "base_xp":           profile.get("base_xp", 10),
+        # Streak / mastery
+        "current_streak":    streak,
+        "best_streak":       best_streak,
+        "total_logs":        total,
+        "success_rate":      success_rate,
+        "done_today":        today in dates_desc,
+        "mastery_level":     mastery["level"],
+        "mastery_label":     mastery["label"],
+        # Evolution
+        "evolution_stage":      profile.get("evolution_stage", 1),
+        "evolution_stages":     stages,
+        "pending_evolution":    profile.get("pending_evolution", False),
+        "progress_to_next_evo": progress_to_next,
+        "next_evo_at":          next_threshold,
+        # Tokens
+        "recovery_tokens":   tokens,
+        # Synergies
+        "active_synergies":  active_syn,
+        # Legacy compat
+        "category":          profile.get("domain", "Personal Growth"),
+        "difficulty":        "Normal",
+        "xp_per_log":        profile.get("base_xp", 10),
+    }
+
+# ── Legacy helpers (kept for backwards compat calls) ─────────────────────
+
+def _compute_streaks_raw() -> dict:
+    """Returns the streaks dict expected by AI insight, insights page, etc."""
+    try:
+        log = supabase.table("habits").select("name, completed_at").order("completed_at", desc=True).execute()
+        habit_dates: dict[str, list] = defaultdict(list)
+        for row in log.data:
+            habit_dates[row["name"]].append(row["completed_at"])
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        profiles = {r["name"]: r for r in supabase.table("habit_profiles").select("*").execute().data}
+        out = {}
+        for name, dates in habit_dates.items():
+            unique_desc = sorted(set(dates), reverse=True)
+            prof = profiles.get(name, {})
+            snap = _build_habit_snapshot(name, prof, unique_desc, today)
+            out[name] = snap
+        return out
     except Exception:
         return {}
 
-def _compute_streaks_raw() -> dict:
-    result = supabase.table("habits").select("name, completed_at").order("completed_at", desc=True).execute()
-    habit_dates: dict[str, list] = defaultdict(list)
-    for row in result.data:
-        habit_dates[row["name"]].append(row["completed_at"])
-    habit_meta = _fetch_habit_meta()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    out = {}
-    for name, dates in habit_dates.items():
-        unique_dates       = sorted(set(dates), reverse=True)
-        unique_dates_asc   = list(reversed(unique_dates))
-        total              = len(dates)
-        mastery            = _habit_mastery_level(total)
-        tokens             = _recovery_tokens(name, prefetched_dates=unique_dates_asc)
-        meta               = habit_meta.get(name, {})
-        out[name] = {
-            "current_streak": calc_streak(unique_dates, today),
-            "total_logs":     total,
-            "category":       meta.get("category", "Productivity"),
-            "difficulty":     meta.get("difficulty", "Normal"),
-            "linked_skill":   meta.get("linked_skill"),
-            "xp_per_log":     _habit_xp(meta.get("difficulty", "Normal")),
-            "mastery_level":  mastery["level"],
-            "mastery_label":  mastery["label"],
-            "recovery_tokens": tokens,
-        }
-    return out
-
 def _build_life_balance(streaks: dict) -> list[dict]:
-    """Completion rate per category over last 14 days."""
-    start14  = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
-    today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Domain-based balance (replaces old category-based balance)."""
+    start14 = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
     expected = 14
-    by_cat: dict[str, list] = defaultdict(list)
+    by_domain: dict[str, list] = defaultdict(list)
     try:
-        result = supabase.table("habits").select("name, completed_at").gte("completed_at", start14).execute()
-        meta   = _fetch_habit_meta()
-        for row in result.data:
-            cat = meta.get(row["name"], {}).get("category") or "Productivity"
-            by_cat[cat].append(row["completed_at"])
+        log = supabase.table("habits").select("name, completed_at").gte("completed_at", start14).execute()
+        profiles = {r["name"]: r for r in supabase.table("habit_profiles").select("name, domain").execute().data}
+        for row in log.data:
+            dom = profiles.get(row["name"], {}).get("domain") or "Personal Growth"
+            by_domain[dom].append(row["completed_at"])
     except Exception:
         pass
-    all_cats = HABIT_CATEGORIES
+    all_domains = list(DOMAIN_DEFINITIONS.keys())
     out = []
-    for cat in all_cats:
-        dates  = by_cat.get(cat, [])
+    for dom in all_domains:
+        dates  = by_domain.get(dom, [])
         unique = len(set(dates))
         rate   = round(unique / expected * 100)
-        out.append({"category": cat, "rate": min(rate, 100), "logs": unique})
+        out.append({"category": dom, "rate": min(rate, 100), "logs": unique})
     return out
 
 def _build_habit_heatmap(days: int = 365) -> list[dict]:
-    """Return daily habit completion counts for heatmap."""
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     try:
         result = supabase.table("habits").select("completed_at").gte("completed_at", start).execute()
@@ -723,106 +1014,245 @@ def _build_habit_heatmap(days: int = 365) -> list[dict]:
     except Exception:
         return []
 
-def _check_habit_quest_triggers(name: str, streak: int, total: int, category: str) -> list[dict]:
-    """Return quest suggestions triggered by habit milestones."""
-    triggers = []
-    if streak == 7:
-        triggers.append({"title": f"{name} — 7-Day Streak Milestone", "category": category or "Personal Growth"})
-    if total == 30:
-        triggers.append({"title": f"{name} — 30 Completions Mastery Quest", "category": category or "Personal Growth"})
-    if total == 90:
-        triggers.append({"title": f"Advanced {name} Practice", "category": category or "Personal Growth"})
-    return triggers
+# ── Quest Generation from Habits ─────────────────────────────────────────
 
-def _maybe_evolve_habit(name: str, total: int) -> Optional[dict]:
-    """Check if habit should evolve."""
-    for threshold in EVOLUTION_THRESHOLDS:
-        if total == threshold:
-            stage = EVOLUTION_THRESHOLDS.index(threshold) + 2
-            return {
-                "evolves": True,
-                "stage": stage,
-                "message": f"'{name}' is ready to evolve to Stage {stage}! Consider increasing its difficulty or scope.",
-            }
-    return None
+def _generate_habit_quest(habit_name: str, skill_node_name: str, domain: str, stage: int) -> Optional[dict]:
+    """AI generates a specific daily/weekly quest from this habit."""
+    try:
+        prompt = f"""You generate quests for a personal growth RPG.
+
+Habit: "{habit_name}"
+Skill Node: "{skill_node_name}"
+Domain: "{domain}"
+Evolution Stage: {stage}
+
+Generate ONE concrete, achievable quest for today tied to this habit.
+Stage 1 = beginner (5-10 min), Stage 3+ = intermediate (20-30 min).
+
+Reply ONLY in JSON (no markdown):
+{{
+  "title": "specific action under 10 words",
+  "description": "one sentence describing what to do",
+  "duration_minutes": a number,
+  "difficulty": "Easy|Normal|Hard"
+}}"""
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7, max_tokens=150,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
+        return _json.loads(raw.strip())
+    except Exception:
+        return None
+
+def _generate_evolution_stages(habit_name: str, skill_node_name: str) -> list[dict]:
+    """AI generates 5 evolution stages for a habit."""
+    try:
+        prompt = f"""You design habit evolution for a personal growth RPG.
+
+Habit: "{habit_name}"
+Skill Node: "{skill_node_name}"
+
+Design 5 progressive evolution stages. Each stage increases difficulty/depth.
+
+Reply ONLY in JSON array (no markdown):
+[
+  {{"stage": 1, "title": "short name", "description": "what this stage looks like", "duration_minutes": 5}},
+  {{"stage": 2, "title": "...", "description": "...", "duration_minutes": 10}},
+  {{"stage": 3, "title": "...", "description": "...", "duration_minutes": 20}},
+  {{"stage": 4, "title": "...", "description": "...", "duration_minutes": 30}},
+  {{"stage": 5, "title": "...", "description": "...", "duration_minutes": 45}}
+]"""
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6, max_tokens=400,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
+        return _json.loads(raw.strip())
+    except Exception:
+        return []
+
+def _ai_adapt_habit(habit_name: str, success_rate: int, streak: int, stage: int) -> Optional[str]:
+    """Returns adaptation suggestion if habit is struggling or thriving."""
+    if success_rate >= 70 and streak >= 7:
+        direction = "evolve"
+    elif success_rate < 40:
+        direction = "simplify"
+    else:
+        return None
+    try:
+        prompt = f"""Habit: "{habit_name}", success rate: {success_rate}%, streak: {streak} days, stage: {stage}.
+Direction: {direction}.
+Give ONE sentence of specific advice (max 20 words). {"Recommend a harder version." if direction=="evolve" else "Recommend a simpler version to rebuild momentum."}"""
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7, max_tokens=60,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return None
+
+# ── Endpoints ─────────────────────────────────────────────────────────────
+
+@app.get("/habits/skill-nodes")
+def get_habit_skill_nodes():
+    """All skill nodes available for linking to habits."""
+    return _all_skill_nodes_flat()
+
+@app.post("/habits/profile")
+def create_habit_profile(req: HabitCreate):
+    """Create or update a habit profile (links habit → skill node)."""
+    node_name = _node_name(req.skill_tree, req.skill_node_id)
+    domain    = _domain_for_skill_tree(req.skill_tree)
+    stages    = _generate_evolution_stages(req.name, node_name)
+    base_xp   = 10  # starts small; modifiers do the work
+
+    try:
+        existing = supabase.table("habit_profiles").select("id").eq("name", req.name).execute()
+        if existing.data:
+            supabase.table("habit_profiles").update({
+                "skill_node_id":   req.skill_node_id,
+                "skill_tree":      req.skill_tree,
+                "domain":          domain,
+                "evolution_stages": stages,
+                "updated_at":      datetime.now(timezone.utc).isoformat(),
+            }).eq("name", req.name).execute()
+        else:
+            supabase.table("habit_profiles").insert({
+                "name":             req.name,
+                "skill_node_id":    req.skill_node_id,
+                "skill_tree":       req.skill_tree,
+                "domain":           domain,
+                "evolution_stages": stages,
+                "evolution_stage":  1,
+                "pending_evolution": False,
+                "base_xp":          base_xp,
+            }).execute()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+    return {"status": "ok", "domain": domain, "node_name": node_name, "stages": stages}
 
 @app.post("/habits")
 def log_habit(habit: HabitLog):
+    """Log a habit completion with full V2 enrichment."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    xp    = _habit_xp(habit.difficulty)
 
-    # Check if already logged today (idempotent per day per name)
-    existing = (
-        supabase.table("habits")
-        .select("id")
-        .eq("name", habit.name)
-        .eq("completed_at", today)
-        .execute()
-    )
+    # Idempotent
+    existing = supabase.table("habits").select("id").eq("name", habit.name).eq("completed_at", today).execute()
     if existing.data:
         return {"status": "already_logged", "message": f"'{habit.name}' already logged today."}
 
-    # Try full insert with new columns; fall back to legacy schema if columns missing
-    data_full = {
+    # Resolve profile
+    profile = _get_or_create_profile(
+        habit.name,
+        habit.skill_node_id or "",
+        habit.skill_tree or habit.linked_skill or "",
+        _domain_for_skill_tree(habit.skill_tree or habit.linked_skill or ""),
+    )
+    skill_tree     = profile.get("skill_tree") or habit.skill_tree or habit.linked_skill or ""
+    skill_node_id  = profile.get("skill_node_id") or habit.skill_node_id or ""
+    domain         = profile.get("domain") or _domain_for_skill_tree(skill_tree)
+    base_xp        = profile.get("base_xp") or 10
+
+    # Check if first habit logged today
+    already_today = supabase.table("habits").select("id").eq("completed_at", today).execute()
+    first_today   = len(already_today.data) == 0
+
+    # Get current streak for modifier
+    all_dates_desc = sorted(
+        {r["completed_at"] for r in supabase.table("habits").select("completed_at").eq("name", habit.name).execute().data},
+        reverse=True
+    )
+    streak = calc_streak(all_dates_desc, today)
+
+    xp_total, modifiers = _compute_xp(habit.name, base_xp, streak, today, domain, first_today)
+
+    # Insert log row — only use columns that exist in the base schema
+    result = supabase.table("habits").insert({
         "name":         habit.name,
-        "category":     habit.category,
-        "difficulty":   habit.difficulty,
-        "linked_skill": habit.linked_skill,
         "completed_at": today,
         "created_at":   datetime.now(timezone.utc).isoformat(),
-    }
+    }).execute()
+
+    # XP to ledger — domain and skill tree both
+    ledger_add("habit", f"{habit.name}:{today}", "Personal Growth", xp_total)
+    if skill_tree and skill_tree in SKILL_TREES:
+        ledger_add("habit_skill", f"{habit.name}:{today}:skill", skill_tree, xp_total)
+
+    # Skill node XP contribution
+    if skill_node_id and skill_tree:
+        ledger_add("habit_node", f"{habit.name}:{today}:{skill_node_id}", skill_tree, round(xp_total * 0.5))
+
+    # Updated streak/totals
+    all_dates_desc = sorted(
+        {r["completed_at"] for r in supabase.table("habits").select("completed_at").eq("name", habit.name).execute().data},
+        reverse=True
+    )
+    total  = len(all_dates_desc)
+    streak = calc_streak(all_dates_desc, today)
+
+    # Synergy detection
+    today_habits = [r["name"] for r in supabase.table("habits").select("name").eq("completed_at", today).execute().data]
+    new_synergies = _detect_synergies(today_habits, today)
+
+    # Evolution check
+    evo_ready = _check_evolution_ready(habit.name, total)
+    if evo_ready:
+        try:
+            supabase.table("habit_profiles").update({"pending_evolution": True}).eq("name", habit.name).execute()
+        except Exception:
+            pass
+
+    # Generate a habit quest (non-blocking, best-effort)
+    habit_quest = None
     try:
-        result = supabase.table("habits").insert(data_full).execute()
+        node_name   = _node_name(skill_tree, skill_node_id)
+        habit_quest = _generate_habit_quest(habit.name, node_name, domain, profile.get("evolution_stage", 1))
+        # Auto-create quest if we have a matching goal
+        if habit_quest:
+            goal_data = build_goal_summary()
+            cat_goal  = next((g for g in goal_data if g.get("category") == skill_tree), None)
+            if cat_goal:
+                supabase.table("quests").insert({
+                    "goal_id":      cat_goal["id"],
+                    "title":        habit_quest["title"],
+                    "description":  habit_quest.get("description", ""),
+                    "difficulty":   habit_quest.get("difficulty", "Normal"),
+                    "is_completed": False,
+                    "created_at":   datetime.now(timezone.utc).isoformat(),
+                }).execute()
     except Exception:
-        result = supabase.table("habits").insert({
-            "name":         habit.name,
-            "completed_at": today,
-            "created_at":   datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        pass
 
-    # XP to Personal Growth (always)
-    ledger_add("habit", f"{habit.name}:{today}", "Personal Growth", xp)
-
-    # XP to linked skill category too
-    if habit.linked_skill and habit.linked_skill in SKILL_TREES:
-        ledger_add("habit_skill", f"{habit.name}:{today}:skill", habit.linked_skill, xp)
+    # Adaptation advice
+    mastery    = _mastery(total)
+    snap       = _build_habit_snapshot(habit.name, profile, all_dates_desc, today)
+    adaptation = _ai_adapt_habit(habit.name, snap["success_rate"], streak, profile.get("evolution_stage", 1))
 
     new_achievements = award_achievements()
 
-    # Streaks + mastery for response
-    all_dates = sorted({r["completed_at"] for r in
-        supabase.table("habits").select("completed_at").eq("name", habit.name).execute().data},
-        reverse=True)
-    streak  = calc_streak(all_dates, today)
-    total   = len(all_dates)
-    mastery = _habit_mastery_level(total)
-    evolve  = _maybe_evolve_habit(habit.name, total)
-    quests  = _check_habit_quest_triggers(habit.name, streak, total, habit.category)
-
-    # Auto-create quest tasks if triggered
-    created_quests = []
-    for q in quests:
-        goal_data = build_goal_summary()
-        cat_goal  = next((g for g in goal_data if g["category"] == q["category"]), None)
-        if cat_goal:
-            t = supabase.table("goal_tasks").insert({
-                "goal_id": cat_goal["id"], "title": q["title"],
-                "is_completed": False,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-            if t.data:
-                created_quests.append(t.data[0])
-
     return {
         "status":          "logged",
-        "habit":           result.data[0],
-        "xp_earned":       xp,
+        "xp_earned":       xp_total,
+        "xp_modifiers":    modifiers,
         "streak":          streak,
         "total_logs":      total,
         "mastery":         mastery,
-        "evolution":       evolve,
+        "evolution_ready": evo_ready,
+        "new_synergies":   new_synergies,
+        "habit_quest":     habit_quest,
+        "adaptation":      adaptation,
         "new_achievements": new_achievements,
-        "quest_triggers":  created_quests,
+        "domain":          domain,
+        "skill_tree":      skill_tree,
     }
 
 @app.get("/habits/streaks")
@@ -835,100 +1265,253 @@ def get_heatmap(days: int = 365):
 
 @app.get("/habits/balance")
 def get_life_balance():
-    try:
-        streaks = _compute_streaks_raw()
-    except Exception:
-        streaks = {}
-    try:
-        balance = _build_life_balance(streaks)
-    except Exception:
-        balance = [{"category": c, "rate": 0, "logs": 0} for c in HABIT_CATEGORIES]
+    try:    streaks = _compute_streaks_raw()
+    except: streaks = {}
+    try:    balance = _build_life_balance(streaks)
+    except: balance = [{"category": d, "rate": 0, "logs": 0} for d in DOMAIN_DEFINITIONS]
     return {"balance": balance, "streaks": streaks}
+
+@app.get("/habits/stats/{habit_name}")
+def get_habit_stats(habit_name: str):
+    """Full lifetime statistics for one habit."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log   = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
+    dates_desc = sorted({r["completed_at"] for r in log.data}, reverse=True)
+    profile    = _get_or_create_profile(habit_name)
+    snap       = _build_habit_snapshot(habit_name, profile, dates_desc, today)
+
+    # Milestones reached
+    milestones = []
+    for threshold in EVOLUTION_THRESHOLDS:
+        if snap["total_logs"] >= threshold:
+            milestones.append({"at": threshold, "reached": True})
+        else:
+            milestones.append({"at": threshold, "reached": False, "remaining": threshold - snap["total_logs"]})
+
+    # Total XP earned from ledger (base_xp * total_logs as fallback)
+    base_xp = profile.get("base_xp") or 10
+    total_xp = base_xp * len(dates_desc)
+
+    # Heatmap for this specific habit
+    heatmap_counts: dict[str, int] = defaultdict(int)
+    for row in log.data:
+        heatmap_counts[row["completed_at"]] += 1
+    heatmap = [{"date": d, "count": c} for d, c in sorted(heatmap_counts.items())]
+
+    return {
+        **snap,
+        "total_xp_earned": total_xp,
+        "milestones":      milestones,
+        "heatmap":         heatmap,
+        "evolution_stages": profile.get("evolution_stages") or [],
+    }
+
+@app.post("/habits/{habit_name}/evolve")
+def confirm_evolution(habit_name: str, req: EvolutionConfirm):
+    """User confirms (or rejects) an evolution proposal."""
+    if not req.confirmed:
+        supabase.table("habit_profiles").update({"pending_evolution": False}).eq("name", habit_name).execute()
+        return {"status": "declined"}
+
+    profile = _get_or_create_profile(habit_name)
+    current_stage = profile.get("evolution_stage", 1)
+    stages        = profile.get("evolution_stages") or []
+    new_stage     = min(current_stage + 1, 5)
+
+    # If user provided a custom title, update that stage
+    if req.new_stage_title and stages and len(stages) >= new_stage:
+        stages[new_stage - 1]["title"] = req.new_stage_title
+
+    # Bump base XP with evolution
+    new_base_xp = round(profile.get("base_xp", 10) * 1.4)
+
+    supabase.table("habit_profiles").update({
+        "evolution_stage":  new_stage,
+        "evolution_stages": stages,
+        "pending_evolution": False,
+        "base_xp":          new_base_xp,
+        "updated_at":       datetime.now(timezone.utc).isoformat(),
+    }).eq("name", habit_name).execute()
+
+    # Bonus XP for evolving
+    ledger_add("habit_evolution", f"{habit_name}:stage{new_stage}", "Personal Growth", 100)
+
+    return {
+        "status":     "evolved",
+        "new_stage":  new_stage,
+        "new_base_xp": new_base_xp,
+        "xp_bonus":   100,
+    }
 
 @app.post("/habits/recover")
 def use_recovery_token(req: RecoveryTokenUse):
-    """Use a recovery token to restore a missed day."""
-    tokens = _recovery_tokens(req.name)
-    if tokens["available"] < 1:
-        raise HTTPException(400, "No recovery tokens available.")
-    try:
-        supabase.table("habit_recovery_tokens").insert({
-            "habit_name":  req.name,
-            "restored_date": req.date,
-            "used_at":     datetime.now(timezone.utc).isoformat(),
+    """Spend a recovery token. Type determines effect."""
+    tokens = _count_tokens(req.name)
+    cost   = TOKEN_COSTS.get(req.token_type, 1)
+    if tokens["available"] < cost:
+        raise HTTPException(400, f"Need {cost} token(s), have {tokens['available']}.")
+
+    for _ in range(cost):
+        supabase.table("habit_recovery_tokens_v2").insert({
+            "habit_name": req.name,
+            "token_type": req.token_type,
+            "meta":       {"date": req.date},
+            "used_at":    datetime.now(timezone.utc).isoformat(),
         }).execute()
-        # Insert the restored completion (legacy-safe)
+
+    effect = {}
+
+    if req.token_type == "restore":
+        # Insert a recovered completion using only base schema columns
+        supabase.table("habits").insert({
+            "name":         req.name,
+            "completed_at": req.date,
+            "created_at":   datetime.now(timezone.utc).isoformat(),
+        }).execute()
+        effect = {"restored_date": req.date, "message": "Missed day restored — streak protected."}
+
+    elif req.token_type == "boss_reduce":
+        effect = {"message": "Next boss difficulty will be reduced when generated."}
+
+    elif req.token_type == "quest_recover":
+        effect = {"message": "Your failed quest has been recovered and reset."}
+
+    elif req.token_type == "bonus_xp":
+        effect = {"message": "+50% XP on your next habit log."}
+
+    elif req.token_type == "freeze":
+        effect = {"message": "Streak frozen for 3 days."}
+
+    elif req.token_type == "reroll":
+        effect = {"message": "Daily quest rerolled."}
+
+    return {"status": "used", "token_type": req.token_type, "effect": effect, "remaining": tokens["available"] - cost}
+
+class HabitUpdate(BaseModel):
+    new_name: str = ""
+    skill_node_id: str = ""
+    skill_tree: str = ""
+
+@app.delete("/habits/{habit_name}")
+def delete_habit(habit_name: str):
+    """Delete a habit and all its history (logs, profile, tokens, synergies)."""
+    # Delete all log rows
+    supabase.table("habits").delete().eq("name", habit_name).execute()
+    # Delete profile
+    try:
+        supabase.table("habit_profiles").delete().eq("name", habit_name).execute()
+    except Exception:
+        pass
+    # Delete recovery tokens
+    try:
+        supabase.table("habit_recovery_tokens_v2").delete().eq("habit_name", habit_name).execute()
+    except Exception:
+        pass
+    # Delete any XP ledger entries for this habit
+    try:
+        supabase.table("xp_ledger").delete().eq("source_type", "habit").like("source_id", f"{habit_name}:%").execute()
+        supabase.table("xp_ledger").delete().eq("source_type", "habit_skill").like("source_id", f"{habit_name}:%").execute()
+        supabase.table("xp_ledger").delete().eq("source_type", "habit_node").like("source_id", f"{habit_name}:%").execute()
+    except Exception:
+        pass
+    return {"status": "deleted", "name": habit_name}
+
+@app.put("/habits/{habit_name}")
+def update_habit(habit_name: str, req: HabitUpdate):
+    """Rename a habit and/or relink it to a different skill node."""
+    new_name = req.new_name.strip() if req.new_name.strip() else habit_name
+
+    # Rename all log rows if name changed
+    if new_name != habit_name:
+        existing = supabase.table("habits").select("id").eq("name", new_name).execute()
+        if existing.data:
+            raise HTTPException(400, f"A habit named '{new_name}' already exists.")
+        supabase.table("habits").update({"name": new_name}).eq("name", habit_name).execute()
         try:
-            supabase.table("habits").insert({
-                "name":         req.name,
-                "completed_at": req.date,
-                "created_at":   datetime.now(timezone.utc).isoformat(),
-                "category":     "Productivity",
-                "difficulty":   "Normal",
-            }).execute()
+            supabase.table("habit_recovery_tokens_v2").update({"habit_name": new_name}).eq("habit_name", habit_name).execute()
         except Exception:
-            supabase.table("habits").insert({
-                "name":         req.name,
-                "completed_at": req.date,
-                "created_at":   datetime.now(timezone.utc).isoformat(),
+            pass
+
+    # Update or create profile with new name / skill node
+    node_name = _node_name(req.skill_tree, req.skill_node_id) if req.skill_node_id else ""
+    domain    = _domain_for_skill_tree(req.skill_tree) if req.skill_tree else ""
+
+    try:
+        existing_profile = supabase.table("habit_profiles").select("id").eq("name", habit_name).execute()
+        update_data = {"name": new_name}
+        if req.skill_node_id:
+            update_data["skill_node_id"] = req.skill_node_id
+            update_data["skill_tree"]    = req.skill_tree
+            update_data["domain"]        = domain
+            # Regenerate evolution stages if node changed
+            stages = _generate_evolution_stages(new_name, node_name)
+            update_data["evolution_stages"] = stages
+        if existing_profile.data:
+            supabase.table("habit_profiles").update(update_data).eq("name", habit_name).execute()
+        else:
+            supabase.table("habit_profiles").insert({
+                **update_data,
+                "skill_node_id":  req.skill_node_id or "",
+                "skill_tree":     req.skill_tree or "",
+                "domain":         domain or "Personal Growth",
+                "evolution_stage": 1,
+                "pending_evolution": False,
+                "base_xp": 10,
             }).execute()
-        return {"status": "restored", "date": req.date}
     except Exception as e:
         raise HTTPException(500, str(e))
 
+    return {
+        "status":    "updated",
+        "old_name":  habit_name,
+        "new_name":  new_name,
+        "node_name": node_name,
+        "domain":    domain,
+    }
+
 @app.get("/habits/ai-insights")
 def habit_ai_insights():
-    """AI-generated insights about habit patterns and their correlations."""
     streaks  = _compute_streaks_raw()
     if not streaks:
         return {"insight": "Log some habits first to unlock AI habit insights."}
     balance  = _build_life_balance(streaks)
     entries  = fetch_all_entries_light()
-    # Build correlation context: days with habits vs mood
+
     mood_by_date: dict[str, list] = defaultdict(list)
     for e in entries:
         mood_by_date[e["created_at"][:10]].append(e["mood"])
-
-    habit_result = supabase.table("habits").select("name, completed_at").execute()
+    habit_result   = supabase.table("habits").select("name, completed_at").execute()
     habits_by_date: dict[str, list] = defaultdict(list)
     for r in habit_result.data:
         habits_by_date[r["completed_at"]].append(r["name"])
 
-    # Simple correlation: mood on days with habits vs without
-    moods_with = []
-    moods_without = []
+    moods_with, moods_without = [], []
     for date, moods in mood_by_date.items():
-        if habits_by_date.get(date):
-            moods_with.extend(moods)
-        else:
-            moods_without.extend(moods)
+        (moods_with if habits_by_date.get(date) else moods_without).extend(moods)
 
     avg_with    = round(sum(moods_with)    / len(moods_with),    1) if moods_with    else None
     avg_without = round(sum(moods_without) / len(moods_without), 1) if moods_without else None
+    strongest   = max(streaks.items(), key=lambda x: x[1]["current_streak"], default=(None, {}))
+    weakest     = min(streaks.items(), key=lambda x: x[1]["current_streak"], default=(None, {}))
 
-    strongest = max(streaks.items(), key=lambda x: x[1]["current_streak"], default=(None, {}))
-    weakest   = min(streaks.items(), key=lambda x: x[1]["current_streak"], default=(None, {}))
-    neglected = [c for c in balance if c["rate"] < 30]
+    # Adaptation signals
+    adapt_signals = []
+    for name, data in streaks.items():
+        sr = data.get("success_rate", 0)
+        if sr < 40:
+            adapt_signals.append(f"'{name}' struggling ({sr}% success rate)")
+        elif sr > 80 and data.get("current_streak", 0) > 7:
+            adapt_signals.append(f"'{name}' thriving — consider evolving")
 
-    prompt = f"""You are LiAInne analyzing habit data.
+    prompt = f"""You are LiAInne analyzing habit data for a personal growth RPG.
 
-Habit streaks: {_json.dumps({k: {"streak": v["current_streak"], "total": v["total_logs"], "category": v["category"]} for k,v in streaks.items()})}
+Habits: {_json.dumps({k: {"streak": v["current_streak"], "total": v["total_logs"], "domain": v.get("domain","?"), "success_rate": v.get("success_rate",0)} for k,v in streaks.items()})}
+Domain balance (14 days): {_json.dumps(balance)}
+Strongest: {strongest[0]} ({strongest[1].get("current_streak",0)}-day streak)
+Adaptation signals: {adapt_signals}
+Mood on habit days: {avg_with}/5 vs no-habit days: {avg_without}/5
 
-Life balance (last 14 days completion %): {_json.dumps(balance)}
-
-Strongest habit: {strongest[0]} ({strongest[1].get("current_streak",0)}-day streak)
-Weakest habit: {weakest[0]} ({weakest[1].get("current_streak",0)}-day streak)
-Neglected categories: {[c["category"] for c in neglected]}
-
-Mood on habit days: {avg_with}/5
-Mood on no-habit days: {avg_without}/5
-
-Write 2-3 sharp, specific observations (max 80 words total). Focus on:
-1. The most notable pattern
-2. A correlation if mood data shows one
-3. One action to take
-
-Be specific and personal. No generic advice."""
+Write 2-3 sharp observations (max 80 words). Be specific, name habits, mention domains. No generic advice."""
 
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -936,16 +1519,239 @@ Be specific and personal. No generic advice."""
         temperature=0.8, max_tokens=150,
     )
     return {
-        "insight": response.choices[0].message.content,
-        "mood_with_habits":    avg_with,
-        "mood_without_habits": avg_without,
-        "neglected_categories": [c["category"] for c in neglected],
-        "strongest": strongest[0],
-        "weakest":   weakest[0],
+        "insight":              response.choices[0].message.content,
+        "mood_with_habits":     avg_with,
+        "mood_without_habits":  avg_without,
+        "strongest":            strongest[0],
+        "adaptation_signals":   adapt_signals,
     }
+# ---------------------------------------------------------------------------
+# Goals V2 — 4-tier hierarchy: Goal → Milestone → Quest → Task
+# Progress rolls up automatically: tasks → quests → milestones → goals
+# ---------------------------------------------------------------------------
+
+class QuestCreate(BaseModel):
+    title: str
+    description: str = ""
+    difficulty: str = "Normal"
+    milestone_id: Optional[int] = None
+
+class TaskCreateV2(BaseModel):
+    title: str
+    quest_id: Optional[int] = None  # None = legacy direct-to-goal task
+
 
 # ---------------------------------------------------------------------------
-# Goals + Milestones + Dependencies
+# Progress rollup helpers
+# ---------------------------------------------------------------------------
+
+def _rollup_quest(quest_id: int) -> dict:
+    """Recompute quest.is_completed from its tasks and save to DB."""
+    tasks = supabase.table("goal_tasks").select("is_completed").eq("quest_id", quest_id).execute().data
+    if not tasks:
+        return {"quest_id": quest_id, "is_completed": False, "progress": 0}
+    total     = len(tasks)
+    completed = sum(1 for t in tasks if t["is_completed"])
+    progress  = round(completed / total * 100) if total else 0
+    done      = completed == total and total > 0
+    supabase.table("quests").update({"is_completed": done}).eq("id", quest_id).execute()
+    return {"quest_id": quest_id, "is_completed": done, "progress": progress,
+            "completed_tasks": completed, "total_tasks": total}
+
+def _rollup_milestone(milestone_id: int) -> dict:
+    """Recompute milestone.is_completed from its quests and save to DB."""
+    quests = supabase.table("quests").select("is_completed").eq("milestone_id", milestone_id).execute().data
+    if not quests:
+        return {"milestone_id": milestone_id, "is_completed": False, "progress": 0}
+    total     = len(quests)
+    completed = sum(1 for q in quests if q["is_completed"])
+    progress  = round(completed / total * 100) if total else 0
+    done      = completed == total and total > 0
+    if done:
+        # Award milestone XP — get goal's category
+        ms = supabase.table("goal_milestones").select("goal_id, is_completed").eq("id", milestone_id).single().execute().data
+        if ms and not ms["is_completed"]:
+            goal = supabase.table("goals").select("category").eq("id", ms["goal_id"]).single().execute().data
+            cat  = goal.get("category", "Personal Growth") if goal else "Personal Growth"
+            ledger_add("milestone", str(milestone_id), cat, 75)
+            award_achievements()
+    supabase.table("goal_milestones").update({"is_completed": done}).eq("id", milestone_id).execute()
+    return {"milestone_id": milestone_id, "is_completed": done, "progress": progress}
+
+def _rollup_goal(goal_id: int) -> dict:
+    """
+    Goal progress = weighted average:
+      - If goal has milestones: milestone completion rate
+      - Else if goal has quests: quest completion rate
+      - Else: direct task completion rate (legacy)
+    Never writes to DB — goals don't have a stored progress field.
+    """
+    milestones = supabase.table("goal_milestones").select("is_completed").eq("goal_id", goal_id).execute().data
+    if milestones:
+        total     = len(milestones)
+        completed = sum(1 for m in milestones if m["is_completed"])
+        return {"progress": round(completed / total * 100) if total else 0,
+                "completed": completed, "total": total, "basis": "milestones"}
+
+    quests = supabase.table("quests").select("is_completed").eq("goal_id", goal_id).execute().data
+    if quests:
+        total     = len(quests)
+        completed = sum(1 for q in quests if q["is_completed"])
+        return {"progress": round(completed / total * 100) if total else 0,
+                "completed": completed, "total": total, "basis": "quests"}
+
+    # Legacy: direct tasks
+    tasks = supabase.table("goal_tasks").select("is_completed").eq("goal_id", goal_id).is_("quest_id", "null").execute().data
+    total     = len(tasks)
+    completed = sum(1 for t in tasks if t["is_completed"])
+    return {"progress": round(completed / total * 100) if total else 0,
+            "completed": completed, "total": total, "basis": "tasks"}
+
+
+# ---------------------------------------------------------------------------
+# Full goal summary builder (V2)
+# ---------------------------------------------------------------------------
+
+def build_goal_summary() -> list[dict]:
+    goals     = supabase.table("goals").select("*").order("created_at", desc=True).execute().data
+    all_ms    = supabase.table("goal_milestones").select("*").execute().data
+    all_q     = supabase.table("quests").select("*").execute().data
+    all_tasks = supabase.table("goal_tasks").select("*").execute().data
+
+    # Index everything
+    ms_by_goal: dict[int, list] = defaultdict(list)
+    for ms in all_ms:
+        ms_by_goal[ms["goal_id"]].append(ms)
+
+    q_by_goal: dict[int, list] = defaultdict(list)
+    q_by_ms:   dict[int, list] = defaultdict(list)
+    for q in all_q:
+        q_by_goal[q["goal_id"]].append(q)
+        if q.get("milestone_id"):
+            q_by_ms[q["milestone_id"]].append(q)
+
+    tasks_by_quest: dict[int, list] = defaultdict(list)
+    tasks_by_goal:  dict[int, list] = defaultdict(list)  # legacy direct tasks
+    for t in all_tasks:
+        if t.get("quest_id"):
+            tasks_by_quest[t["quest_id"]].append(t)
+        else:
+            tasks_by_goal[t["goal_id"]].append(t)
+
+    summary = []
+    for goal in goals:
+        gid       = goal["id"]
+        xp        = get_category_xp(goal["category"])
+        level_info = xp_to_level(xp)
+        created   = datetime.fromisoformat(goal["created_at"].replace("Z", "+00:00"))
+        days_old  = (datetime.now(timezone.utc) - created).days
+
+        # Build enriched milestones
+        milestones = []
+        for ms in ms_by_goal.get(gid, []):
+            ms_quests = []
+            for q in q_by_ms.get(ms["id"], []):
+                q_tasks = tasks_by_quest.get(q["id"], [])
+                q_done  = sum(1 for t in q_tasks if t["is_completed"])
+                q_total = len(q_tasks)
+                ms_quests.append({
+                    **q,
+                    "tasks":            q_tasks,
+                    "completed_tasks":  q_done,
+                    "total_tasks":      q_total,
+                    "progress":         round(q_done / q_total * 100) if q_total else 0,
+                })
+            ms_q_done  = sum(1 for q in ms_quests if q["is_completed"])
+            ms_q_total = len(ms_quests)
+            ms_progress = round(ms_q_done / ms_q_total * 100) if ms_q_total else (100 if ms["is_completed"] else 0)
+            milestones.append({
+                **ms,
+                "quests":           ms_quests,
+                "completed_quests": ms_q_done,
+                "total_quests":     ms_q_total,
+                "progress":         ms_progress,
+            })
+
+        # Goal-level quests (not under any milestone)
+        bare_quests = []
+        for q in q_by_goal.get(gid, []):
+            if q.get("milestone_id"):
+                continue
+            q_tasks = tasks_by_quest.get(q["id"], [])
+            q_done  = sum(1 for t in q_tasks if t["is_completed"])
+            q_total = len(q_tasks)
+            bare_quests.append({
+                **q,
+                "tasks":            q_tasks,
+                "completed_tasks":  q_done,
+                "total_tasks":      q_total,
+                "progress":         round(q_done / q_total * 100) if q_total else 0,
+            })
+
+        # Legacy direct tasks (no quest_id)
+        legacy_tasks = tasks_by_goal.get(gid, [])
+
+        # Compute goal progress
+        if milestones:
+            ms_done     = sum(1 for m in milestones if m["is_completed"])
+            ms_total    = len(milestones)
+            goal_progress = round(ms_done / ms_total * 100) if ms_total else 0
+            completed_units = ms_done
+            total_units     = ms_total
+            progress_basis  = "milestones"
+        elif bare_quests:
+            q_done      = sum(1 for q in bare_quests if q["is_completed"])
+            q_total     = len(bare_quests)
+            goal_progress = round(q_done / q_total * 100) if q_total else 0
+            completed_units = q_done
+            total_units     = q_total
+            progress_basis  = "quests"
+        else:
+            t_done      = sum(1 for t in legacy_tasks if t["is_completed"])
+            t_total     = len(legacy_tasks)
+            goal_progress = round(t_done / t_total * 100) if t_total else 0
+            completed_units = t_done
+            total_units     = t_total
+            progress_basis  = "tasks"
+
+        # For backwards-compat fields expected elsewhere
+        all_tasks_flat = (
+            [t for q in bare_quests for t in q["tasks"]]
+            + [t for m in milestones for q in m["quests"] for t in q["tasks"]]
+            + legacy_tasks
+        )
+        flat_done  = sum(1 for t in all_tasks_flat if t["is_completed"])
+        flat_total = len(all_tasks_flat)
+
+        summary.append({
+            **goal,
+            # V2 enriched
+            "milestones":       milestones,
+            "milestones_done":  sum(1 for m in milestones if m["is_completed"]),
+            "milestones_total": len(milestones),
+            "quests":           bare_quests,
+            "legacy_tasks":     legacy_tasks,
+            # Progress
+            "progress":         goal_progress,
+            "progress_basis":   progress_basis,
+            "completed_units":  completed_units,
+            "total_units":      total_units,
+            # Legacy compat (used by domain, skill, action engine)
+            "tasks":            all_tasks_flat,
+            "completed_tasks":  flat_done,
+            "total_tasks":      flat_total,
+            # XP
+            "xp":               xp,
+            "level":            level_info["level"],
+            "xp_in_level":      level_info["xp_in_level"],
+            "xp_to_next":       level_info["xp_to_next"],
+            "days_since_created": days_old,
+        })
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Goal CRUD
 # ---------------------------------------------------------------------------
 
 @app.post("/goals")
@@ -961,8 +1767,38 @@ def create_goal(goal: GoalCreate):
 def get_goals():
     return build_goal_summary()
 
+@app.get("/goals/summary")
+def goals_summary():
+    return build_goal_summary()
+
+def build_category_health(summary: list[dict]) -> list[dict]:
+    by_cat: dict[str, dict] = {}
+    for g in summary:
+        cat = g.get("category", "Other")
+        by_cat.setdefault(cat, {"xp": 0, "completed": 0, "total": 0, "days": []})
+        by_cat[cat]["xp"]        += g.get("xp", 0)
+        by_cat[cat]["completed"] += g.get("completed_tasks", 0)
+        by_cat[cat]["total"]     += g.get("total_tasks", 0)
+        by_cat[cat]["days"].append(g.get("days_since_created", 0))
+    health = []
+    for cat, data in by_cat.items():
+        rate   = round(data["completed"] / data["total"] * 100) if data["total"] > 0 else 0
+        oldest = max(data["days"]) if data["days"] else 0
+        stale  = oldest > 7 and rate < 50
+        health.append({
+            "category": cat, "total_xp": data["xp"],
+            "completion_rate": rate, "stale": stale,
+            "oldest_goal_days": oldest,
+        })
+    return sorted(health, key=lambda x: x["total_xp"], reverse=True)
+
 @app.delete("/goals/{goal_id}")
 def delete_goal(goal_id: int):
+    # Cascade: tasks inside quests, quests, milestones, legacy tasks, dependencies
+    quest_rows = supabase.table("quests").select("id").eq("goal_id", goal_id).execute().data
+    for q in quest_rows:
+        supabase.table("goal_tasks").delete().eq("quest_id", q["id"]).execute()
+    supabase.table("quests").delete().eq("goal_id", goal_id).execute()
     supabase.table("goal_tasks").delete().eq("goal_id", goal_id).execute()
     supabase.table("goal_milestones").delete().eq("goal_id", goal_id).execute()
     supabase.table("goal_dependencies").delete().eq("goal_id", goal_id).execute()
@@ -972,7 +1808,11 @@ def delete_goal(goal_id: int):
         raise HTTPException(404, "Goal not found")
     return {"status": "deleted"}
 
-# Milestones
+
+# ---------------------------------------------------------------------------
+# Milestone CRUD
+# ---------------------------------------------------------------------------
+
 @app.post("/goals/{goal_id}/milestones")
 def add_milestone(goal_id: int, ms: MilestoneCreate):
     result = supabase.table("goal_milestones").insert({
@@ -983,21 +1823,145 @@ def add_milestone(goal_id: int, ms: MilestoneCreate):
     }).execute()
     return result.data[0]
 
-@app.put("/milestones/{ms_id}")
-def toggle_milestone(ms_id: int):
-    row = supabase.table("goal_milestones").select("*").eq("id", ms_id).single().execute()
-    updated = supabase.table("goal_milestones").update(
-        {"is_completed": not row.data["is_completed"]}
-    ).eq("id", ms_id).execute()
-    if updated.data[0]["is_completed"]:
-        # Completing a milestone gives XP
-        goal = supabase.table("goals").select("category").eq("id", row.data["goal_id"]).single().execute()
-        cat  = goal.data.get("category", "Personal Growth")
-        ledger_add("milestone", str(ms_id), cat, 75)
-        award_achievements()
-    return updated.data[0]
+@app.delete("/milestones/{ms_id}")
+def delete_milestone(ms_id: int):
+    # Delete quests inside (and their tasks)
+    q_rows = supabase.table("quests").select("id").eq("milestone_id", ms_id).execute().data
+    for q in q_rows:
+        supabase.table("goal_tasks").delete().eq("quest_id", q["id"]).execute()
+    supabase.table("quests").delete().eq("milestone_id", ms_id).execute()
+    supabase.table("goal_milestones").delete().eq("id", ms_id).execute()
+    return {"status": "deleted"}
 
-# Dependencies
+
+# ---------------------------------------------------------------------------
+# Quest CRUD
+# ---------------------------------------------------------------------------
+
+@app.post("/goals/{goal_id}/quests")
+def create_quest(goal_id: int, quest: QuestCreate):
+    result = supabase.table("quests").insert({
+        "goal_id":      goal_id,
+        "milestone_id": quest.milestone_id,
+        "title":        quest.title,
+        "description":  quest.description,
+        "difficulty":   quest.difficulty,
+        "is_completed": False,
+        "created_at":   datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return result.data[0]
+
+@app.delete("/quests/{quest_id}")
+def delete_quest(quest_id: int):
+    supabase.table("goal_tasks").delete().eq("quest_id", quest_id).execute()
+    result = supabase.table("quests").delete().eq("id", quest_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Quest not found")
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Task CRUD (V2 — tasks belong to quests; legacy tasks belong to goals)
+# ---------------------------------------------------------------------------
+
+@app.post("/quests/{quest_id}/tasks")
+def create_quest_task(quest_id: int, task: TaskCreate):
+    quest = supabase.table("quests").select("goal_id").eq("id", quest_id).single().execute().data
+    if not quest:
+        raise HTTPException(404, "Quest not found")
+    result = supabase.table("goal_tasks").insert({
+        "goal_id":      quest["goal_id"],
+        "quest_id":     quest_id,
+        "title":        task.title,
+        "is_completed": False,
+        "created_at":   datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return result.data[0]
+
+# Legacy: direct-to-goal tasks (kept for skill-tree compat)
+@app.post("/goals/{goal_id}/tasks")
+def create_task(goal_id: int, task: TaskCreate):
+    result = supabase.table("goal_tasks").insert({
+        "goal_id":      goal_id,
+        "quest_id":     None,
+        "title":        task.title,
+        "is_completed": False,
+        "created_at":   datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return result.data[0]
+
+@app.get("/goals/{goal_id}/tasks")
+def get_tasks(goal_id: int):
+    return supabase.table("goal_tasks").select("*").eq("goal_id", goal_id).execute().data
+
+@app.put("/tasks/{task_id}")
+def toggle_task(task_id: int):
+    task = supabase.table("goal_tasks").select("*").eq("id", task_id).single().execute().data
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    is_completing = not task["is_completed"]
+    supabase.table("goal_tasks").update({"is_completed": is_completing}).eq("id", task_id).execute()
+
+    rollup_result = {}
+    quest_rollup  = None
+    ms_rollup     = None
+
+    if is_completing:
+        goal = supabase.table("goals").select("*").eq("id", task["goal_id"]).single().execute().data
+        cat  = goal.get("category", "Personal Growth") if goal else "Personal Growth"
+        ledger_add("task", str(task_id), cat, XP_PER_TASK)
+        new_achievements = award_achievements()
+
+        # Rollup chain: task → quest → milestone → (goal progress is computed on read)
+        if task.get("quest_id"):
+            quest_rollup = _rollup_quest(task["quest_id"])
+            # Find quest's milestone
+            q_row = supabase.table("quests").select("milestone_id").eq("id", task["quest_id"]).single().execute().data
+            if q_row and q_row.get("milestone_id"):
+                ms_rollup = _rollup_milestone(q_row["milestone_id"])
+
+        skill_completion = _auto_complete_skill_node_if_done(task["goal_id"])
+        newly_unlockable = _check_new_unlocks(cat)
+
+        return {
+            "id":              task_id,
+            "is_completed":    True,
+            "xp_earned":       XP_PER_TASK,
+            "category":        cat,
+            "new_achievements": new_achievements,
+            "newly_unlockable": newly_unlockable,
+            "skill_completion": skill_completion,
+            "quest_rollup":    quest_rollup,
+            "milestone_rollup": ms_rollup,
+        }
+
+    # Unchecking — also rollup
+    if task.get("quest_id"):
+        quest_rollup = _rollup_quest(task["quest_id"])
+        q_row = supabase.table("quests").select("milestone_id").eq("id", task["quest_id"]).single().execute().data
+        if q_row and q_row.get("milestone_id"):
+            ms_rollup = _rollup_milestone(q_row["milestone_id"])
+
+    return {"id": task_id, "is_completed": False,
+            "quest_rollup": quest_rollup, "milestone_rollup": ms_rollup}
+
+@app.delete("/tasks/{task_id}")
+def delete_task(task_id: int):
+    task = supabase.table("goal_tasks").select("quest_id").eq("id", task_id).single().execute().data
+    result = supabase.table("goal_tasks").delete().eq("id", task_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Task not found")
+    # Rollup after delete
+    if task and task.get("quest_id"):
+        _rollup_quest(task["quest_id"])
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Dependencies (kept for compat)
+# ---------------------------------------------------------------------------
+
 @app.post("/goals/{goal_id}/dependencies")
 def add_dependency(goal_id: int, dep: DependencyCreate):
     result = supabase.table("goal_dependencies").insert({
@@ -1011,141 +1975,6 @@ def get_dependencies(goal_id: int):
     result = supabase.table("goal_dependencies").select("*").eq("goal_id", goal_id).execute()
     return result.data
 
-# Tasks
-@app.post("/goals/{goal_id}/tasks")
-def create_task(goal_id: int, task: TaskCreate):
-    result = supabase.table("goal_tasks").insert({
-        "goal_id": goal_id, "title": task.title,
-        "is_completed": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }).execute()
-    return result.data[0]
-
-@app.get("/goals/{goal_id}/tasks")
-def get_tasks(goal_id: int):
-    return supabase.table("goal_tasks").select("*").eq("goal_id", goal_id).execute().data
-
-@app.put("/tasks/{task_id}")
-def toggle_task(task_id: int):
-    task = supabase.table("goal_tasks").select("*").eq("id", task_id).single().execute()
-    is_completing = not task.data["is_completed"]
-    updated = supabase.table("goal_tasks").update(
-        {"is_completed": is_completing}
-    ).eq("id", task_id).execute()
-
-    if is_completing:
-        # Grant XP to the goal's category
-        goal = supabase.table("goals").select("*").eq("id", task.data["goal_id"]).single().execute()
-        cat  = goal.data.get("category", "Personal Growth")
-        ledger_add("task", str(task_id), cat, XP_PER_TASK)
-        new_achievements = award_achievements()
-        # Check if this completes a skill node
-        skill_completion = _auto_complete_skill_node_if_done(task.data["goal_id"])
-        # Check if any skill node just became unlockable
-        newly_unlockable = _check_new_unlocks(cat)
-        return {
-            **updated.data[0],
-            "xp_earned": XP_PER_TASK,
-            "category": cat,
-            "new_achievements": new_achievements,
-            "newly_unlockable": newly_unlockable,
-            "skill_completion": skill_completion,
-        }
-    return updated.data[0]
-
-def _check_new_unlocks(category: str) -> list[str]:
-    """Return node names that just became unlockable after an XP change."""
-    try:
-        tree = resolve_tree(category)
-        if not tree:
-            return []
-        return [n["name"] for n in tree["nodes"] if n["unlocked"] and not n["completed"]]
-    except Exception:
-        return []
-
-@app.delete("/tasks/{task_id}")
-def delete_task(task_id: int):
-    result = supabase.table("goal_tasks").delete().eq("id", task_id).execute()
-    if not result.data:
-        raise HTTPException(404, "Task not found")
-    return {"status": "deleted"}
-
-# ---------------------------------------------------------------------------
-# Goal summary builder (shared by all callers)
-# ---------------------------------------------------------------------------
-
-def build_goal_summary() -> list[dict]:
-    goals     = supabase.table("goals").select("*").order("created_at", desc=True).execute()
-    task_rows = supabase.table("goal_tasks").select("*").execute()
-
-    tasks_by_goal: dict[int, list] = defaultdict(list)
-    for task in task_rows.data:
-        tasks_by_goal[task["goal_id"]].append(task)
-
-    # Milestones
-    try:
-        ms_rows = supabase.table("goal_milestones").select("*").execute().data
-    except Exception:
-        ms_rows = []
-    ms_by_goal: dict[int, list] = defaultdict(list)
-    for ms in ms_rows:
-        ms_by_goal[ms["goal_id"]].append(ms)
-
-    summary = []
-    for goal in goals.data:
-        tasks      = tasks_by_goal.get(goal["id"], [])
-        completed  = sum(1 for t in tasks if t["is_completed"])
-        total      = len(tasks)
-        progress   = round(completed / total * 100) if total > 0 else 0
-        xp         = get_category_xp(goal["category"])
-        level_info = xp_to_level(xp)
-        created    = datetime.fromisoformat(goal["created_at"].replace("Z", "+00:00"))
-        days_old   = (datetime.now(timezone.utc) - created).days
-
-        milestones = ms_by_goal.get(goal["id"], [])
-        ms_done    = sum(1 for m in milestones if m["is_completed"])
-
-        summary.append({
-            **goal,
-            "tasks":            tasks,
-            "completed_tasks":  completed,
-            "total_tasks":      total,
-            "progress":         progress,
-            "xp":               xp,
-            "level":            level_info["level"],
-            "xp_in_level":      level_info["xp_in_level"],
-            "xp_to_next":       level_info["xp_to_next"],
-            "days_since_created": days_old,
-            "milestones":       milestones,
-            "milestones_done":  ms_done,
-            "milestones_total": len(milestones),
-        })
-    return summary
-
-def build_category_health(summary: list[dict]) -> list[dict]:
-    by_cat: dict[str, dict] = {}
-    for g in summary:
-        cat = g.get("category", "Other")
-        by_cat.setdefault(cat, {"xp": 0, "completed": 0, "total": 0, "days": []})
-        by_cat[cat]["xp"]       += g["xp"]
-        by_cat[cat]["completed"] += g["completed_tasks"]
-        by_cat[cat]["total"]     += g["total_tasks"]
-        by_cat[cat]["days"].append(g["days_since_created"])
-    health = []
-    for cat, data in by_cat.items():
-        rate   = round(data["completed"] / data["total"] * 100) if data["total"] > 0 else 0
-        oldest = max(data["days"])
-        stale  = oldest > 7 and rate < 50
-        health.append({
-            "category": cat, "total_xp": data["xp"],
-            "completion_rate": rate, "stale": stale,
-            "oldest_goal_days": oldest,
-        })
-    return sorted(health, key=lambda x: x["total_xp"], reverse=True)
-
-@app.get("/goals/summary")
-def goals_summary():
-    return build_goal_summary()
 
 # ---------------------------------------------------------------------------
 # Skill Trees
@@ -2783,14 +3612,16 @@ def build_domain(name: str, defn: dict) -> dict:
     completed_tasks = sum(g["completed_tasks"] for g in domain_goals)
     progress        = round(completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
 
-    # Habits in domain
+    # Habits in domain — look up domain via habit_profiles instead of category column
     try:
-        habit_result = supabase.table("habits").select("name, completed_at, category").execute()
+        habit_result = supabase.table("habits").select("name, completed_at").execute()
+        profiles_res = supabase.table("habit_profiles").select("name, domain").execute()
+        profile_map  = {r["name"]: r.get("domain", "Personal Growth") for r in profiles_res.data}
         today        = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         domain_habits: dict[str, dict] = {}
         for row in habit_result.data:
-            cat = row.get("category") or "Productivity"
-            if cat in set(defn["habit_cats"]):
+            habit_domain = profile_map.get(row["name"], "Personal Growth")
+            if habit_domain == name:  # match by domain name directly
                 n = row["name"]
                 if n not in domain_habits:
                     domain_habits[n] = {"dates": []}

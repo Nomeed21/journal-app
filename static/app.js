@@ -558,215 +558,729 @@ document.getElementById("clear-btn").addEventListener("click", () => {
     loadEntries();
 });
 
-// ---------------------------------------------------------------------------
-// Habits — enhanced
-// ---------------------------------------------------------------------------
-const streaksDiv = document.getElementById("streaks");
-const habitForm  = document.getElementById("habit-form");
 
-const CATEGORY_ICONS = {
-    Physical: "🏃", Learning: "📚", Mind: "🧘",
-    Social: "👥", Productivity: "⚡", Creativity: "🎨",
-};
-const DIFF_COLORS = { Easy: "#4caf50", Normal: "#f7a94b", Hard: "#ff7043", Elite: "#9c27b0" };
-const MASTERY_COLORS = ["#c9a8b0","#d98aa0","#b8617c","#8b2252","#4a0e2a"];
+// ============================================================
+// HABITS V2 — Core Gameplay System
+// Full integration: Skill Trees · Domains · Quests · Bosses · AI
+// ============================================================
 
+// ── State ────────────────────────────────────────────────────
+let allSkillNodes = [];
+let currentHabits = {};
+
+// ── Boot ─────────────────────────────────────────────────────
 async function loadStreaks() {
-    // Fetch balance (new endpoint) with fallback to legacy streaks endpoint
-    let streaks = {}, atRisk = [], balanceData = { balance: null, streaks: {} };
-    try {
-        const [balanceRes, riskRes] = await Promise.all([
-            fetch("/habits/balance"),
-            fetch("/analytics/predictive"),
-        ]);
-        if (balanceRes.ok) balanceData = await balanceRes.json();
-        if (riskRes.ok)    atRisk = (await riskRes.json()).streak_at_risk || [];
-    } catch (_) {}
-
-    // If balance endpoint failed or returned no streaks, fall back to /habits/streaks
-    streaks = balanceData.streaks && Object.keys(balanceData.streaks).length
-        ? balanceData.streaks
-        : await fetch("/habits/streaks").then(r => r.json()).catch(() => ({}));
-
-    // Life balance bars
-    const hbBars = document.getElementById("hb-bars");
-    if (hbBars && balanceData.balance && balanceData.balance.length) {
-        hbBars.innerHTML = balanceData.balance.map(b => `
-            <div class="hb-bar-col">
-                <div class="hb-bar-wrap">
-                    <div class="hb-bar-fill" style="height:${b.rate}%;background:${b.rate >= 70 ? 'var(--accent)' : b.rate >= 40 ? '#f7a94b' : '#ef5350'}"></div>
-                </div>
-                <div class="hb-bar-cat">${CATEGORY_ICONS[b.category] || ''} ${b.category}</div>
-                <div class="hb-bar-pct">${b.rate}%</div>
-            </div>`).join("");
-    }
-
-    // Habit cards
-    const entries = Object.entries(streaks);
-    streaksDiv.innerHTML = entries.length === 0
-        ? "<p class='empty-state'>No habits yet — add your first one above!</p>"
-        : entries.map(([name, data]) => {
-            const risk    = atRisk.includes(name);
-            const mLevel  = data.mastery_level || 1;
-            const mLabel  = data.mastery_label || "Beginner";
-            const cat     = data.category || "Productivity";
-            const diff    = data.difficulty || "Normal";
-            const tokens  = data.recovery_tokens || {available: 0};
-            const streak  = data.current_streak || 0;
-            const total   = data.total_logs || 0;
-            const xpp     = data.xp_per_log || 10;
-
-            // Progress ring SVG (mastery: level/5)
-            const pct    = (mLevel - 1) / 4;
-            const radius = 18;
-            const circ   = 2 * Math.PI * radius;
-            const dash   = circ * pct;
-
-            return `<div class="habit-card ${risk ? 'habit-card--risk' : ''}">
-                <div class="hc-top">
-                    <div class="hc-ring-wrap">
-                        <svg width="44" height="44" viewBox="0 0 44 44">
-                            <circle cx="22" cy="22" r="${radius}" fill="none" stroke="var(--line-strong)" stroke-width="3"/>
-                            <circle cx="22" cy="22" r="${radius}" fill="none"
-                                stroke="${MASTERY_COLORS[mLevel-1]}"
-                                stroke-width="3"
-                                stroke-dasharray="${dash} ${circ - dash}"
-                                stroke-dashoffset="${circ / 4}"
-                                stroke-linecap="round"/>
-                            <text x="22" y="26" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">${mLevel}</text>
-                        </svg>
-                    </div>
-                    <div class="hc-main">
-                        <div class="hc-name">${name} ${risk ? '<span class="risk-badge">⚠️ at risk</span>' : ''}</div>
-                        <div class="hc-badges">
-                            <span class="hc-badge" style="background:${DIFF_COLORS[diff]}20;color:${DIFF_COLORS[diff]};border-color:${DIFF_COLORS[diff]}40">${diff}</span>
-                            <span class="hc-badge hc-badge--cat">${CATEGORY_ICONS[cat] || ''} ${cat}</span>
-                            ${data.linked_skill ? `<span class="hc-badge hc-badge--skill">→ ${data.linked_skill}</span>` : ''}
-                        </div>
-                        <div class="hc-meta">
-                            <span class="hc-streak">🔥 ${streak}-day streak</span>
-                            <span class="hc-total">${total} total</span>
-                            <span class="hc-mastery">${mLabel}</span>
-                            <span class="hc-xp">+${xpp} XP</span>
-                        </div>
-                    </div>
-                    <button class="hc-log-btn" onclick="quickLogHabit('${name.replace(/'/g,"\\'")}','${cat}')">Log Today</button>
-                </div>
-                ${tokens.available > 0 ? `
-                    <div class="hc-tokens">
-                        <span class="hc-token-label">🛡️ ${tokens.available} recovery token${tokens.available > 1 ? 's' : ''}</span>
-                        <button class="hc-token-btn" onclick="useRecoveryToken('${name.replace(/'/g,"\\'")}')">Restore missed day</button>
-                    </div>` : ''}
-            </div>`;
-        }).join("");
-
-    // Load heatmap
-    loadHeatmap();
-
-    // Load AI insight (lazy)
-    const insightCard = document.getElementById("habit-ai-insight-card");
-    if (insightCard && entries.length >= 2) {
-        insightCard.style.display = "";
-        fetch("/habits/ai-insights").then(r => r.json()).then(d => {
-            document.getElementById("habit-ai-insight").textContent = d.insight;
-        }).catch(() => {});
-    }
+    await Promise.all([
+        _loadSkillNodes(),
+        _loadHabitsData(),
+    ]);
+    _buildSkillNodePicker();
+    _renderHabitsPage();
+    _loadActiveSynergies();
+    _loadHabitAIInsight();
 }
 
-async function loadHeatmap() {
-    const el = document.getElementById("habit-heatmap");
+async function _loadSkillNodes() {
+    try {
+        allSkillNodes = await (await fetch("/habits/skill-nodes")).json();
+    } catch (_) { allSkillNodes = []; }
+}
+
+async function _loadHabitsData() {
+    try {
+        const res = await fetch("/habits/balance");
+        if (!res.ok) return;
+        const data = await res.json();
+        currentHabits = data.streaks || {};
+        _renderDomainBalance(data.balance || []);
+    } catch (_) {}
+    try {
+        const heatRes = await fetch("/habits/heatmap?days=365");
+        if (heatRes.ok) _renderHeatmap(await heatRes.json());
+    } catch (_) {}
+}
+
+// ── Domain Balance ────────────────────────────────────────────
+const DOMAIN_ICONS = {
+    "Computer Science": "💻", "Health": "💪", "Music": "🎵",
+    "Relationships": "❤️", "Personal Growth": "🌱", "Finance": "💰", "Creativity": "🎨"
+};
+const DOMAIN_COLORS = {
+    "Computer Science": "#6c8ebf", "Health": "#82b366", "Music": "#9c70c4",
+    "Relationships": "#d98aa0", "Personal Growth": "#d07040", "Finance": "#d6a73a", "Creativity": "#b8617c"
+};
+
+function _renderDomainBalance(balance) {
+    const el = document.getElementById("hb-bars");
+    if (!el || !balance.length) return;
+    el.innerHTML = balance.map(b => {
+        const color = b.rate >= 70 ? "#4caf50" : b.rate >= 40 ? "#f7a94b" : "#ef5350";
+        const icon = DOMAIN_ICONS[b.category] || "◎";
+        return `<div class="hv2-bal-col">
+            <div class="hv2-bal-wrap">
+                <div class="hv2-bal-fill" style="height:${b.rate}%;background:${color}"></div>
+            </div>
+            <div class="hv2-bal-icon" title="${b.category}: ${b.rate}%">${icon}</div>
+            <div class="hv2-bal-pct">${b.rate}%</div>
+        </div>`;
+    }).join("");
+}
+
+// ── Active Synergies Banner ───────────────────────────────────
+async function _loadActiveSynergies() {
+    const el = document.getElementById("hv2-synergy-banner");
     if (!el) return;
     try {
-        const data  = await (await fetch("/habits/heatmap?days=365")).json();
-        const today = new Date();
-        const cells = [];
-        // Build map
-        const countMap = {};
-        data.forEach(d => { countMap[d.date] = d.count; });
-        // Last 52 weeks
-        for (let w = 51; w >= 0; w--) {
-            const col = [];
-            for (let d = 0; d < 7; d++) {
-                const dt   = new Date(today);
-                dt.setDate(dt.getDate() - (w * 7 + d));
-                const key  = dt.toISOString().slice(0, 10);
-                const cnt  = countMap[key] || 0;
-                const opacity = cnt === 0 ? 0.08 : Math.min(0.2 + cnt * 0.2, 1);
-                col.push(`<div class="hm-cell" title="${key}: ${cnt} habits" style="background:rgba(217,138,160,${opacity})"></div>`);
-            }
-            cells.push(`<div class="hm-col">${col.join("")}</div>`);
-        }
-        el.innerHTML = cells.join("");
-    } catch (_) { el.innerHTML = "<p style='color:var(--ink-faint);font-style:italic'>No data yet.</p>"; }
+        const today = new Date().toISOString().slice(0, 10);
+        // Fetch from habits/balance which includes synergy data indirectly
+        // We check each habit's active_synergies
+        const synergies = [];
+        Object.values(currentHabits).forEach(h => {
+            (h.active_synergies || []).forEach(s => {
+                if (!synergies.find(x => x.name === s.name)) synergies.push(s);
+            });
+        });
+        if (!synergies.length) { el.style.display = "none"; return; }
+        el.style.display = "flex";
+        el.innerHTML = `
+            <span class="hv2-syn-banner-label">⚗️ Active Synergies</span>
+            ${synergies.map(s => `
+                <span class="hv2-syn-active-pill">
+                    ${s.name}
+                    <span class="hv2-syn-bonus">${s.bonus_desc || ""}</span>
+                </span>`).join("")}`;
+    } catch (_) { if (el) el.style.display = "none"; }
 }
 
-window.quickLogHabit = async function(name, category) {
-    const diff   = "Normal";
-    const res    = await fetch("/habits", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, category, difficulty: diff }),
+// ── Heatmap ───────────────────────────────────────────────────
+function _renderHeatmap(data) {
+    const el = document.getElementById("habit-heatmap");
+    if (!el) return;
+    const countMap = {};
+    data.forEach(d => { countMap[d.date] = d.count; });
+    const today = new Date();
+    const cols = [];
+    for (let w = 51; w >= 0; w--) {
+        const col = [];
+        for (let d = 0; d < 7; d++) {
+            const dt = new Date(today);
+            dt.setDate(dt.getDate() - (w * 7 + d));
+            const key = dt.toISOString().slice(0, 10);
+            const cnt = countMap[key] || 0;
+            const op = cnt === 0 ? 0.06 : Math.min(0.15 + cnt * 0.22, 1);
+            col.push(`<div class="hv2-hm-cell" title="${key}: ${cnt} habit${cnt !== 1 ? 's' : ''}" style="background:rgba(217,138,160,${op})"></div>`);
+        }
+        cols.push(`<div class="hv2-hm-col">${col.join("")}</div>`);
+    }
+    el.innerHTML = cols.join("");
+}
+
+// ── Create Panel toggle ───────────────────────────────────────
+window.toggleHabitCreatePanel = function() {
+    const body = document.getElementById("hv2-create-body");
+    const btn  = document.querySelector(".hv2-create-toggle");
+    if (!body) return;
+    const open = body.style.display === "none";
+    body.style.display = open ? "" : "none";
+    if (btn) btn.textContent = open ? "Collapse" : "Expand";
+    if (open) _buildSkillNodePicker();
+};
+
+// ── Skill Node Picker ─────────────────────────────────────────
+function _buildSkillNodePicker() {
+    const select = document.getElementById("habit-skill-node");
+    if (!select || !allSkillNodes.length) return;
+    const byTree = {};
+    allSkillNodes.forEach(n => {
+        if (!byTree[n.tree]) byTree[n.tree] = [];
+        byTree[n.tree].push(n);
     });
-    const data = await res.json();
-    if (data.status === "already_logged") {
-        const toast = document.createElement("div");
-        toast.className = "achievement-toast show";
-        toast.innerHTML = `✓ Already logged today`;
-        document.body.appendChild(toast);
-        setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 2000);
+    select.innerHTML = `<option value="">— No Skill Node (general habit) —</option>` +
+        Object.entries(byTree).map(([tree, nodes]) =>
+            `<optgroup label="${nodes[0]?.icon || ''} ${tree} · ${nodes[0]?.domain || ''}">
+                ${nodes.map(n =>
+                    `<option value="${n.id}" data-tree="${tree}" data-domain="${n.domain}">${n.name}</option>`
+                ).join("")}
+            </optgroup>`
+        ).join("");
+    select.addEventListener("change", () => {
+        const opt = select.options[select.selectedIndex];
+        const preview = document.getElementById("habit-node-preview");
+        if (preview) {
+            preview.textContent = opt?.dataset?.domain
+                ? `→ ${opt.dataset.tree} · ${opt.dataset.domain}`
+                : "";
+        }
+    });
+}
+
+// ── Habit Form Submit ─────────────────────────────────────────
+const habitForm = document.getElementById("habit-form");
+if (habitForm) {
+    habitForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const name   = document.getElementById("habit-name")?.value.trim();
+        const nodeEl = document.getElementById("habit-skill-node");
+        const nodeId = nodeEl?.value || "";
+        const opt    = nodeEl?.options[nodeEl.selectedIndex];
+        const tree   = opt?.dataset?.tree || "";
+        if (!name) return;
+
+        // Create profile if node selected
+        if (nodeId && tree) {
+            await fetch("/habits/profile", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name, skill_node_id: nodeId, skill_tree: tree }),
+            });
+        }
+
+        // Log immediately
+        const res  = await fetch("/habits", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, skill_node_id: nodeId, skill_tree: tree }),
+        });
+        const data = await res.json();
+
+        if (data.status === "already_logged") {
+            _toast("✓ Already logged today", "#4caf50");
+        } else {
+            if (data.xp_earned) showXPFlash(data.xp_earned, data.domain || "Habits");
+            if (data.new_achievements) showAchievementToast(data.new_achievements);
+            if (data.xp_modifiers?.length) {
+                _toast(data.xp_modifiers.map(m => m.label).join(" · "), "var(--accent)", 3000);
+            }
+            if (data.new_synergies?.length) {
+                data.new_synergies.forEach((s, i) =>
+                    setTimeout(() => _toast(`⚗️ ${s.name}: ${s.bonus}`, "#7c3aed", 4500), i * 700)
+                );
+            }
+            if (data.evolution_ready) {
+                _toast(`⬆️ ${data.evolution_ready.message}`, "#ff9800", 5000);
+            }
+            if (data.habit_quest) _showHabitQuestBanner(data.habit_quest, name);
+        }
+
+        habitForm.reset();
+        const preview = document.getElementById("habit-node-preview");
+        if (preview) preview.textContent = "";
+        loadStreaks();
+        loadXPHUD();
+    });
+}
+
+// ── Main Render ───────────────────────────────────────────────
+function _renderHabitsPage() {
+    const el = document.getElementById("streaks");
+    if (!el) return;
+
+    const entries = Object.entries(currentHabits);
+    if (!entries.length) {
+        el.innerHTML = `<div class="hv2-empty">
+            <strong style="display:block;margin-bottom:.5rem;font-size:1rem">No habits yet</strong>
+            Create your first habit above and link it to a Skill Node — every completion
+            will automatically progress your Skills, Domains, and generate Quests.
+        </div>`;
         return;
     }
-    if (data.new_achievements) showAchievementToast(data.new_achievements);
-    if (data.xp_earned) showXPFlash(data.xp_earned, category);
-    if (data.evolution) {
-        const t = document.createElement("div");
-        t.className = "achievement-toast show";
-        t.innerHTML = `🌟 ${data.evolution.message}`;
-        document.body.appendChild(t);
-        setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 400); }, 4000);
+
+    // Sort: evolving first, then at-risk (no log today), then rest
+    const pending  = entries.filter(([, h]) => h.pending_evolution);
+    const atRisk   = entries.filter(([, h]) => !h.pending_evolution && !h.done_today && h.current_streak > 0);
+    const doneTdy  = entries.filter(([, h]) => h.done_today);
+    const fresh    = entries.filter(([, h]) => !h.pending_evolution && !h.done_today && h.current_streak === 0);
+
+    let html = "";
+
+    if (pending.length) {
+        html += `<div class="hv2-section-label">⬆️ Ready to Evolve</div>`;
+        html += pending.map(([n, h]) => _buildHabitCard(n, h)).join("");
     }
+    if (atRisk.length) {
+        html += `<div class="hv2-section-label">🔥 Streak at Risk — Log Today</div>`;
+        html += atRisk.map(([n, h]) => _buildHabitCard(n, h)).join("");
+    }
+    if (fresh.length) {
+        if (pending.length || atRisk.length) html += `<div class="hv2-section-label">New Habits</div>`;
+        html += fresh.map(([n, h]) => _buildHabitCard(n, h)).join("");
+    }
+    if (doneTdy.length) {
+        html += `<div class="hv2-section-label">✓ Completed Today</div>`;
+        html += doneTdy.map(([n, h]) => _buildHabitCard(n, h)).join("");
+    }
+
+    el.innerHTML = html;
+}
+
+// ── Habit Card Builder ────────────────────────────────────────
+function _buildHabitCard(name, h) {
+    const streak      = h.current_streak || 0;
+    const total       = h.total_logs || 0;
+    const mastery     = h.mastery_label || "Beginner";
+    const masteryLvl  = h.mastery_level || 1;
+    const stage       = h.evolution_stage || 1;
+    const stages      = h.evolution_stages || [];
+    const stageDef    = stages[stage - 1] || {};
+    const domain      = h.domain || h.category || "Personal Growth";
+    const node        = h.skill_node_name || "—";
+    const xp          = h.base_xp || h.xp_per_log || 10;
+    const successRate = h.success_rate || 0;
+    const doneToday   = h.done_today || false;
+    const tokens      = h.recovery_tokens || { available: 0 };
+    const synergies   = h.active_synergies || [];
+    const pending     = h.pending_evolution || false;
+    const progressEvo = h.progress_to_next_evo || 0;
+    const nextEvo     = h.next_evo_at;
+    const domColor    = DOMAIN_COLORS[domain] || "var(--accent)";
+
+    // SVG mastery ring
+    const RING_COLORS = ["#c9a8b0","#d98aa0","#b8617c","#8b2252","#4a0e2a","#1a0010"];
+    const ringColor = RING_COLORS[Math.min(masteryLvl - 1, 5)];
+    const R = 19, circ = 2 * Math.PI * R;
+    const pct = (masteryLvl - 1) / 5;
+    const dash = circ * pct;
+
+    // Stage color
+    const STAGE_COLORS = ["#9e9e9e","#4caf50","#2196f3","#ff9800","#f44336","#9c27b0"];
+    const stageColor = STAGE_COLORS[Math.min(stage - 1, 5)];
+
+    // Synergy pills
+    const synHtml = synergies.map(s =>
+        `<span class="hv2-syn-pill" title="${s.bonus_desc}">⚗️ ${s.name}</span>`
+    ).join("");
+
+    // Evolution content
+    let evoHtml;
+    if (pending) {
+        const nextStage = stages[stage] || {};
+        evoHtml = `<div class="hv2-evo-banner">
+            <span class="hv2-evo-icon">⬆️</span>
+            <div class="hv2-evo-text">
+                <strong>Ready to evolve → Stage ${stage + 1}${nextStage.title ? ': ' + nextStage.title : ''}</strong>
+                ${nextStage.description ? `<em>${nextStage.description}${nextStage.duration_minutes ? ' · ' + nextStage.duration_minutes + ' min' : ''}</em>` : ''}
+            </div>
+            <div class="hv2-evo-btns">
+                <button class="hv2-evo-confirm" onclick="confirmEvolution('${_esc(name)}', true)">Evolve ▶</button>
+                <button class="hv2-evo-decline" onclick="confirmEvolution('${_esc(name)}', false)">Later</button>
+            </div>
+        </div>`;
+    } else if (nextEvo) {
+        evoHtml = `<div class="hv2-evo-progress">
+            <div class="hv2-evo-bar-wrap">
+                <div class="hv2-evo-bar" style="width:${progressEvo}%"></div>
+            </div>
+            <span class="hv2-evo-label">Stage ${stage + 1} in ${nextEvo - total} log${nextEvo - total !== 1 ? 's' : ''}</span>
+        </div>`;
+    } else {
+        evoHtml = `<span class="hv2-evo-maxed">⭐ Max Evolution Reached</span>`;
+    }
+
+    // Token controls
+    const tokenHtml = tokens.available > 0 ? `
+        <div class="hv2-token-row">
+            <span class="hv2-token-count">🛡️ ${tokens.available} token${tokens.available !== 1 ? 's' : ''}</span>
+            <div class="hv2-token-actions">
+                <button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','restore')" title="Restore a missed day">↩ Restore</button>
+                <button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','skip')" title="Skip today without breaking streak">⏭ Skip</button>
+                <button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','bonus_xp')" title="+50% XP on next log">⚡ Bonus XP</button>
+                ${tokens.available >= 2 ? `<button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','freeze')" title="Freeze streak 3 days">❄️ Freeze</button>` : ""}
+                ${tokens.available >= 2 ? `<button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','boss_reduce')" title="Reduce Weekly Boss difficulty">⚔️ Boss</button>` : ""}
+                ${tokens.available >= 2 ? `<button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','quest_recover')" title="Recover failed quest">♻️ Quest</button>` : ""}
+            </div>
+        </div>` : "";
+
+    return `<div class="hv2-card ${pending ? 'hv2-card--evolving' : ''} ${doneToday ? 'hv2-card--done' : ''}"
+            style="--hv2-domain-color:${domColor}">
+        <div class="hv2-card-top">
+
+            <!-- Mastery Ring -->
+            <div class="hv2-ring-wrap" title="Mastery: ${mastery} (Level ${masteryLvl})">
+                <svg width="46" height="46" viewBox="0 0 46 46">
+                    <circle cx="23" cy="23" r="${R}" fill="none" stroke="var(--line-strong)" stroke-width="3.5"/>
+                    <circle cx="23" cy="23" r="${R}" fill="none"
+                        stroke="${ringColor}" stroke-width="3.5"
+                        stroke-dasharray="${dash.toFixed(1)} ${(circ - dash).toFixed(1)}"
+                        stroke-dashoffset="${(circ / 4).toFixed(1)}"
+                        stroke-linecap="round"/>
+                    <text x="23" y="27" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ink)">${masteryLvl}</text>
+                </svg>
+            </div>
+
+            <!-- Info -->
+            <div class="hv2-info">
+                <div class="hv2-name-row">
+                    <span class="hv2-name">${name}</span>
+                    ${doneToday ? '<span class="hv2-done-badge">✓ Done</span>' : ''}
+                    ${streak >= 7 ? `<span class="hv2-done-badge" style="background:#fff8e1;color:#e65100;border-color:#ffe082">🔥 ${streak}d</span>` : ''}
+                </div>
+                <div class="hv2-tags">
+                    ${node !== "—" ? `<span class="hv2-tag hv2-tag--node">🔗 ${node}</span>` : ''}
+                    <span class="hv2-tag hv2-tag--domain" style="background:${domColor}18;color:${domColor};border-color:${domColor}40">${domain}</span>
+                    <span class="hv2-tag hv2-tag--stage" style="background:${stageColor}18;color:${stageColor};border-color:${stageColor}40">
+                        Stage ${stage}${stageDef.title ? ' · ' + stageDef.title : ''}
+                    </span>
+                    <span class="hv2-tag hv2-tag--mastery">${mastery}</span>
+                </div>
+                <div class="hv2-stats-row">
+                    <span class="hv2-stat">🔥 ${streak}-day streak</span>
+                    <span class="hv2-stat hv2-stat--faint">${total} total</span>
+                    <span class="hv2-stat hv2-stat--faint">${successRate}% rate</span>
+                    <span class="hv2-xp">+${xp} XP</span>
+                </div>
+                ${synHtml ? `<div class="hv2-synergies">${synHtml}</div>` : ""}
+            </div>
+
+            <!-- Actions -->
+            <div class="hv2-actions">
+                ${!doneToday
+                    ? `<button class="hv2-log-btn" onclick="quickLogHabit('${_esc(name)}')">Log Today</button>`
+                    : `<button class="hv2-log-btn hv2-log-btn--done" disabled>✓ Logged</button>`}
+                <div class="hv2-icon-btns">
+                    <button class="hv2-stats-btn" onclick="openStatsModal('${_esc(name)}')" title="Stats">📊</button>
+                    <button class="hv2-stats-btn" onclick="openEditHabitModal('${_esc(name)}')" title="Edit">✏️</button>
+                    <button class="hv2-stats-btn hv2-delete-btn" onclick="deleteHabit('${_esc(name)}')" title="Delete">🗑️</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Evolution -->
+        <div class="hv2-evo-row">${evoHtml}</div>
+
+        <!-- Tokens -->
+        ${tokenHtml}
+    </div>`;
+}
+
+// ── Log Habit ─────────────────────────────────────────────────
+window.quickLogHabit = async function(name) {
+    const h = currentHabits[name] || {};
+    const res  = await fetch("/habits", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            name,
+            skill_node_id: h.skill_node_id || "",
+            skill_tree:    h.skill_tree    || "",
+        }),
+    });
+    const data = await res.json();
+
+    if (data.status === "already_logged") {
+        _toast("✓ Already logged today", "#4caf50");
+        return;
+    }
+
+    // XP flash with modifiers
+    if (data.xp_earned) showXPFlash(data.xp_earned, data.domain || "Habits");
+    if (data.new_achievements) showAchievementToast(data.new_achievements);
+
+    if (data.xp_modifiers?.length) {
+        const labels = data.xp_modifiers.map(m => m.label).join(" · ");
+        _toast(`${labels}`, "var(--accent)", 3000);
+    }
+
+    if (data.new_synergies?.length) {
+        data.new_synergies.forEach((s, i) =>
+            setTimeout(() => _toast(`⚗️ ${s.name}: ${s.bonus}`, "#7c3aed", 4500), i * 800)
+        );
+    }
+
+    if (data.evolution_ready) {
+        _toast(`⬆️ ${data.evolution_ready.message}`, "#ff9800", 5000);
+    }
+
+    if (data.habit_quest) _showHabitQuestBanner(data.habit_quest, name);
+    if (data.adaptation)  setTimeout(() => _toast(`✦ ${data.adaptation}`, "var(--ink)", 4000), 1200);
+
     loadStreaks();
     loadXPHUD();
 };
 
-window.useRecoveryToken = async function(name) {
+// ── Quest Banner ──────────────────────────────────────────────
+function _showHabitQuestBanner(quest, habitName) {
+    let b = document.getElementById("habit-quest-banner");
+    if (!b) {
+        b = document.createElement("div");
+        b.id = "habit-quest-banner";
+        b.className = "hv2-quest-banner";
+        const sec = document.getElementById("page-habits");
+        const streaks = document.getElementById("streaks");
+        sec.insertBefore(b, streaks);
+    }
+    b.innerHTML = `
+        <div class="hv2-qb-label">⚔️ Quest generated from "${habitName}"</div>
+        <div class="hv2-qb-title">${quest.title}</div>
+        <div class="hv2-qb-meta">
+            ${quest.description ? `<span>${quest.description}</span>` : ""}
+            <span class="dq-chip">⏱ ${quest.duration_minutes}m</span>
+            <span class="dq-chip">${quest.difficulty}</span>
+        </div>
+        <button class="btn-ghost btn-sm" onclick="this.closest('.hv2-quest-banner').style.display='none'">Dismiss</button>`;
+    b.style.display = "block";
+    b.classList.add("show");
+}
+
+// ── Evolution ─────────────────────────────────────────────────
+window.confirmEvolution = async function(name, confirmed) {
+    const data = await (await fetch(`/habits/${encodeURIComponent(name)}/evolve`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed }),
+    })).json();
+    if (data.status === "evolved") {
+        showXPFlash(data.xp_bonus, "Evolution");
+        _toast(`⬆️ Evolved to Stage ${data.new_stage}! XP per log: ${data.new_base_xp}`, "#ff9800", 4500);
+    } else {
+        _toast("Evolution deferred. It'll wait for you.", "var(--ink-soft)");
+    }
+    loadStreaks();
+};
+
+// ── Recovery Tokens ───────────────────────────────────────────
+window.spendToken = async function(name, type) {
+    const DESCS = {
+        restore:      "Restore yesterday's missed log — your streak will be protected.",
+        skip:         "Skip today without breaking your streak.",
+        bonus_xp:     "Activate +50% XP for your next log.",
+        freeze:       "Freeze your streak for 3 days (vacation mode).",
+        boss_reduce:  "Reduce next Weekly Boss difficulty. (costs 2 tokens)",
+        quest_recover:"Recover your most recently failed quest. (costs 2 tokens)",
+    };
+    const COSTS = { restore: 1, skip: 1, bonus_xp: 1, reroll: 1, freeze: 2, boss_reduce: 2, quest_recover: 2 };
+    const tokens = currentHabits[name]?.recovery_tokens?.available || 0;
+    const cost = COSTS[type] || 1;
+    if (tokens < cost) { _toast(`Need ${cost} token(s), you have ${tokens}.`, "#ef5350"); return; }
+    if (!confirm(DESCS[type] || `Use a ${type} token?`)) return;
+
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const date = yesterday.toISOString().slice(0, 10);
-    if (!confirm(`Restore '${name}' for ${date}? This uses 1 recovery token.`)) return;
-    const res = await fetch("/habits/recover", {
+
+    const res  = await fetch("/habits/recover", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, date }),
+        body: JSON.stringify({ name, date, token_type: type }),
     });
-    if (res.ok) {
-        showXPFlash(0, "Streak Restored!");
-        loadStreaks();
+    const data = await res.json();
+    if (!res.ok) { _toast(data.detail || "Token use failed.", "#ef5350"); return; }
+    _toast(data.effect?.message || `✓ ${type} token used.`, "#4caf50", 3000);
+    loadStreaks();
+};
+
+// ── Stats Modal ───────────────────────────────────────────────
+window.openStatsModal = async function(name) {
+    const modal = document.getElementById("habit-stats-modal");
+    const inner = document.getElementById("habit-stats-inner");
+    if (!modal || !inner) return;
+
+    modal.style.display = "flex";
+    inner.innerHTML = `<p style="padding:2rem 1rem;color:var(--ink-soft);font-style:italic">Loading stats…</p>`;
+
+    try {
+        const data = await (await fetch(`/habits/stats/${encodeURIComponent(name)}`)).json();
+        const stages     = data.evolution_stages || [];
+        const milestones = data.milestones || [];
+        const heatmap    = data.heatmap || [];
+        const h = currentHabits[name] || {};
+        const domColor = DOMAIN_COLORS[data.domain || "Personal Growth"] || "var(--accent)";
+
+        // Mini heatmap for modal
+        const heatCountMap = {};
+        heatmap.forEach(d => { heatCountMap[d.date] = d.count; });
+        const today = new Date();
+        let miniHeatCols = [];
+        for (let w = 25; w >= 0; w--) {
+            let col = [];
+            for (let d = 0; d < 7; d++) {
+                const dt = new Date(today);
+                dt.setDate(dt.getDate() - (w * 7 + d));
+                const key = dt.toISOString().slice(0, 10);
+                const cnt = heatCountMap[key] || 0;
+                const op  = cnt === 0 ? 0.06 : 1;
+                col.push(`<div style="width:9px;height:9px;border-radius:2px;background:rgba(217,138,160,${op})" title="${key}"></div>`);
+            }
+            miniHeatCols.push(`<div style="display:flex;flex-direction:column;gap:2px">${col.join("")}</div>`);
+        }
+
+        inner.innerHTML = `
+            <div class="hv2-modal-header">
+                <div>
+                    <div class="hv2-modal-title">${name}</div>
+                    <div class="hv2-tags" style="margin-top:.4rem;flex-wrap:wrap;display:flex;gap:.25rem">
+                        ${data.skill_node_name && data.skill_node_name !== "—" ? `<span class="hv2-tag hv2-tag--node">🔗 ${data.skill_node_name}</span>` : ""}
+                        <span class="hv2-tag" style="background:${domColor}18;color:${domColor};border:1px solid ${domColor}40;border-radius:999px;font-size:.68rem;font-weight:600;padding:.18rem .5rem">${data.domain || ""}</span>
+                        <span class="hv2-tag hv2-tag--mastery">${data.mastery_label || ""} · Level ${data.mastery_level || 1}</span>
+                    </div>
+                </div>
+                <button class="hv2-modal-close" onclick="document.getElementById('habit-stats-modal').style.display='none'">✕</button>
+            </div>
+
+            <div class="hv2-stat-grid">
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.current_streak}</div><div class="hv2-stat-key">Current Streak</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.best_streak}</div><div class="hv2-stat-key">Best Streak</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.total_logs}</div><div class="hv2-stat-key">Total Logs</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.success_rate}%</div><div class="hv2-stat-key">Success Rate</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.total_xp_earned || 0}</div><div class="hv2-stat-key">XP Earned</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">Stage ${data.evolution_stage}</div><div class="hv2-stat-key">Evolution</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.recovery_tokens?.used || 0}</div><div class="hv2-stat-key">Tokens Used</div></div>
+                <div class="hv2-stat-box"><div class="hv2-stat-val">${data.base_xp || 10}</div><div class="hv2-stat-key">XP / Log</div></div>
+            </div>
+
+            <!-- Mini heatmap -->
+            <div class="hv2-sub-label">Last 6 Months</div>
+            <div class="hv2-modal-heatmap">
+                <div class="hv2-modal-heatmap-grid" style="display:flex;gap:2px;overflow-x:auto">
+                    ${miniHeatCols.join("")}
+                </div>
+            </div>
+
+            ${stages.length ? `
+            <div class="hv2-sub-label">Evolution Path</div>
+            <div class="hv2-stages">
+                ${stages.map((s, i) => `
+                    <div class="hv2-stage-row ${i < data.evolution_stage - 1 ? 'hv2-stage--done' : i === data.evolution_stage - 1 ? 'hv2-stage--current' : ''}">
+                        <span class="hv2-stage-num">${s.stage}</span>
+                        <div class="hv2-stage-body">
+                            <div class="hv2-stage-title">${s.title}</div>
+                            <div class="hv2-stage-desc">${s.description || ""}</div>
+                        </div>
+                        <span class="hv2-stage-dur">${s.duration_minutes ? '⏱ ' + s.duration_minutes + 'm' : ''}</span>
+                    </div>`).join("")}
+            </div>` : ""}
+
+            ${milestones.length ? `
+            <div class="hv2-sub-label">Completion Milestones</div>
+            <div class="hv2-milestone-list">
+                ${milestones.map(m => `
+                    <div class="hv2-milestone ${m.reached ? 'hv2-milestone--done' : ''}">
+                        <span>${m.reached ? '✅' : '○'}</span>
+                        <span>${m.at} completions</span>
+                        ${!m.reached ? `<span class="hv2-ms-remaining">${m.remaining} to go</span>` : '<span class="hv2-ms-remaining" style="color:#2e7d32">Reached!</span>'}
+                    </div>`).join("")}
+            </div>` : ""}`;
+    } catch (err) {
+        inner.innerHTML = `<p style="padding:1rem;color:var(--ink-soft)">Could not load stats. ${err.message}</p>`;
     }
 };
 
-habitForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const name       = document.getElementById("habit-name").value.trim();
-    const category   = document.getElementById("habit-category").value;
-    const difficulty = document.getElementById("habit-difficulty").value;
-    const skill      = document.getElementById("habit-skill").value || null;
-    if (!name) return;
-    const data = await (await fetch("/habits", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, category, difficulty, linked_skill: skill }),
-    })).json();
-    if (data.new_achievements) showAchievementToast(data.new_achievements);
-    if (data.xp_earned)        showXPFlash(data.xp_earned, category);
-    if (data.evolution) {
-        const t = document.createElement("div");
-        t.className = "achievement-toast show";
-        t.innerHTML = `🌟 ${data.evolution.message}`;
-        document.body.appendChild(t);
-        setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 400); }, 4000);
+// ── Edit Habit Modal ──────────────────────────────────────────
+window.openEditHabitModal = function(name) {
+    const modal = document.getElementById("habit-edit-modal");
+    if (!modal) return;
+    document.getElementById("edit-habit-original-name").value = name;
+    document.getElementById("edit-habit-name").value = name;
+
+    const select = document.getElementById("edit-habit-skill-node");
+    if (select && allSkillNodes.length) {
+        const byTree = {};
+        allSkillNodes.forEach(n => {
+            if (!byTree[n.tree]) byTree[n.tree] = [];
+            byTree[n.tree].push(n);
+        });
+        select.innerHTML = `<option value="">— No Skill Node —</option>` +
+            Object.entries(byTree).map(([tree, nodes]) =>
+                `<optgroup label="${nodes[0]?.icon || ''} ${tree}">
+                    ${nodes.map(n => `<option value="${n.id}" data-tree="${tree}" data-domain="${n.domain}">${n.name}</option>`).join("")}
+                </optgroup>`
+            ).join("");
+        const h = currentHabits[name];
+        if (h && h.skill_node_id) select.value = h.skill_node_id;
+        const preview = document.getElementById("edit-habit-node-preview");
+        const updatePreview = () => {
+            const opt = select.options[select.selectedIndex];
+            if (preview) preview.textContent = opt?.dataset?.domain ? `→ ${opt.dataset.tree} · ${opt.dataset.domain}` : "";
+        };
+        select.onchange = updatePreview;
+        updatePreview();
     }
-    habitForm.reset();
-    loadStreaks();
-    loadXPHUD();
-});
+
+    modal.style.display = "flex";
+    setTimeout(() => document.getElementById("edit-habit-name").focus(), 50);
+};
+
+window.saveHabitEdit = async function() {
+    const originalName = document.getElementById("edit-habit-original-name").value;
+    const newName = document.getElementById("edit-habit-name").value.trim();
+    const nodeSelect = document.getElementById("edit-habit-skill-node");
+    const nodeId = nodeSelect?.value || "";
+    const opt = nodeSelect?.options[nodeSelect.selectedIndex];
+    const tree = opt?.dataset?.tree || "";
+
+    if (!newName) { _toast("Name cannot be empty.", "#ef5350"); return; }
+
+    const btn = document.getElementById("edit-habit-save-btn");
+    btn.textContent = "Saving…";
+    btn.disabled = true;
+
+    try {
+        const res = await fetch(`/habits/${encodeURIComponent(originalName)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ new_name: newName, skill_node_id: nodeId, skill_tree: tree }),
+        });
+        const data = await res.json();
+        if (!res.ok) { _toast(data.detail || "Update failed.", "#ef5350"); return; }
+        _toast(`✓ Habit updated`, "#4caf50", 2500);
+        document.getElementById("habit-edit-modal").style.display = "none";
+        loadStreaks();
+    } catch (e) {
+        _toast("Update failed.", "#ef5350");
+    } finally {
+        btn.textContent = "Save Changes";
+        btn.disabled = false;
+    }
+};
+
+window.deleteHabit = async function(name) {
+    if (!confirm(`Delete "${name}" and all its history?\n\nThis cannot be undone.`)) return;
+    try {
+        const res = await fetch(`/habits/${encodeURIComponent(name)}`, { method: "DELETE" });
+        if (!res.ok) { _toast("Delete failed.", "#ef5350"); return; }
+        _toast(`🗑️ "${name}" deleted`, "var(--ink)", 2500);
+        loadStreaks();
+        loadXPHUD();
+    } catch (e) {
+        _toast("Delete failed.", "#ef5350");
+    }
+};
+
+// ── AI Insights ───────────────────────────────────────────────
+async function _loadHabitAIInsight() {
+    const el   = document.getElementById("habit-ai-insight");
+    const card = document.getElementById("habit-ai-insight-card");
+    const sigs = document.getElementById("hv2-adaptation-signals");
+    if (!el || !card) return;
+
+    const entries = Object.keys(currentHabits);
+    if (entries.length < 1) { card.style.display = "none"; return; }
+    card.style.display = "";
+
+    try {
+        const data = await (await fetch("/habits/ai-insights")).json();
+        el.textContent = data.insight;
+
+        // Show adaptation signals
+        if (sigs && data.adaptation_signals?.length) {
+            sigs.innerHTML = data.adaptation_signals.map(sig => {
+                const isEvolve = sig.includes("thriving");
+                return `<span class="hv2-adapt-chip ${isEvolve ? 'hv2-adapt-chip--evolve' : 'hv2-adapt-chip--simplify'}">${sig}</span>`;
+            }).join("");
+        }
+    } catch (_) { card.style.display = "none"; }
+}
+
+// ── Utility ───────────────────────────────────────────────────
+function _esc(s) { return s.replace(/'/g, "\\'").replace(/"/g, "&quot;"); }
+
+function _toast(msg, color = "var(--ink)", duration = 2500) {
+    const t = document.createElement("div");
+    t.className = "achievement-toast";
+    t.style.background = color;
+    t.style.fontSize = ".88rem";
+    t.innerHTML = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.classList.add("show"), 50);
+    setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 400); }, duration);
+}
+
+// Expose
+window._loadHabitAIInsight = _loadHabitAIInsight;
 
 // ---------------------------------------------------------------------------
 // Chat
@@ -856,87 +1370,10 @@ document.getElementById("generate-review").addEventListener("click", async () =>
 });
 
 // ---------------------------------------------------------------------------
-// Goals & Quests
+// Goals V2 — Goal → Milestone → Quest → Task
 // ---------------------------------------------------------------------------
-const goalsDiv = document.getElementById("goals");
+
 const goalForm = document.getElementById("goal-form");
-
-async function loadGoals() {
-    const goals = await (await fetch("/goals")).json();
-    goalsDiv.innerHTML = goals.map(g => {
-        // Task list with toggle checkboxes
-        const taskList = g.tasks && g.tasks.length
-            ? `<div class="task-list">
-                ${g.tasks.map(t => `
-                    <label class="task-row ${t.is_completed ? 'task-done' : ''}">
-                        <input type="checkbox" class="task-check"
-                            onchange="toggleTask(${t.id}, this, ${g.id})"
-                            ${t.is_completed ? 'checked' : ''}>
-                        <span class="task-title">${t.title}</span>
-                    </label>`).join("")}
-               </div>`
-            : `<p class="task-empty">No tasks yet — add one below.</p>`;
-
-        // Inline add-task form
-        const addTaskForm = `
-            <div class="add-task-row">
-                <input type="text" class="add-task-input" id="task-input-${g.id}"
-                    placeholder="Add a task…" onkeydown="if(event.key==='Enter'){addTask(${g.id});event.preventDefault();}">
-                <button class="add-task-btn" onclick="addTask(${g.id})">+ Add</button>
-            </div>`;
-
-        // Milestone list
-        const msSection = g.milestones && g.milestones.length
-            ? `<div class="ms-section">
-                <div class="ms-label">🏁 Milestones (${g.milestones_done}/${g.milestones_total})</div>
-                ${g.milestones.map(m => `
-                    <label class="ms-item ${m.is_completed ? 'ms-done' : ''}">
-                        <input type="checkbox" onchange="toggleMilestone(${m.id}, this)" ${m.is_completed ? 'checked' : ''}>
-                        <span>${m.title}${m.target_date ? ` <em class="ms-date">by ${m.target_date}</em>` : ""}</span>
-                    </label>`).join("")}
-               </div>` : "";
-
-        // Inline add-milestone form
-        const addMsForm = `
-            <div class="add-ms-row" id="ms-form-${g.id}" style="display:none">
-                <input type="text" id="ms-title-${g.id}" placeholder="Milestone title…">
-                <input type="date" id="ms-date-${g.id}">
-                <button onclick="addMilestone(${g.id})">Add</button>
-                <button class="btn-ghost" onclick="document.getElementById('ms-form-${g.id}').style.display='none'">Cancel</button>
-            </div>`;
-
-        return `<div class="goal-card" id="goal-${g.id}">
-            <div class="goal-header">
-                <div>
-                    <strong class="goal-title">${g.title}</strong>
-                    <span class="goal-category">${g.category}</span>
-                </div>
-                <span class="goal-level-badge">Lv ${g.level} · ${g.xp} XP</span>
-            </div>
-            <div class="goal-stats">
-                <span>${g.completed_tasks}/${g.total_tasks} tasks complete</span>
-                <span class="goal-pct">${g.progress}%</span>
-            </div>
-            <div class="progress-bar"><div class="progress-fill" style="width:${g.progress}%"></div></div>
-
-            <div class="goal-section-label">Tasks</div>
-            ${taskList}
-            ${addTaskForm}
-
-            ${msSection}
-            ${addMsForm}
-
-            <div class="goal-actions">
-                <button class="btn-ghost goal-ms-btn" onclick="
-                    const f=document.getElementById('ms-form-${g.id}');
-                    f.style.display=f.style.display==='none'?'flex':'none'">
-                    + Milestone
-                </button>
-                <button class="btn-ghost goal-delete-btn" onclick="deleteGoal(${g.id})">Delete goal</button>
-            </div>
-        </div>`;
-    }).join("") || "<p class='empty-state'>No goals yet — add one above to get started.</p>";
-}
 
 goalForm.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -951,20 +1388,255 @@ goalForm.addEventListener("submit", async (e) => {
     loadGoals();
 });
 
-// Milestone toggle
-window.toggleMilestone = async function(id, cb) {
-    cb.disabled = true;
-    const data = await (await fetch(`/milestones/${id}`, { method: "PUT" })).json();
-    if (data.is_completed) showXPFlash(75, "Milestone");
-    loadGoals();
-    loadXPHUD();
+// ============================================================
+// QUESTS PAGE V2 — Goal → Milestone → Quest → Task
+// Progress rolls up automatically from the bottom up
+// ============================================================
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let goalsData = [];
+
+// ---------------------------------------------------------------------------
+// Load & render the full goals tree
+// ---------------------------------------------------------------------------
+async function loadGoals() {
+    const goalsDiv = document.getElementById("goals");
+    if (!goalsDiv) return;
+    goalsDiv.innerHTML = "<p class='empty-state' style='padding:1rem 0'>Loading quests…</p>";
+    try {
+        goalsData = await (await fetch("/goals")).json();
+        renderGoals(goalsData);
+    } catch (_) {
+        goalsDiv.innerHTML = "<p class='empty-state'>Could not load goals.</p>";
+    }
+}
+
+function renderGoals(goals) {
+    const goalsDiv = document.getElementById("goals");
+    if (!goals.length) {
+        goalsDiv.innerHTML = "<p class='empty-state'>No goals yet — add one above to begin your journey.</p>";
+        return;
+    }
+    goalsDiv.innerHTML = goals.map(g => buildGoalCard(g)).join("");
+}
+
+// ---------------------------------------------------------------------------
+// Goal card builder
+// ---------------------------------------------------------------------------
+function buildGoalCard(g) {
+    const basis    = g.progress_basis || "tasks";
+    const basisLabel = { milestones: "milestones", quests: "quests", tasks: "tasks" }[basis];
+    const pctColor = g.progress >= 80 ? "var(--pa-good)" : g.progress >= 40 ? "var(--pa-ok)" : "var(--accent)";
+
+    // Body: milestones view, or bare quests, or legacy tasks
+    let bodyHtml = "";
+
+    if (g.milestones && g.milestones.length > 0) {
+        bodyHtml = g.milestones.map(m => buildMilestoneSection(m, g.id)).join("");
+        bodyHtml += buildAddMilestoneRow(g.id);
+    } else if (g.quests && g.quests.length > 0) {
+        bodyHtml = g.quests.map(q => buildQuestSection(q, g.id, null)).join("");
+        bodyHtml += buildAddQuestRow(g.id, null);
+        bodyHtml += buildAddMilestoneRow(g.id);
+    } else if (g.legacy_tasks && g.legacy_tasks.length > 0) {
+        // Legacy direct tasks
+        bodyHtml = buildLegacyTaskList(g.legacy_tasks, g.id);
+        bodyHtml += buildAddQuestRow(g.id, null);
+        bodyHtml += buildAddMilestoneRow(g.id);
+    } else {
+        // Empty goal — show add options
+        bodyHtml = `<p class="task-empty">No milestones or quests yet.</p>`;
+        bodyHtml += buildAddQuestRow(g.id, null);
+        bodyHtml += buildAddMilestoneRow(g.id);
+    }
+
+    return `<div class="goal-card" id="goal-${g.id}">
+        <div class="goal-header">
+            <div>
+                <strong class="goal-title">${g.title}</strong>
+                <span class="goal-category">${g.category}</span>
+            </div>
+            <div class="goal-header-right">
+                <span class="goal-level-badge">Lv ${g.level} · ${g.xp} XP</span>
+                <span class="goal-progress-pct" style="color:${pctColor}">${g.progress}%</span>
+            </div>
+        </div>
+        <div class="goal-progress-row">
+            <div class="progress-bar">
+                <div class="progress-fill" style="width:${g.progress}%;background:${pctColor}"></div>
+            </div>
+            <span class="goal-basis-label">${g.completed_units || 0}/${g.total_units || 0} ${basisLabel}</span>
+        </div>
+        <div class="goal-body" id="goal-body-${g.id}">
+            ${bodyHtml}
+        </div>
+        <div class="goal-actions">
+            <button class="btn-ghost goal-delete-btn" onclick="deleteGoal(${g.id})">Delete goal</button>
+        </div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Milestone section
+// ---------------------------------------------------------------------------
+function buildMilestoneSection(m, goalId) {
+    const pct = m.progress || 0;
+    const pctColor = pct >= 80 ? "var(--pa-good)" : pct >= 40 ? "var(--pa-ok)" : "var(--accent)";
+    const questsHtml = (m.quests || []).map(q => buildQuestSection(q, goalId, m.id)).join("");
+    const addQuestHtml = buildAddQuestRow(goalId, m.id);
+
+    return `<div class="ms-block" id="ms-block-${m.id}">
+        <div class="ms-block-header">
+            <div class="ms-block-icon ${m.is_completed ? 'ms-block-icon--done' : ''}">
+                ${m.is_completed ? '🏁' : '◎'}
+            </div>
+            <div class="ms-block-title">${m.title}</div>
+            ${m.target_date ? `<span class="ms-date">by ${m.target_date}</span>` : ""}
+            <div class="ms-block-progress">
+                <div class="ms-mini-bar"><div class="ms-mini-fill" style="width:${pct}%;background:${pctColor}"></div></div>
+                <span class="ms-pct">${pct}%</span>
+            </div>
+            <button class="ms-delete-btn" onclick="deleteMilestone(${m.id})" title="Delete milestone">✕</button>
+        </div>
+        <div class="ms-block-body">
+            ${questsHtml}
+            ${addQuestHtml}
+        </div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Quest section
+// ---------------------------------------------------------------------------
+function buildQuestSection(q, goalId, milestoneId) {
+    const pct = q.progress || 0;
+    const pctColor = pct >= 80 ? "var(--pa-good)" : pct >= 40 ? "var(--pa-ok)" : "var(--accent)";
+    const DIFF_COLORS = { Easy: "#4caf50", Normal: "#f7a94b", Hard: "#ff7043", Elite: "#9c27b0" };
+    const diffColor = DIFF_COLORS[q.difficulty] || "#f7a94b";
+
+    const tasksHtml = (q.tasks || []).map(t => buildTaskRow(t, q.id)).join("");
+    const addTaskHtml = `
+        <div class="add-task-row" id="add-task-row-${q.id}">
+            <input type="text" class="add-task-input" id="task-input-${q.id}"
+                placeholder="Add a task…"
+                onkeydown="if(event.key==='Enter'){addQuestTask(${q.id});event.preventDefault();}">
+            <button class="add-task-btn" onclick="addQuestTask(${q.id})">+ Add</button>
+        </div>`;
+
+    return `<div class="quest-block ${q.is_completed ? 'quest-block--done' : ''}" id="quest-block-${q.id}">
+        <div class="quest-block-header">
+            <span class="quest-dot" style="background:${q.is_completed ? '#4caf50' : diffColor}"></span>
+            <span class="quest-title">${q.title}</span>
+            ${q.description ? `<span class="quest-desc">${q.description}</span>` : ""}
+            <div class="quest-badges">
+                <span class="quest-badge" style="background:${diffColor}20;color:${diffColor}">${q.difficulty}</span>
+                <span class="quest-badge">${q.completed_tasks}/${q.total_tasks} tasks</span>
+            </div>
+            <div class="quest-mini-bar-wrap">
+                <div class="quest-mini-bar"><div class="quest-mini-fill" style="width:${pct}%;background:${pctColor}"></div></div>
+            </div>
+            <button class="quest-delete-btn" onclick="deleteQuest(${q.id})" title="Delete quest">✕</button>
+        </div>
+        <div class="quest-task-list">
+            ${tasksHtml}
+            ${addTaskHtml}
+        </div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Task row
+// ---------------------------------------------------------------------------
+function buildTaskRow(t, questId) {
+    return `<label class="task-row ${t.is_completed ? 'task-done' : ''}" id="task-row-${t.id}">
+        <input type="checkbox" class="task-check"
+            onchange="toggleTask(${t.id}, this)"
+            ${t.is_completed ? 'checked' : ''}>
+        <span class="task-title">${t.title}</span>
+        <button class="task-delete-btn" onclick="deleteTask(${t.id}, event)">✕</button>
+    </label>`;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy task list (for old goals that have no quests/milestones)
+// ---------------------------------------------------------------------------
+function buildLegacyTaskList(tasks, goalId) {
+    const rows = tasks.map(t => buildTaskRow(t, null)).join("");
+    return `<div class="legacy-tasks-block">
+        <div class="legacy-label">⚠ Legacy tasks (no quest assigned)</div>
+        ${rows}
+        <div class="add-task-row">
+            <input type="text" class="add-task-input" id="task-input-legacy-${goalId}"
+                placeholder="Add a task directly…"
+                onkeydown="if(event.key==='Enter'){addLegacyTask(${goalId});event.preventDefault();}">
+            <button class="add-task-btn" onclick="addLegacyTask(${goalId})">+ Add</button>
+        </div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Add rows (inline forms)
+// ---------------------------------------------------------------------------
+function buildAddMilestoneRow(goalId) {
+    return `<div class="add-milestone-row" id="add-ms-row-${goalId}">
+        <button class="btn-ghost btn-add-tier" onclick="toggleAddMilestone(${goalId})">+ Add Milestone</button>
+        <div class="add-tier-form hidden" id="add-ms-form-${goalId}">
+            <input type="text" id="ms-title-${goalId}" placeholder="Milestone name…"
+                onkeydown="if(event.key==='Enter'){addMilestone(${goalId});event.preventDefault();}">
+            <input type="date" id="ms-date-${goalId}">
+            <button onclick="addMilestone(${goalId})">Add</button>
+            <button class="btn-ghost" onclick="document.getElementById('add-ms-form-${goalId}').classList.add('hidden')">Cancel</button>
+        </div>
+    </div>`;
+}
+
+function buildAddQuestRow(goalId, milestoneId) {
+    const key = milestoneId ? `ms-${milestoneId}` : `goal-${goalId}`;
+    return `<div class="add-quest-row">
+        <button class="btn-ghost btn-add-tier" onclick="toggleAddQuest('${key}', ${goalId}, ${milestoneId || 'null'})">
+            ⚔️ Add Quest
+        </button>
+        <div class="add-tier-form hidden" id="add-quest-form-${key}">
+            <input type="text" id="quest-title-${key}" placeholder="Quest title…"
+                onkeydown="if(event.key==='Enter'){addQuest(${goalId}, ${milestoneId || 'null'}, '${key}');event.preventDefault();}">
+            <select id="quest-diff-${key}" class="hlf-select" style="max-width:130px">
+                <option value="Easy">🟢 Easy</option>
+                <option value="Normal" selected>🟡 Normal</option>
+                <option value="Hard">🟠 Hard</option>
+                <option value="Elite">🔴 Elite</option>
+            </select>
+            <button onclick="addQuest(${goalId}, ${milestoneId || 'null'}, '${key}')">Add</button>
+            <button class="btn-ghost" onclick="document.getElementById('add-quest-form-${key}').classList.add('hidden')">Cancel</button>
+        </div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Toggle helpers for inline forms
+// ---------------------------------------------------------------------------
+window.toggleAddMilestone = function(goalId) {
+    const form = document.getElementById(`add-ms-form-${goalId}`);
+    form.classList.toggle("hidden");
+    if (!form.classList.contains("hidden")) document.getElementById(`ms-title-${goalId}`)?.focus();
 };
 
-// Inline add milestone
+window.toggleAddQuest = function(key, goalId, milestoneId) {
+    const form = document.getElementById(`add-quest-form-${key}`);
+    form.classList.toggle("hidden");
+    if (!form.classList.contains("hidden")) document.getElementById(`quest-title-${key}`)?.focus();
+};
+
+// ---------------------------------------------------------------------------
+// CRUD actions
+// ---------------------------------------------------------------------------
+
 window.addMilestone = async function(goalId) {
-    const title  = document.getElementById(`ms-title-${goalId}`).value.trim();
+    const titleEl = document.getElementById(`ms-title-${goalId}`);
+    const title   = titleEl?.value.trim();
     if (!title) return;
-    const target = document.getElementById(`ms-date-${goalId}`).value || null;
+    const target = document.getElementById(`ms-date-${goalId}`)?.value || null;
     await fetch(`/goals/${goalId}/milestones`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title, target_date: target }),
@@ -972,23 +1644,44 @@ window.addMilestone = async function(goalId) {
     loadGoals();
 };
 
-// Toggle task completion
-window.toggleTask = async function(taskId, cb, goalId) {
-    cb.disabled = true;
-    const data = await (await fetch(`/tasks/${taskId}`, { method: "PUT" })).json();
-    if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Goal");
-    if (data.new_achievements) showAchievementToast(data.new_achievements);
-    if (data.skill_completion && data.skill_completion.skill_completed) {
-        showSkillCompleteModal(data.skill_completion);
-    }
+window.deleteMilestone = async function(msId) {
+    if (!confirm("Delete this milestone and all its quests?")) return;
+    await fetch(`/milestones/${msId}`, { method: "DELETE" });
     loadGoals();
-    loadXPHUD();
 };
 
-// Add a new task to a goal
-window.addTask = async function(goalId) {
-    const input = document.getElementById(`task-input-${goalId}`);
-    const title = input.value.trim();
+window.addQuest = async function(goalId, milestoneId, key) {
+    const titleEl = document.getElementById(`quest-title-${key}`);
+    const title   = titleEl?.value.trim();
+    if (!title) return;
+    const diff = document.getElementById(`quest-diff-${key}`)?.value || "Normal";
+    await fetch(`/goals/${goalId}/quests`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, difficulty: diff, milestone_id: milestoneId }),
+    });
+    loadGoals();
+};
+
+window.deleteQuest = async function(questId) {
+    if (!confirm("Delete this quest and all its tasks?")) return;
+    await fetch(`/quests/${questId}`, { method: "DELETE" });
+    loadGoals();
+};
+
+window.addQuestTask = async function(questId) {
+    const input = document.getElementById(`task-input-${questId}`);
+    const title = input?.value.trim();
+    if (!title) return;
+    await fetch(`/quests/${questId}/tasks`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+    });
+    loadGoals();
+};
+
+window.addLegacyTask = async function(goalId) {
+    const input = document.getElementById(`task-input-legacy-${goalId}`);
+    const title = input?.value.trim();
     if (!title) return;
     await fetch(`/goals/${goalId}/tasks`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -997,34 +1690,41 @@ window.addTask = async function(goalId) {
     loadGoals();
 };
 
-// Delete a goal
+window.addTask = async function(goalId) {
+    window.addLegacyTask(goalId);
+};
+
+window.toggleTask = async function(taskId, cb) {
+    cb.disabled = true;
+    try {
+        const data = await (await fetch(`/tasks/${taskId}`, { method: "PUT" })).json();
+        if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Goal");
+        if (data.new_achievements) showAchievementToast(data.new_achievements);
+        if (data.skill_completion?.skill_completed) showSkillCompleteModal(data.skill_completion);
+        // Reload to reflect rollup
+        loadGoals();
+        loadXPHUD();
+    } catch (_) {
+        cb.disabled = false;
+    }
+};
+
+window.deleteTask = async function(taskId, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    await fetch(`/tasks/${taskId}`, { method: "DELETE" });
+    loadGoals();
+};
+
 window.deleteGoal = async function(goalId) {
-    if (!confirm("Delete this goal and all its tasks?")) return;
+    if (!confirm("Delete this goal and everything inside it?")) return;
     await fetch(`/goals/${goalId}`, { method: "DELETE" });
     loadGoals();
 };
 
-// Daily quest
-async function generateDailyQuest() {
-    const body   = document.getElementById("dq-body");
-    const footer = document.getElementById("dq-footer");
-    body.textContent = "Generating your quest…";
-    footer.textContent = "";
-    try {
-        const data = await (await fetch("/daily-quest", { method: "POST" })).json();
-        if (!data.task) {
-            body.textContent = data.message || "All quests complete!";
-            return;
-        }
-        body.innerHTML = `<strong>${data.task}</strong><br>
-            <span style="font-size:.88rem;opacity:.8">${data.why}</span>`;
-        footer.innerHTML = `<span class="dq-chip">${data.category}</span>
-            <span class="dq-chip">${data.difficulty}</span>
-            <span class="dq-chip">⏱ ${data.time}m</span>
-            <span class="dq-chip">+${data.xp} XP</span>`;
-    } catch (_) { body.textContent = "Could not generate quest."; }
-}
-window.generateDailyQuest = generateDailyQuest;
+window.toggleMilestone = async function(id, cb) {
+    // Not used in V2 (milestones complete automatically) — kept for compat
+};
 
 // ---------------------------------------------------------------------------
 // Skills — Skill-Driven Quest System

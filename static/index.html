@@ -248,29 +248,40 @@
             <form id="habit-form" class="habit-log-form">
                 <div class="hlf-row">
                     <input type="text" id="habit-name" placeholder="Habit name…" required class="hlf-name">
-                    <select id="habit-category" class="hlf-select">
-                        <option value="Physical">🏃 Physical</option>
-                        <option value="Learning">📚 Learning</option>
-                        <option value="Mind">🧘 Mind</option>
-                        <option value="Social">👥 Social</option>
-                        <option value="Productivity" selected>⚡ Productivity</option>
-                        <option value="Creativity">🎨 Creativity</option>
-                    </select>
-                    <select id="habit-difficulty" class="hlf-select">
-                        <option value="Easy">🟢 Easy (+5 XP)</option>
-                        <option value="Normal" selected>🟡 Normal (+10 XP)</option>
-                        <option value="Hard">🟠 Hard (+20 XP)</option>
-                        <option value="Elite">🔴 Elite (+30 XP)</option>
-                    </select>
-                    <select id="habit-skill" class="hlf-select">
-                        <option value="">No skill link</option>
-                        <option value="Study">📚 Study</option>
-                        <option value="Fitness">💪 Fitness</option>
-                        <option value="Finance">💰 Finance</option>
-                        <option value="Creativity">🎨 Creativity</option>
-                        <option value="Personal Growth">🌱 Personal Growth</option>
-                    </select>
                     <button type="submit" class="hlf-btn">Log Habit</button>
+                </div>
+                <div class="hlf-options-row">
+                    <label class="hlf-field">
+                        <span class="hlf-label">Category</span>
+                        <select id="habit-category" class="hlf-select">
+                            <option value="Physical">🏃 Physical</option>
+                            <option value="Learning">📚 Learning</option>
+                            <option value="Mind">🧘 Mind</option>
+                            <option value="Social">👥 Social</option>
+                            <option value="Productivity" selected>⚡ Productivity</option>
+                            <option value="Creativity">🎨 Creativity</option>
+                        </select>
+                    </label>
+                    <label class="hlf-field">
+                        <span class="hlf-label">Difficulty</span>
+                        <select id="habit-difficulty" class="hlf-select">
+                            <option value="Easy">🟢 Easy (+5 XP)</option>
+                            <option value="Normal" selected>🟡 Normal (+10 XP)</option>
+                            <option value="Hard">🟠 Hard (+20 XP)</option>
+                            <option value="Elite">🔴 Elite (+30 XP)</option>
+                        </select>
+                    </label>
+                    <label class="hlf-field">
+                        <span class="hlf-label">Link to Skill Tree</span>
+                        <select id="habit-skill" class="hlf-select">
+                            <option value="">— None —</option>
+                            <option value="Study">📚 Study</option>
+                            <option value="Fitness">💪 Fitness</option>
+                            <option value="Finance">💰 Finance</option>
+                            <option value="Creativity">🎨 Creativity</option>
+                            <option value="Personal Growth">🌱 Personal Growth</option>
+                        </select>
+                    </label>
                 </div>
             </form>
 
@@ -317,6 +328,34 @@
     </aside>
 
 </div>
+<!-- Habit Edit Modal -->
+<div id="habit-edit-modal" class="hv2-modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+    <div class="hv2-modal-box" style="max-width:460px">
+        <div class="hv2-modal-header">
+            <div class="hv2-modal-title">Edit Habit</div>
+            <button class="hv2-modal-close" onclick="document.getElementById('habit-edit-modal').style.display='none'">✕</button>
+        </div>
+        <input type="hidden" id="edit-habit-original-name">
+        <div class="hv2-form-field" style="margin-bottom:1rem">
+            <label class="hv2-form-label">Habit Name</label>
+            <input type="text" id="edit-habit-name" style="width:100%;margin:0" placeholder="Habit name…"
+                onkeydown="if(event.key==='Enter')saveHabitEdit()">
+        </div>
+        <div class="hv2-form-field" style="margin-bottom:1.25rem">
+            <label class="hv2-form-label">Link to Skill Node</label>
+            <select id="edit-habit-skill-node" class="hv2-select" style="min-width:unset;width:100%"></select>
+            <div id="edit-habit-node-preview" class="hv2-node-preview" style="margin-top:.3rem"></div>
+        </div>
+        <div style="display:flex;gap:.6rem;justify-content:flex-end">
+            <button class="btn-ghost" onclick="document.getElementById('habit-edit-modal').style.display='none'">Cancel</button>
+            <button id="edit-habit-save-btn" onclick="saveHabitEdit()"
+                style="background:var(--accent);color:#fff;padding:.6rem 1.25rem;border-radius:10px;font-size:.9rem;font-weight:600;border:none;cursor:pointer;box-shadow:0 2px 8px var(--shadow)">
+                Save Changes
+            </button>
+        </div>
+    </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>
