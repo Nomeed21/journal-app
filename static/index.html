@@ -463,6 +463,18 @@
             <input type="text" id="edit-habit-name" style="width:100%;margin:0" placeholder="Habit name…"
                 onkeydown="if(event.key==='Enter')saveHabitEdit()">
         </div>
+        <div class="hv2-form-field" style="margin-bottom:1rem">
+            <label class="hv2-form-label">Domain / Category</label>
+            <select id="edit-habit-domain" class="hv2-select" style="min-width:unset;width:100%">
+                <option value="Computer Science">💻 Computer Science</option>
+                <option value="Health">💪 Health</option>
+                <option value="Music">🎵 Music</option>
+                <option value="Relationships">❤️ Relationships</option>
+                <option value="Personal Growth">🌱 Personal Growth</option>
+                <option value="Finance">💰 Finance</option>
+                <option value="Creativity">🎨 Creativity</option>
+            </select>
+        </div>
         <div class="hv2-form-field" style="margin-bottom:1.25rem">
             <label class="hv2-form-label">Link to Skill Node</label>
             <select id="edit-habit-skill-node" class="hv2-select" style="min-width:unset;width:100%"></select>

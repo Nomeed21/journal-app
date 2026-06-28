@@ -1391,6 +1391,7 @@ class HabitUpdate(BaseModel):
     new_name: str = ""
     skill_node_id: str = ""
     skill_tree: str = ""
+    domain: str = ""
 
 @app.delete("/habits/{habit_name}")
 def delete_habit(habit_name: str):
@@ -1432,13 +1433,19 @@ def update_habit(habit_name: str, req: HabitUpdate):
         except Exception:
             pass
 
-    # Update or create profile with new name / skill node
+    # Update or create profile with new name / skill node / domain
     node_name = _node_name(req.skill_tree, req.skill_node_id) if req.skill_node_id else ""
-    domain    = _domain_for_skill_tree(req.skill_tree) if req.skill_tree else ""
+    # Domain priority: skill-tree-derived > explicitly passed > keep existing
+    domain = (
+        _domain_for_skill_tree(req.skill_tree) if req.skill_tree
+        else req.domain.strip() if req.domain.strip()
+        else ""
+    )
 
     try:
-        existing_profile = supabase.table("habit_profiles").select("id").eq("name", habit_name).execute()
+        existing_profile = supabase.table("habit_profiles").select("id, domain").eq("name", habit_name).execute()
         update_data = {"name": new_name}
+
         if req.skill_node_id:
             update_data["skill_node_id"] = req.skill_node_id
             update_data["skill_tree"]    = req.skill_tree
@@ -1446,27 +1453,35 @@ def update_habit(habit_name: str, req: HabitUpdate):
             # Regenerate evolution stages if node changed
             stages = _generate_evolution_stages(new_name, node_name)
             update_data["evolution_stages"] = stages
+        elif domain:
+            # No skill node change, but domain was explicitly set
+            update_data["domain"] = domain
+
         if existing_profile.data:
             supabase.table("habit_profiles").update(update_data).eq("name", habit_name).execute()
         else:
             supabase.table("habit_profiles").insert({
                 **update_data,
-                "skill_node_id":  req.skill_node_id or "",
-                "skill_tree":     req.skill_tree or "",
-                "domain":         domain or "Personal Growth",
-                "evolution_stage": 1,
+                "skill_node_id":     req.skill_node_id or "",
+                "skill_tree":        req.skill_tree or "",
+                "domain":            domain or "Personal Growth",
+                "evolution_stage":   1,
                 "pending_evolution": False,
-                "base_xp": 10,
+                "base_xp":           10,
             }).execute()
     except Exception as e:
         raise HTTPException(500, str(e))
 
+    final_domain = domain or (
+        existing_profile.data[0].get("domain", "Personal Growth")
+        if existing_profile.data else "Personal Growth"
+    )
     return {
         "status":    "updated",
         "old_name":  habit_name,
         "new_name":  new_name,
         "node_name": node_name,
-        "domain":    domain,
+        "domain":    final_domain,
     }
 
 @app.get("/habits/ai-insights")

@@ -1173,6 +1173,14 @@ window.openEditHabitModal = function(name) {
     document.getElementById("edit-habit-original-name").value = name;
     document.getElementById("edit-habit-name").value = name;
 
+    // Pre-select current domain
+    const domainSelect = document.getElementById("edit-habit-domain");
+    if (domainSelect) {
+        const h = currentHabits[name];
+        const currentDomain = h?.domain || h?.category || "Personal Growth";
+        domainSelect.value = currentDomain;
+    }
+
     const select = document.getElementById("edit-habit-skill-node");
     if (select && allSkillNodes.length) {
         const byTree = {};
@@ -1208,6 +1216,7 @@ window.saveHabitEdit = async function() {
     const nodeId = nodeSelect?.value || "";
     const opt = nodeSelect?.options[nodeSelect.selectedIndex];
     const tree = opt?.dataset?.tree || "";
+    const domain = document.getElementById("edit-habit-domain")?.value || "Personal Growth";
 
     if (!newName) { _toast("Name cannot be empty.", "#ef5350"); return; }
 
@@ -1219,7 +1228,7 @@ window.saveHabitEdit = async function() {
         const res = await fetch(`/habits/${encodeURIComponent(originalName)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ new_name: newName, skill_node_id: nodeId, skill_tree: tree }),
+            body: JSON.stringify({ new_name: newName, skill_node_id: nodeId, skill_tree: tree, domain }),
         });
         const data = await res.json();
         if (!res.ok) { _toast(data.detail || "Update failed.", "#ef5350"); return; }
@@ -1483,13 +1492,15 @@ function buildQuestCard(q, sectionKey) {
     }
 
     // Task list HTML (only show tasks for non-completed quests)
+    const questTitleEsc    = _escAttr(q.title    || "");
+    const questCategoryEsc = _escAttr(q.category || "Personal Growth");
     let taskListHtml = "";
     if (tasks.length && !isCompleted) {
         taskListHtml = `<div class="qb-task-list">
             ${tasks.map(t => `
                 <label class="qb-task-row ${t.is_completed ? 'qb-task-done' : ''}" id="qbt-row-${t.id}">
                     <input type="checkbox" ${t.is_completed ? "checked" : ""}
-                        onchange="toggleBoardTask(${t.id}, ${q.id}, this)">
+                        onchange="toggleBoardTask(${t.id}, ${q.id}, this, '${questTitleEsc}', '${questCategoryEsc}')">
                     <span class="qb-task-title">${_escHtml(t.title)}</span>
                     <button class="qb-task-del" onclick="deleteBoardTask(${t.id}, ${q.id}, event)" title="Remove">✕</button>
                 </label>`).join("")}
@@ -1608,13 +1619,36 @@ window.deleteQuestBoard = async function(questId, e) {
     loadQuestBoard();
 };
 
-window.toggleBoardTask = async function(taskId, questId, cb) {
+window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCategory) {
     cb.disabled = true;
     try {
         const data = await (await fetch(`/board/tasks/${taskId}`, { method: "PUT" })).json();
         const row  = document.getElementById(`qbt-row-${taskId}`);
         if (row) row.classList.toggle("qb-task-done", data.is_completed);
         cb.disabled = false;
+
+        // Auto-log a habit whenever a task is checked off (not unchecked)
+        if (data.is_completed && questTitle) {
+            const habitName = questTitle.length > 50 ? questTitle.slice(0, 50) : questTitle;
+            fetch("/habits", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    name:       habitName,
+                    skill_tree: questCategory || "Personal Growth",
+                }),
+            }).then(r => r.json()).then(hd => {
+                if (hd.status !== "already_logged") {
+                    if (hd.xp_earned) showXPFlash(hd.xp_earned, hd.domain || questCategory || "Habits");
+                    if (hd.new_achievements) showAchievementToast(hd.new_achievements);
+                    if (hd.xp_modifiers?.length)
+                        _toast(hd.xp_modifiers.map(m => m.label).join(" · "), "var(--accent)", 2500);
+                    _toast(`🔥 Habit logged: "${habitName}"`, "#4caf50", 2500);
+                }
+                loadXPHUD();
+            }).catch(() => {});
+        }
+
         // If all tasks done, suggest completing quest
         if (data.all_tasks_done) {
             const card = document.getElementById(`qb-card-${questId}`);
