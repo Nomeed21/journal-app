@@ -120,6 +120,12 @@ def node_id_from_tags(tags: list):
             return t[len(SKILL_TAG_PREFIX):]
     return None
 
+def _node_id_from_goal_title(title: str) -> Optional[str]:
+    """Extract skill node id embedded in goal title as '[skill_node:xxx]'."""
+    import re
+    m = re.search(r'\[skill_node:([^\]]+)\]', title or "")
+    return m.group(1) if m else None
+
 # ---------------------------------------------------------------------------
 # Pure math helpers (no LLM — used for reliable trend numbers)
 # ---------------------------------------------------------------------------
@@ -2481,14 +2487,14 @@ def get_completed_node_ids(category: str) -> set[str]:
 def _get_active_skill_goals(category: str) -> dict:
     """Returns {node_id: {goal_id, completed_tasks, total_tasks, progress}} for active skill goals."""
     try:
-        goals = supabase.table("goals").select("id, tags").eq("category", category).execute()
+        goals = supabase.table("goals").select("id, title").eq("category", category).execute()
         tasks = supabase.table("goal_tasks").select("goal_id, is_completed").execute()
         tasks_by_goal = defaultdict(list)
         for t in tasks.data:
             tasks_by_goal[t["goal_id"]].append(t["is_completed"])
         result = {}
         for g in goals.data:
-            nid = node_id_from_tags(g.get("tags") or [])
+            nid = _node_id_from_goal_title(g.get("title", ""))
             if nid:
                 tlist = tasks_by_goal.get(g["id"], [])
                 done  = sum(1 for x in tlist if x)
@@ -2729,12 +2735,11 @@ def start_learning(node_id: str, category: str):
             "message": f"You already have an active learning goal for {node['name']}.",
         }
 
-    # Create the goal, tagged with the skill node id
+    # Create the goal — embed node_id in title so it can be recovered without a tags column
     goal_result = supabase.table("goals").insert({
-        "title":        f"Learn {node['name']}",
+        "title":        f"Learn {node['name']} [skill_node:{node_id}]",
         "category":     category,
         "is_completed":  False,
-        "tags":         [tag_for_node(node_id)],
         "created_at":   datetime.now(timezone.utc).isoformat(),
     }).execute()
     goal_id = goal_result.data[0]["id"]
@@ -2772,7 +2777,7 @@ def _auto_complete_skill_node_if_done(goal_id: int):
         goal = supabase.table("goals").select("*").eq("id", goal_id).single().execute()
         if not goal.data:
             return None
-        node_id = node_id_from_tags(goal.data.get("tags") or [])
+        node_id = _node_id_from_goal_title(goal.data.get("title", ""))
         if not node_id:
             return None  # Not a skill-linked goal
 
@@ -3230,12 +3235,20 @@ def build_habit_block() -> str:
     habit_dates: dict[str, list] = defaultdict(list)
     for row in result.data:
         habit_dates[row["name"]].append(row["completed_at"])
-    habit_meta = _fetch_habit_meta()
     if not habit_dates:
         return "No habits tracked yet."
+    # Resolve domain/category from habit_profiles (no _fetch_habit_meta needed)
+    try:
+        profiles_res = supabase.table("habit_profiles").select("name, domain, skill_tree").execute()
+        habit_meta = {
+            r["name"]: {"category": r.get("domain") or r.get("skill_tree") or "General"}
+            for r in profiles_res.data
+        }
+    except Exception:
+        habit_meta = {}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return "\n".join(
-        f"- {name} [{habit_meta.get(name,{}).get('category','?')}]: {calc_streak(sorted(set(dates), reverse=True), today)}-day streak, "
+        f"- {name} [{habit_meta.get(name, {}).get('category', '?')}]: {calc_streak(sorted(set(dates), reverse=True), today)}-day streak, "
         f"{len(dates)} total, last done {sorted(set(dates), reverse=True)[0] if dates else 'never'}"
         for name, dates in habit_dates.items()
     )
