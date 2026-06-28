@@ -3319,10 +3319,94 @@ SYSTEM_PROMPT_TEMPLATE = (
     "Sound like a thoughtful friend who pays attention — warm, direct, concise. "
     "Never use bullet points unless they ask. "
     "If risk alerts are present, weave the most urgent one into your response naturally.\n\n"
+    "QUEST CREATION: You can create quests directly from the chat. "
+    "If the user asks you to create, add, or make a quest (e.g. 'create a quest for X', "
+    "'add a quest to study Python', 'make me a quest about running'), "
+    "include it naturally in your response AND signal it clearly. "
+    "When you create a quest, end your response with this exact marker on its own line:\n"
+    "QUEST_CREATE: {\"title\": \"...\", \"description\": \"...\", \"difficulty\": \"Easy|Normal|Hard|Elite\", "
+    "\"category\": \"...\", \"section\": \"daily|weekly\", \"xp_reward\": 25-200, "
+    "\"tasks\": [\"task1\", \"task2\", \"task3\"]}\n"
+    "Use valid JSON. The tasks array should have 2-5 concrete steps. "
+    "Only include the QUEST_CREATE marker when actually creating a quest — not for every message.\n\n"
     "Safety: If the user mentions self-harm, suicide, or immediate danger, "
     "respond with care and urgency, and encourage them to contact local emergency services.\n\n"
     "{context}"
 )
+
+def _parse_quest_from_response(response_text: str) -> tuple[str, Optional[dict]]:
+    """
+    Splits LLM response into (clean_text, quest_data_or_None).
+    Looks for the QUEST_CREATE: marker and extracts the JSON payload.
+    """
+    marker = "QUEST_CREATE:"
+    if marker not in response_text:
+        return response_text, None
+
+    parts      = response_text.split(marker, 1)
+    clean_text = parts[0].strip()
+    raw_json   = parts[1].strip()
+
+    # The JSON might have trailing text — grab up to the first balanced brace
+    depth, end = 0, -1
+    for i, ch in enumerate(raw_json):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+
+    if end == -1:
+        return clean_text, None
+
+    try:
+        quest_data = _json.loads(raw_json[:end])
+    except _json.JSONDecodeError:
+        return clean_text, None
+
+    return clean_text, quest_data
+
+def _create_quest_from_chat(quest_data: dict) -> Optional[dict]:
+    """Insert a board quest from chat-extracted data, return the created row."""
+    title = (quest_data.get("title") or "").strip()
+    if not title:
+        return None
+
+    diff     = quest_data.get("difficulty", "Normal")
+    xp       = int(quest_data.get("xp_reward") or XP_BY_DIFFICULTY.get(diff, 50))
+    tasks    = quest_data.get("tasks") or []
+    section  = quest_data.get("section", "daily")
+    category = quest_data.get("category", "Personal Growth")
+
+    row = _insert_board_quest({
+        "title":           title,
+        "description":     quest_data.get("description", ""),
+        "difficulty":      diff,
+        "section":         section,
+        "source_type":     "manual",
+        "source_id":       f"chat:{datetime.now(timezone.utc).isoformat()}",
+        "category":        category,
+        "xp_reward":       xp,
+        "is_completed":    False,
+        "suggested_tasks": _json.dumps(tasks),
+        "created_at":      datetime.now(timezone.utc).isoformat(),
+    })
+
+    if row and tasks:
+        for task_title in tasks[:10]:
+            try:
+                supabase.table("board_quest_tasks").insert({
+                    "quest_id":     row["id"],
+                    "title":        task_title,
+                    "is_completed": False,
+                    "created_at":   datetime.now(timezone.utc).isoformat(),
+                }).execute()
+            except Exception:
+                pass
+
+    return row
 
 @app.post("/chat")
 def chat(msg: ChatMessage):
@@ -3342,7 +3426,19 @@ def chat(msg: ChatMessage):
         model="llama-3.3-70b-versatile",
         messages=messages, temperature=0.8, max_tokens=1024,
     )
-    return {"response": response.choices[0].message.content}
+    raw_response = response.choices[0].message.content
+
+    # Parse out any quest creation marker
+    clean_response, quest_data = _parse_quest_from_response(raw_response)
+
+    created_quest = None
+    if quest_data:
+        created_quest = _create_quest_from_chat(quest_data)
+
+    return {
+        "response":      clean_response,
+        "quest_created": created_quest,
+    }
 
 # ---------------------------------------------------------------------------
 # Insights

@@ -1310,16 +1310,56 @@ chatForm.addEventListener("submit", async (e) => {
     const message = input.value.trim();
     if (!message) return;
     input.value = "";
+
     chatMessages.innerHTML += `<div class="chat-msg user">${message}</div>`;
     chatMessages.scrollTop  = chatMessages.scrollHeight;
+
+    // Thinking indicator
+    const thinkingId = `thinking-${Date.now()}`;
+    chatMessages.innerHTML += `<div class="chat-msg assistant chat-thinking" id="${thinkingId}">✦ thinking…</div>`;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
     const data = await (await fetch("/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, history: conversationHistory }),
     })).json();
+
+    // Remove thinking indicator
+    document.getElementById(thinkingId)?.remove();
+
     conversationHistory.push({ role: "user",      content: message });
     conversationHistory.push({ role: "assistant", content: data.response });
+
+    // Main response bubble
     chatMessages.innerHTML += `<div class="chat-msg assistant">${data.response}</div>`;
-    chatMessages.scrollTop  = chatMessages.scrollHeight;
+
+    // Quest card (if a quest was created)
+    if (data.quest_created) {
+        const q = data.quest_created;
+        const diff = q.difficulty || "Normal";
+        const diffColors = { Easy: "#4caf50", Normal: "#2196f3", Hard: "#f7a94b", Elite: "#e91e63" };
+        const diffColor  = diffColors[diff] || "#2196f3";
+        chatMessages.innerHTML += `
+            <div class="chat-quest-card" id="cqc-${q.id}">
+                <div class="cqc-label">⚔️ Quest Added to Board</div>
+                <div class="cqc-title">${q.title}</div>
+                ${q.description ? `<div class="cqc-desc">${q.description}</div>` : ""}
+                <div class="cqc-chips">
+                    <span class="cqc-chip" style="color:${diffColor};border-color:${diffColor}40;background:${diffColor}12">${diff}</span>
+                    <span class="cqc-chip">${q.category || "General"}</span>
+                    <span class="cqc-chip">+${q.xp_reward || 50} XP</span>
+                    <span class="cqc-chip">${q.section || "daily"}</span>
+                </div>
+                <div class="cqc-actions">
+                    <button class="cqc-view-btn" onclick="showPage('quests');loadQuestBoard()">View Quest Board</button>
+                    <button class="cqc-dismiss" onclick="document.getElementById('cqc-${q.id}').remove()">Dismiss</button>
+                </div>
+            </div>`;
+        // XP flash
+        showXPFlash(q.xp_reward || 50, q.category || "Quest");
+    }
+
+    chatMessages.scrollTop = chatMessages.scrollHeight;
 });
 
 // ---------------------------------------------------------------------------
