@@ -3305,7 +3305,7 @@ def build_coach_context(message: str) -> str:
 # Chat
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT_TEMPLATE = (
+SYSTEM_PROMPT_BASE = (
     "Your name is LiAInne. You are a warm but honest personal coach. "
     "You are not a therapist, doctor, or crisis counselor. "
     "You have access to the user's full journal context including trend stats, "
@@ -3324,62 +3324,50 @@ SYSTEM_PROMPT_TEMPLATE = (
     "'add a quest to study Python', 'make me a quest about running'), "
     "include it naturally in your response AND signal it clearly. "
     "When you create a quest, end your response with this exact marker on its own line:\n"
-    "QUEST_CREATE: {\"title\": \"...\", \"description\": \"...\", \"difficulty\": \"Easy|Normal|Hard|Elite\", "
-    "\"category\": \"...\", \"section\": \"daily|weekly\", \"xp_reward\": 25-200, "
-    "\"tasks\": [\"task1\", \"task2\", \"task3\"]}\n"
-    "Use valid JSON. The tasks array should have 2-5 concrete steps. "
-    "Only include the QUEST_CREATE marker when actually creating a quest — not for every message.\n\n"
+    "QUEST_CREATE: then a JSON object with keys: title, description, difficulty (Easy/Normal/Hard/Elite), "
+    "category, section (daily or weekly), xp_reward (25-200), tasks (array of 2-5 strings).\n"
+    "Only include the QUEST_CREATE marker when actually creating a quest.\n\n"
     "Safety: If the user mentions self-harm, suicide, or immediate danger, "
-    "respond with care and urgency, and encourage them to contact local emergency services.\n\n"
-    "{context}"
+    "respond with care and urgency, and encourage them to contact local emergency services."
 )
 
-def _parse_quest_from_response(response_text: str) -> tuple[str, Optional[dict]]:
-    """
-    Splits LLM response into (clean_text, quest_data_or_None).
-    Looks for the QUEST_CREATE: marker and extracts the JSON payload.
-    """
+def _build_system_prompt(context: str) -> str:
+    """Concatenate base prompt + context without .format() to avoid brace conflicts."""
+    return SYSTEM_PROMPT_BASE + "\n\n" + context
+
+def _parse_quest_from_response(response_text: str):
+    """Split LLM response into (clean_text, quest_data_or_None)."""
+    import json as _j
     marker = "QUEST_CREATE:"
     if marker not in response_text:
         return response_text, None
-
     parts      = response_text.split(marker, 1)
     clean_text = parts[0].strip()
     raw_json   = parts[1].strip()
-
-    # The JSON might have trailing text — grab up to the first balanced brace
     depth, end = 0, -1
     for i, ch in enumerate(raw_json):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-
+        if ch == "{":   depth += 1
+        elif ch == "}": depth -= 1
+        if depth == 0 and end == -1 and i > 0:
+            end = i + 1
+            break
     if end == -1:
         return clean_text, None
-
     try:
-        quest_data = _json.loads(raw_json[:end])
-    except _json.JSONDecodeError:
+        return clean_text, _j.loads(raw_json[:end])
+    except Exception:
         return clean_text, None
 
-    return clean_text, quest_data
-
-def _create_quest_from_chat(quest_data: dict) -> Optional[dict]:
-    """Insert a board quest from chat-extracted data, return the created row."""
+def _create_quest_from_chat(quest_data: dict):
+    """Insert a board quest from chat-extracted data."""
     title = (quest_data.get("title") or "").strip()
     if not title:
         return None
-
     diff     = quest_data.get("difficulty", "Normal")
     xp       = int(quest_data.get("xp_reward") or XP_BY_DIFFICULTY.get(diff, 50))
     tasks    = quest_data.get("tasks") or []
     section  = quest_data.get("section", "daily")
     category = quest_data.get("category", "Personal Growth")
-
     row = _insert_board_quest({
         "title":           title,
         "description":     quest_data.get("description", ""),
@@ -3393,7 +3381,6 @@ def _create_quest_from_chat(quest_data: dict) -> Optional[dict]:
         "suggested_tasks": _json.dumps(tasks),
         "created_at":      datetime.now(timezone.utc).isoformat(),
     })
-
     if row and tasks:
         for task_title in tasks[:10]:
             try:
@@ -3405,13 +3392,12 @@ def _create_quest_from_chat(quest_data: dict) -> Optional[dict]:
                 }).execute()
             except Exception:
                 pass
-
     return row
 
 @app.post("/chat")
 def chat(msg: ChatMessage):
     context = build_coach_context(msg.message)
-    system  = SYSTEM_PROMPT_TEMPLATE.format(context=context)
+    system  = _build_system_prompt(context)
     history = [
         {"role": t.role, "content": t.content}
         for t in msg.history[-12:]
@@ -3427,18 +3413,9 @@ def chat(msg: ChatMessage):
         messages=messages, temperature=0.8, max_tokens=1024,
     )
     raw_response = response.choices[0].message.content
-
-    # Parse out any quest creation marker
     clean_response, quest_data = _parse_quest_from_response(raw_response)
-
-    created_quest = None
-    if quest_data:
-        created_quest = _create_quest_from_chat(quest_data)
-
-    return {
-        "response":      clean_response,
-        "quest_created": created_quest,
-    }
+    created_quest = _create_quest_from_chat(quest_data) if quest_data else None
+    return {"response": clean_response, "quest_created": created_quest}
 
 # ---------------------------------------------------------------------------
 # Insights
