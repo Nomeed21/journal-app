@@ -14,7 +14,7 @@ function showPage(pageId) {
     const nav  = document.querySelector(`.nav-item[data-page="${pageId}"]`);
     if (nav)   nav.classList.add("active");
     if (pageId === "entries")  loadEntries();
-    if (pageId === "quests")   { loadGoals(); generateDailyQuest(); }
+    if (pageId === "quests")   { loadQuestBoard(); }
     if (pageId === "skills")   loadSkills();
     if (pageId === "habits")   loadStreaks();
     if (pageId === "insights") { loadCharts(); loadInsights(); }
@@ -344,13 +344,16 @@ entryForm.addEventListener("submit", async (e) => {
         if (data.triggered && data.action) showActionBanner(data);
     }).catch(() => {});
 
-    // Auto-generate quests from this entry (non-blocking)
-    if (!editingId) {
-        fetch("/journal/generate-quests", {
+    // Auto-generate board quests from this entry (non-blocking)
+    if (!editingId && saved.entry) {
+        const entryId = saved.entry.id;
+        fetch("/board/generate/journal", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: entryData.content, mood: entryData.mood, entry_type: currentEntryType }),
+            body: JSON.stringify({ content: entryData.content, mood: entryData.mood, entry_id: entryId }),
         }).then(r => r.json()).then(data => {
-            if (data.quests && data.quests.length) showQuestSuggestions(data.quests);
+            if (data.generated > 0) {
+                _toast(`✦ ${data.generated} quest${data.generated > 1 ? 's' : ''} added to your Quest Board from this entry!`, "var(--accent-deep)", 3500);
+            }
         }).catch(() => {});
     }
 
@@ -420,24 +423,28 @@ function showQuestSuggestions(quests) {
     panel.classList.add("show");
 }
 
-window.addQuestFromSuggestion = async function(title, category, btn) {
-    // Find or create a goal in that category
-    const goalsRes  = await fetch("/goals");
-    const goals     = await goalsRes.json();
-    let goal        = goals.find(g => g.category === category);
-    if (!goal) {
-        const newGoal = await fetch("/goals", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: `${category} Goals`, category }),
-        }).then(r => r.json());
-        goal = newGoal.goal;
-    }
-    await fetch(`/goals/${goal.id}/tasks`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
-    });
-    btn.textContent = "✓ Added";
+window.addQuestFromSuggestion = async function(title, category, difficulty, btn) {
+    btn.textContent = "Adding...";
     btn.disabled    = true;
+    try {
+        const goals = await (await fetch("/goals")).json();
+        let goal    = goals.find(g => g.category === category);
+        if (!goal) {
+            const res = await fetch("/goals", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ title: category + " Goals", category }),
+            });
+            goal = (await res.json()).goal;
+        }
+        await fetch("/goals/" + goal.id + "/quests", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title, difficulty: difficulty || "Normal", milestone_id: null }),
+        });
+        btn.textContent = "✓ Added";
+    } catch (_) {
+        btn.textContent = "Failed - retry";
+        btn.disabled    = false;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -1370,361 +1377,364 @@ document.getElementById("generate-review").addEventListener("click", async () =>
 });
 
 // ---------------------------------------------------------------------------
-// Goals V2 — Goal → Milestone → Quest → Task
+// QUEST BOARD V2 — Auto-generated, chained, sectioned RPG quest log
 // ---------------------------------------------------------------------------
 
-const goalForm = document.getElementById("goal-form");
+// Keep generateDailyQuest as a no-op stub so old references don't break
+window.generateDailyQuest = async function() {};
 
-goalForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    await fetch("/goals", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            title:    document.getElementById("goal-title").value,
-            category: document.getElementById("goal-category").value,
-        }),
-    });
-    goalForm.reset();
-    loadGoals();
-});
+const SECTION_META = {
+    recommended: { icon: "✦", label: "Recommended",  color: "var(--accent-deep)" },
+    daily:       { icon: "📅", label: "Daily",        color: "#2196f3" },
+    weekly:      { icon: "📆", label: "Weekly",       color: "#00acc1" },
+    skill:       { icon: "🌳", label: "Skill Quests", color: "#2e7d32" },
+    recovery:    { icon: "🛡️", label: "Recovery",     color: "#5b21b6" },
+    boss:        { icon: "👹", label: "Boss Battles",  color: "#e65100" },
+    completed:   { icon: "✅", label: "Completed",    color: "#9e9e9e" },
+};
 
-// ============================================================
-// QUESTS PAGE V2 — Goal → Milestone → Quest → Task
-// Progress rolls up automatically from the bottom up
-// ============================================================
+const DIFF_CHIP_CLASS = {
+    Easy: "qb-chip--diff-easy", Normal: "qb-chip--diff-normal",
+    Hard: "qb-chip--diff-hard", Elite:  "qb-chip--diff-elite", Boss: "qb-chip--diff-elite",
+};
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-let goalsData = [];
+const SOURCE_ICONS = {
+    skill: "🌳", goal: "🎯", milestone: "🏁", habit: "🔥",
+    journal: "📓", boss: "👹", manual: "✏️",
+};
 
-// ---------------------------------------------------------------------------
-// Load & render the full goals tree
-// ---------------------------------------------------------------------------
-async function loadGoals() {
-    const goalsDiv = document.getElementById("goals");
-    if (!goalsDiv) return;
-    goalsDiv.innerHTML = "<p class='empty-state' style='padding:1rem 0'>Loading quests…</p>";
+// ── Main load ─────────────────────────────────────────────────
+async function loadQuestBoard() {
+    const board = document.getElementById("quest-board");
+    if (!board) return;
+    board.innerHTML = `<div class="qb-loading"><div class="qb-loading-icon">⚔️</div><div>Assembling your quest board…</div></div>`;
+
     try {
-        goalsData = await (await fetch("/goals")).json();
-        renderGoals(goalsData);
-    } catch (_) {
-        goalsDiv.innerHTML = "<p class='empty-state'>Could not load goals.</p>";
-    }
-}
+        const data = await (await fetch("/board/quests")).json();
 
-function renderGoals(goals) {
-    const goalsDiv = document.getElementById("goals");
-    if (!goals.length) {
-        goalsDiv.innerHTML = "<p class='empty-state'>No goals yet — add one above to begin your journey.</p>";
-        return;
-    }
-    goalsDiv.innerHTML = goals.map(g => buildGoalCard(g)).join("");
-}
+        // Update stats
+        const pendEl = document.getElementById("qb-pending");
+        const totEl  = document.getElementById("qb-total");
+        if (pendEl) pendEl.textContent = data.pending ?? "—";
+        if (totEl)  totEl.textContent  = data.total   ?? "—";
 
-// ---------------------------------------------------------------------------
-// Goal card builder
-// ---------------------------------------------------------------------------
-function buildGoalCard(g) {
-    const basis    = g.progress_basis || "tasks";
-    const basisLabel = { milestones: "milestones", quests: "quests", tasks: "tasks" }[basis];
-    const pctColor = g.progress >= 80 ? "var(--pa-good)" : g.progress >= 40 ? "var(--pa-ok)" : "var(--accent)";
+        const sections = data.sections || {};
+        const order    = ["recommended", "daily", "weekly", "skill", "recovery", "boss", "completed"];
+        let html       = "";
 
-    // Body: milestones view, or bare quests, or legacy tasks
-    let bodyHtml = "";
+        for (const sectionKey of order) {
+            const quests = sections[sectionKey] || [];
+            const meta   = SECTION_META[sectionKey] || { icon: "◎", label: sectionKey };
 
-    if (g.milestones && g.milestones.length > 0) {
-        bodyHtml = g.milestones.map(m => buildMilestoneSection(m, g.id)).join("");
-        bodyHtml += buildAddMilestoneRow(g.id);
-    } else if (g.quests && g.quests.length > 0) {
-        bodyHtml = g.quests.map(q => buildQuestSection(q, g.id, null)).join("");
-        bodyHtml += buildAddQuestRow(g.id, null);
-        bodyHtml += buildAddMilestoneRow(g.id);
-    } else if (g.legacy_tasks && g.legacy_tasks.length > 0) {
-        // Legacy direct tasks
-        bodyHtml = buildLegacyTaskList(g.legacy_tasks, g.id);
-        bodyHtml += buildAddQuestRow(g.id, null);
-        bodyHtml += buildAddMilestoneRow(g.id);
-    } else {
-        // Empty goal — show add options
-        bodyHtml = `<p class="task-empty">No milestones or quests yet.</p>`;
-        bodyHtml += buildAddQuestRow(g.id, null);
-        bodyHtml += buildAddMilestoneRow(g.id);
-    }
+            // Skip empty sections (except recommended which always shows)
+            if (!quests.length && sectionKey !== "recommended") continue;
 
-    return `<div class="goal-card" id="goal-${g.id}">
-        <div class="goal-header">
-            <div>
-                <strong class="goal-title">${g.title}</strong>
-                <span class="goal-category">${g.category}</span>
-            </div>
-            <div class="goal-header-right">
-                <span class="goal-level-badge">Lv ${g.level} · ${g.xp} XP</span>
-                <span class="goal-progress-pct" style="color:${pctColor}">${g.progress}%</span>
-            </div>
-        </div>
-        <div class="goal-progress-row">
-            <div class="progress-bar">
-                <div class="progress-fill" style="width:${g.progress}%;background:${pctColor}"></div>
-            </div>
-            <span class="goal-basis-label">${g.completed_units || 0}/${g.total_units || 0} ${basisLabel}</span>
-        </div>
-        <div class="goal-body" id="goal-body-${g.id}">
-            ${bodyHtml}
-        </div>
-        <div class="goal-actions">
-            <button class="btn-ghost goal-delete-btn" onclick="deleteGoal(${g.id})">Delete goal</button>
-        </div>
-    </div>`;
-}
+            html += `<div class="qb-section qb-section--${sectionKey}" id="qbs-${sectionKey}">
+                <div class="qb-section-header">
+                    <span class="qb-section-icon">${meta.icon}</span>
+                    <span class="qb-section-name">${meta.label}</span>
+                    <span class="qb-section-count">${quests.length}</span>
+                </div>
+                <div class="qb-cards" id="qbc-${sectionKey}">
+                    ${quests.length
+                        ? quests.map(q => buildQuestCard(q, sectionKey)).join("")
+                        : `<div class="qb-section-empty">
+                            ${sectionKey === "recommended"
+                                ? "No urgent quests right now — keep logging habits and journaling."
+                                : "All caught up in this section!"}
+                           </div>`
+                    }
+                </div>
+            </div>`;
+        }
 
-// ---------------------------------------------------------------------------
-// Milestone section
-// ---------------------------------------------------------------------------
-function buildMilestoneSection(m, goalId) {
-    const pct = m.progress || 0;
-    const pctColor = pct >= 80 ? "var(--pa-good)" : pct >= 40 ? "var(--pa-ok)" : "var(--accent)";
-    const questsHtml = (m.quests || []).map(q => buildQuestSection(q, goalId, m.id)).join("");
-    const addQuestHtml = buildAddQuestRow(goalId, m.id);
-
-    return `<div class="ms-block" id="ms-block-${m.id}">
-        <div class="ms-block-header">
-            <div class="ms-block-icon ${m.is_completed ? 'ms-block-icon--done' : ''}">
-                ${m.is_completed ? '🏁' : '◎'}
-            </div>
-            <div class="ms-block-title">${m.title}</div>
-            ${m.target_date ? `<span class="ms-date">by ${m.target_date}</span>` : ""}
-            <div class="ms-block-progress">
-                <div class="ms-mini-bar"><div class="ms-mini-fill" style="width:${pct}%;background:${pctColor}"></div></div>
-                <span class="ms-pct">${pct}%</span>
-            </div>
-            <button class="ms-delete-btn" onclick="deleteMilestone(${m.id})" title="Delete milestone">✕</button>
-        </div>
-        <div class="ms-block-body">
-            ${questsHtml}
-            ${addQuestHtml}
-        </div>
-    </div>`;
-}
-
-// ---------------------------------------------------------------------------
-// Quest section
-// ---------------------------------------------------------------------------
-function buildQuestSection(q, goalId, milestoneId) {
-    const pct = q.progress || 0;
-    const pctColor = pct >= 80 ? "var(--pa-good)" : pct >= 40 ? "var(--pa-ok)" : "var(--accent)";
-    const DIFF_COLORS = { Easy: "#4caf50", Normal: "#f7a94b", Hard: "#ff7043", Elite: "#9c27b0" };
-    const diffColor = DIFF_COLORS[q.difficulty] || "#f7a94b";
-
-    const tasksHtml = (q.tasks || []).map(t => buildTaskRow(t, q.id)).join("");
-    const addTaskHtml = `
-        <div class="add-task-row" id="add-task-row-${q.id}">
-            <input type="text" class="add-task-input" id="task-input-${q.id}"
-                placeholder="Add a task…"
-                onkeydown="if(event.key==='Enter'){addQuestTask(${q.id});event.preventDefault();}">
-            <button class="add-task-btn" onclick="addQuestTask(${q.id})">+ Add</button>
+        board.innerHTML = html || `<div class="qb-section-empty" style="padding:2rem;text-align:center">
+            No quests yet — click <strong>Generate Quests</strong> to get started!
         </div>`;
 
-    return `<div class="quest-block ${q.is_completed ? 'quest-block--done' : ''}" id="quest-block-${q.id}">
-        <div class="quest-block-header">
-            <span class="quest-dot" style="background:${q.is_completed ? '#4caf50' : diffColor}"></span>
-            <span class="quest-title">${q.title}</span>
-            ${q.description ? `<span class="quest-desc">${q.description}</span>` : ""}
-            <div class="quest-badges">
-                <span class="quest-badge" style="background:${diffColor}20;color:${diffColor}">${q.difficulty}</span>
-                <span class="quest-badge">${q.completed_tasks}/${q.total_tasks} tasks</span>
+    } catch (err) {
+        board.innerHTML = `<div class="qb-section-empty" style="padding:2rem;color:var(--ink-soft)">
+            Could not load quest board. ${err.message}
+        </div>`;
+    }
+}
+
+// ── Card builder ──────────────────────────────────────────────
+function buildQuestCard(q, sectionKey) {
+    const isCompleted   = q.is_completed || sectionKey === "completed";
+    const isRecommended = sectionKey === "recommended";
+    const sourceType    = q.source_type || "manual";
+    const diff          = q.difficulty   || "Normal";
+    const progress      = q.progress     || 0;
+    const tasks         = q.tasks        || [];
+    const children      = q.chain        || q.children || [];
+    const xp            = q.xp_reward    || 50;
+
+    // Due date urgency
+    let dueChip = "";
+    if (q.due_date) {
+        const today    = new Date();
+        const due      = new Date(q.due_date + "T00:00:00");
+        const daysLeft = Math.ceil((due - today) / 86400000);
+        const urgent   = daysLeft <= 1;
+        dueChip = `<span class="qb-chip ${urgent ? 'qb-chip--due-urgent' : 'qb-chip--due'}">
+            ${daysLeft <= 0 ? "⚠ Overdue" : daysLeft === 1 ? "⏰ Due today" : `📅 ${daysLeft}d left`}
+        </span>`;
+    }
+
+    // Task list HTML (only show tasks for non-completed quests)
+    let taskListHtml = "";
+    if (tasks.length && !isCompleted) {
+        taskListHtml = `<div class="qb-task-list">
+            ${tasks.map(t => `
+                <label class="qb-task-row ${t.is_completed ? 'qb-task-done' : ''}" id="qbt-row-${t.id}">
+                    <input type="checkbox" ${t.is_completed ? "checked" : ""}
+                        onchange="toggleBoardTask(${t.id}, ${q.id}, this)">
+                    <span class="qb-task-title">${_escHtml(t.title)}</span>
+                    <button class="qb-task-del" onclick="deleteBoardTask(${t.id}, ${q.id}, event)" title="Remove">✕</button>
+                </label>`).join("")}
+            <div class="qb-add-task-row">
+                <input type="text" class="qb-add-task-input" id="qadd-${q.id}"
+                    placeholder="Add task…"
+                    onkeydown="if(event.key==='Enter'){addBoardTask(${q.id});event.preventDefault();}">
+                <button class="qb-add-task-btn" onclick="addBoardTask(${q.id})">+ Add</button>
             </div>
-            <div class="quest-mini-bar-wrap">
-                <div class="quest-mini-bar"><div class="quest-mini-fill" style="width:${pct}%;background:${pctColor}"></div></div>
+        </div>`;
+    } else if (!isCompleted && !tasks.length) {
+        taskListHtml = `<div class="qb-task-list">
+            <div class="qb-add-task-row">
+                <input type="text" class="qb-add-task-input" id="qadd-${q.id}"
+                    placeholder="Add a task…"
+                    onkeydown="if(event.key==='Enter'){addBoardTask(${q.id});event.preventDefault();}">
+                <button class="qb-add-task-btn" onclick="addBoardTask(${q.id})">+ Add</button>
             </div>
-            <button class="quest-delete-btn" onclick="deleteQuest(${q.id})" title="Delete quest">✕</button>
+        </div>`;
+    }
+
+    // Quest chain (children)
+    let chainHtml = "";
+    if (children.length) {
+        chainHtml = `<div class="qb-chain">
+            <div class="qb-chain-label">🔗 Unlocks next:</div>
+            <div class="qb-chain-connector">
+                ${children.map(c => `
+                    <div class="qb-chain-item ${c.is_completed ? 'qb-chain-item--done' : ''}">
+                        <span class="qb-chain-dot qb-chain-dot--${c.is_completed ? 'done' : isCompleted ? 'active' : 'locked'}"></span>
+                        <span>${_escHtml(c.title)}</span>
+                        <span style="margin-left:auto;font-size:.68rem;color:var(--ink-faint)">${c.is_completed ? '✓' : '🔒'}</span>
+                    </div>`).join("")}
+            </div>
+        </div>`;
+    }
+
+    // Skill chain visualization: show sibling nodes for skill quests
+    let skillChainHtml = "";
+    if (sourceType === "skill" && q.category) {
+        // We show the chain label only; a full visual is too complex without the tree data in this card
+        skillChainHtml = `<div class="qb-skill-chain">
+            <span style="font-size:.7rem;color:#2e7d32;font-weight:600">📚 ${q.category} skill path</span>
+            ${q.parent_quest_id ? ' — <span style="font-size:.7rem;color:var(--ink-faint)">Part of a chain</span>' : ''}
+        </div>`;
+    }
+
+    // Progress bar (only if tasks exist)
+    const progHtml = tasks.length ? `<div class="qb-card-progress">
+        <div class="qb-prog-bar">
+            <div class="qb-prog-fill" style="width:${progress}%;background:${progress >= 80 ? '#4caf50' : progress >= 40 ? '#f7a94b' : 'var(--accent)'}"></div>
         </div>
-        <div class="quest-task-list">
-            ${tasksHtml}
-            ${addTaskHtml}
+        <span class="qb-prog-label">${q.task_done || 0}/${q.task_total || 0}</span>
+    </div>` : "";
+
+    // Footer actions
+    const footHtml = isCompleted
+        ? `<div class="qb-card-foot">
+               <div class="qb-completed-badge">✅ Completed +${xp} XP</div>
+               <button class="qb-del-btn" onclick="deleteQuestBoard(${q.id}, event)">🗑</button>
+           </div>`
+        : `<div class="qb-card-foot">
+               <button class="qb-complete-btn" onclick="completeQuestBoard(${q.id}, this)">
+                   ⚔️ Complete +${xp} XP
+               </button>
+               <button class="qb-edit-btn" onclick="openQuestEditModal(${q.id}, '${_escAttr(q.title)}', '${_escAttr(q.description||'')}', '${diff}', '${q.section||sectionKey}', ${xp})">✏️</button>
+               <button class="qb-del-btn" onclick="deleteQuestBoard(${q.id}, event)">🗑</button>
+           </div>`;
+
+    return `<div class="qb-card qb-card--source-${sourceType} ${isCompleted ? 'qb-card--completed' : ''} ${isRecommended ? 'qb-card--recommended' : ''}"
+            id="qb-card-${q.id}">
+        <div class="qb-card-head">
+            <div class="qb-card-title-block">
+                <div class="qb-card-title">${_escHtml(q.title)}</div>
+                ${q.description ? `<div class="qb-card-desc">${_escHtml(q.description)}</div>` : ""}
+            </div>
         </div>
+        <div class="qb-card-meta">
+            <span class="qb-chip ${DIFF_CHIP_CLASS[diff] || 'qb-chip--diff-normal'}">${diff}</span>
+            <span class="qb-chip qb-chip--cat">${q.category || "General"}</span>
+            <span class="qb-chip qb-chip--xp">+${xp} XP</span>
+            ${dueChip}
+            <span class="qb-chip qb-chip--source">${SOURCE_ICONS[sourceType] || "◎"} ${sourceType}</span>
+            ${isCompleted ? '<span class="qb-chip qb-chip--done">✓ Done</span>' : ''}
+        </div>
+        ${progHtml}
+        ${skillChainHtml}
+        ${taskListHtml}
+        ${chainHtml}
+        ${footHtml}
     </div>`;
 }
 
-// ---------------------------------------------------------------------------
-// Task row
-// ---------------------------------------------------------------------------
-function buildTaskRow(t, questId) {
-    return `<label class="task-row ${t.is_completed ? 'task-done' : ''}" id="task-row-${t.id}">
-        <input type="checkbox" class="task-check"
-            onchange="toggleTask(${t.id}, this)"
-            ${t.is_completed ? 'checked' : ''}>
-        <span class="task-title">${t.title}</span>
-        <button class="task-delete-btn" onclick="deleteTask(${t.id}, event)">✕</button>
-    </label>`;
-}
-
-// ---------------------------------------------------------------------------
-// Legacy task list (for old goals that have no quests/milestones)
-// ---------------------------------------------------------------------------
-function buildLegacyTaskList(tasks, goalId) {
-    const rows = tasks.map(t => buildTaskRow(t, null)).join("");
-    return `<div class="legacy-tasks-block">
-        <div class="legacy-label">⚠ Legacy tasks (no quest assigned)</div>
-        ${rows}
-        <div class="add-task-row">
-            <input type="text" class="add-task-input" id="task-input-legacy-${goalId}"
-                placeholder="Add a task directly…"
-                onkeydown="if(event.key==='Enter'){addLegacyTask(${goalId});event.preventDefault();}">
-            <button class="add-task-btn" onclick="addLegacyTask(${goalId})">+ Add</button>
-        </div>
-    </div>`;
-}
-
-// ---------------------------------------------------------------------------
-// Add rows (inline forms)
-// ---------------------------------------------------------------------------
-function buildAddMilestoneRow(goalId) {
-    return `<div class="add-milestone-row" id="add-ms-row-${goalId}">
-        <button class="btn-ghost btn-add-tier" onclick="toggleAddMilestone(${goalId})">+ Add Milestone</button>
-        <div class="add-tier-form hidden" id="add-ms-form-${goalId}">
-            <input type="text" id="ms-title-${goalId}" placeholder="Milestone name…"
-                onkeydown="if(event.key==='Enter'){addMilestone(${goalId});event.preventDefault();}">
-            <input type="date" id="ms-date-${goalId}">
-            <button onclick="addMilestone(${goalId})">Add</button>
-            <button class="btn-ghost" onclick="document.getElementById('add-ms-form-${goalId}').classList.add('hidden')">Cancel</button>
-        </div>
-    </div>`;
-}
-
-function buildAddQuestRow(goalId, milestoneId) {
-    const key = milestoneId ? `ms-${milestoneId}` : `goal-${goalId}`;
-    return `<div class="add-quest-row">
-        <button class="btn-ghost btn-add-tier" onclick="toggleAddQuest('${key}', ${goalId}, ${milestoneId || 'null'})">
-            ⚔️ Add Quest
-        </button>
-        <div class="add-tier-form hidden" id="add-quest-form-${key}">
-            <input type="text" id="quest-title-${key}" placeholder="Quest title…"
-                onkeydown="if(event.key==='Enter'){addQuest(${goalId}, ${milestoneId || 'null'}, '${key}');event.preventDefault();}">
-            <select id="quest-diff-${key}" class="hlf-select" style="max-width:130px">
-                <option value="Easy">🟢 Easy</option>
-                <option value="Normal" selected>🟡 Normal</option>
-                <option value="Hard">🟠 Hard</option>
-                <option value="Elite">🔴 Elite</option>
-            </select>
-            <button onclick="addQuest(${goalId}, ${milestoneId || 'null'}, '${key}')">Add</button>
-            <button class="btn-ghost" onclick="document.getElementById('add-quest-form-${key}').classList.add('hidden')">Cancel</button>
-        </div>
-    </div>`;
-}
-
-// ---------------------------------------------------------------------------
-// Toggle helpers for inline forms
-// ---------------------------------------------------------------------------
-window.toggleAddMilestone = function(goalId) {
-    const form = document.getElementById(`add-ms-form-${goalId}`);
-    form.classList.toggle("hidden");
-    if (!form.classList.contains("hidden")) document.getElementById(`ms-title-${goalId}`)?.focus();
-};
-
-window.toggleAddQuest = function(key, goalId, milestoneId) {
-    const form = document.getElementById(`add-quest-form-${key}`);
-    form.classList.toggle("hidden");
-    if (!form.classList.contains("hidden")) document.getElementById(`quest-title-${key}`)?.focus();
-};
-
-// ---------------------------------------------------------------------------
-// CRUD actions
-// ---------------------------------------------------------------------------
-
-window.addMilestone = async function(goalId) {
-    const titleEl = document.getElementById(`ms-title-${goalId}`);
-    const title   = titleEl?.value.trim();
-    if (!title) return;
-    const target = document.getElementById(`ms-date-${goalId}`)?.value || null;
-    await fetch(`/goals/${goalId}/milestones`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, target_date: target }),
-    });
-    loadGoals();
-};
-
-window.deleteMilestone = async function(msId) {
-    if (!confirm("Delete this milestone and all its quests?")) return;
-    await fetch(`/milestones/${msId}`, { method: "DELETE" });
-    loadGoals();
-};
-
-window.addQuest = async function(goalId, milestoneId, key) {
-    const titleEl = document.getElementById(`quest-title-${key}`);
-    const title   = titleEl?.value.trim();
-    if (!title) return;
-    const diff = document.getElementById(`quest-diff-${key}`)?.value || "Normal";
-    await fetch(`/goals/${goalId}/quests`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, difficulty: diff, milestone_id: milestoneId }),
-    });
-    loadGoals();
-};
-
-window.deleteQuest = async function(questId) {
-    if (!confirm("Delete this quest and all its tasks?")) return;
-    await fetch(`/quests/${questId}`, { method: "DELETE" });
-    loadGoals();
-};
-
-window.addQuestTask = async function(questId) {
-    const input = document.getElementById(`task-input-${questId}`);
-    const title = input?.value.trim();
-    if (!title) return;
-    await fetch(`/quests/${questId}/tasks`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
-    });
-    loadGoals();
-};
-
-window.addLegacyTask = async function(goalId) {
-    const input = document.getElementById(`task-input-legacy-${goalId}`);
-    const title = input?.value.trim();
-    if (!title) return;
-    await fetch(`/goals/${goalId}/tasks`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title }),
-    });
-    loadGoals();
-};
-
-window.addTask = async function(goalId) {
-    window.addLegacyTask(goalId);
-};
-
-window.toggleTask = async function(taskId, cb) {
-    cb.disabled = true;
+// ── Quest actions ─────────────────────────────────────────────
+window.completeQuestBoard = async function(questId, btn) {
+    btn.disabled = true;
+    btn.textContent = "Completing…";
     try {
-        const data = await (await fetch(`/tasks/${taskId}`, { method: "PUT" })).json();
-        if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Goal");
+        const data = await (await fetch(`/board/quests/${questId}/complete`, { method: "POST" })).json();
+        if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Quest");
         if (data.new_achievements) showAchievementToast(data.new_achievements);
-        if (data.skill_completion?.skill_completed) showSkillCompleteModal(data.skill_completion);
-        // Reload to reflect rollup
-        loadGoals();
+        if (data.children_unlocked > 0)
+            _toast(`🔓 ${data.children_unlocked} new quest${data.children_unlocked > 1 ? 's' : ''} unlocked!`, "#2e7d32", 3500);
+        loadQuestBoard();
         loadXPHUD();
     } catch (_) {
-        cb.disabled = false;
+        btn.disabled = false;
+        btn.textContent = "⚔️ Complete";
     }
 };
 
-window.deleteTask = async function(taskId, e) {
-    e.preventDefault();
-    e.stopPropagation();
-    await fetch(`/tasks/${taskId}`, { method: "DELETE" });
-    loadGoals();
+window.deleteQuestBoard = async function(questId, e) {
+    if (e) e.stopPropagation();
+    if (!confirm("Delete this quest?")) return;
+    await fetch(`/board/quests/${questId}`, { method: "DELETE" });
+    loadQuestBoard();
 };
 
-window.deleteGoal = async function(goalId) {
-    if (!confirm("Delete this goal and everything inside it?")) return;
-    await fetch(`/goals/${goalId}`, { method: "DELETE" });
-    loadGoals();
+window.toggleBoardTask = async function(taskId, questId, cb) {
+    cb.disabled = true;
+    try {
+        const data = await (await fetch(`/board/tasks/${taskId}`, { method: "PUT" })).json();
+        const row  = document.getElementById(`qbt-row-${taskId}`);
+        if (row) row.classList.toggle("qb-task-done", data.is_completed);
+        cb.disabled = false;
+        // If all tasks done, suggest completing quest
+        if (data.all_tasks_done) {
+            const card = document.getElementById(`qb-card-${questId}`);
+            const completeBtn = card?.querySelector(".qb-complete-btn");
+            if (completeBtn) {
+                completeBtn.style.animation = "urgentPulse .5s 3";
+                _toast("✦ All tasks done — complete the quest to earn XP!", "var(--accent)", 3500);
+            }
+        }
+    } catch (_) { cb.disabled = false; }
 };
 
-window.toggleMilestone = async function(id, cb) {
-    // Not used in V2 (milestones complete automatically) — kept for compat
+window.addBoardTask = async function(questId) {
+    const input = document.getElementById(`qadd-${questId}`);
+    const title = input?.value.trim();
+    if (!title) return;
+    input.value = "";
+    await fetch(`/board/quests/${questId}/tasks`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+    });
+    loadQuestBoard();
 };
+
+window.deleteBoardTask = async function(taskId, questId, e) {
+    e.preventDefault(); e.stopPropagation();
+    await fetch(`/board/tasks/${taskId}`, { method: "DELETE" });
+    loadQuestBoard();
+};
+
+// ── Create panel toggle ───────────────────────────────────────
+window.toggleQuestCreatePanel = function() {
+    const panel = document.getElementById("qb-create-panel");
+    const open  = panel.style.display === "none";
+    panel.style.display = open ? "" : "none";
+    if (open) document.getElementById("qbc-title")?.focus();
+};
+
+window.createManualQuest = async function() {
+    const title    = document.getElementById("qbc-title")?.value.trim();
+    if (!title) { _toast("Quest title required.", "#ef5350"); return; }
+    const desc     = document.getElementById("qbc-desc")?.value.trim()    || "";
+    const section  = document.getElementById("qbc-section")?.value        || "daily";
+    const diff     = document.getElementById("qbc-diff")?.value           || "Normal";
+    const category = document.getElementById("qbc-category")?.value       || "Personal Growth";
+    const due      = document.getElementById("qbc-due")?.value            || null;
+    const tasksRaw = document.getElementById("qbc-tasks")?.value.trim()   || "";
+    const tasks    = tasksRaw ? tasksRaw.split("\n").map(t => t.trim()).filter(Boolean) : [];
+    const xpMap    = { Easy: 25, Normal: 50, Hard: 100, Elite: 200 };
+
+    await fetch("/board/quests", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            title, description: desc, section, difficulty: diff,
+            category, xp_reward: xpMap[diff] || 50,
+            due_date: due || null, suggested_tasks: tasks, source_type: "manual",
+        }),
+    });
+    // Reset form
+    ["qbc-title","qbc-desc","qbc-tasks"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = "";
+    });
+    document.getElementById("qb-create-panel").style.display = "none";
+    loadQuestBoard();
+    _toast("✦ Quest created!", "var(--accent-deep)", 2000);
+};
+
+// ── Edit modal ────────────────────────────────────────────────
+window.openQuestEditModal = function(id, title, desc, diff, section, xp) {
+    document.getElementById("qem-id").value            = id;
+    document.getElementById("qem-title-input").value   = title;
+    document.getElementById("qem-desc").value          = desc;
+    document.getElementById("qem-diff").value          = diff;
+    document.getElementById("qem-section").value       = section;
+    document.getElementById("qem-xp").value            = xp;
+    document.getElementById("quest-edit-modal").style.display = "flex";
+};
+
+window.saveQuestEdit = async function() {
+    const id = document.getElementById("qem-id").value;
+    if (!id) return;
+    const update = {
+        title:      document.getElementById("qem-title-input").value.trim(),
+        description:document.getElementById("qem-desc").value.trim(),
+        difficulty: document.getElementById("qem-diff").value,
+        section:    document.getElementById("qem-section").value,
+        xp_reward:  parseInt(document.getElementById("qem-xp").value) || 50,
+    };
+    await fetch(`/board/quests/${id}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(update),
+    });
+    document.getElementById("quest-edit-modal").style.display = "none";
+    loadQuestBoard();
+    _toast("✦ Quest updated.", "var(--accent-deep)", 2000);
+};
+
+// ── Generation trigger ────────────────────────────────────────
+window.triggerQuestGeneration = async function() {
+    const btn = document.getElementById("qb-gen-btn");
+    if (btn) { btn.disabled = true; btn.textContent = "Generating…"; }
+    try {
+        await fetch("/board/generate/skills", { method: "POST" });
+        await loadQuestBoard();
+        _toast("✦ Quests generated from your Skill Trees, Goals & Habits!", "var(--accent-deep)", 3500);
+    } catch (_) {
+        _toast("Generation failed. Try again.", "#ef5350");
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "✦ Generate Quests"; }
+    }
+};
+
+// ── Utility ───────────────────────────────────────────────────
+function _escHtml(s) {
+    return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function _escAttr(s) {
+    return String(s || "").replace(/'/g, "\\'").replace(/"/g,"&quot;");
+}
 
 // ---------------------------------------------------------------------------
 // Skills — Skill-Driven Quest System
@@ -2125,6 +2135,10 @@ window.generateBosses = async function() {
         toast.innerHTML = `⚔️ ${data.bosses.length} Boss Battles generated for ${data.week_key}!`;
         document.body.appendChild(toast);
         setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 3500);
+        // Auto-generate board quests for each boss
+        for (const boss of data.bosses || []) {
+            fetch(`/board/generate/boss/${boss.id}`, { method: "POST" }).catch(() => {});
+        }
     } catch (_) {
         el.innerHTML = "<p style='color:var(--ink-soft)'>Boss generation failed.</p>";
     }

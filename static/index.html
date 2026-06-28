@@ -127,32 +127,48 @@
 
                 <!-- Night -->
                 <div class="entry-fields hidden" id="fields-night">
+                    <div class="night-section-label">⭐ Reflection</div>
                     <div class="field-group">
-                        <label class="field-label">Biggest Win Today</label>
-                        <textarea id="night-win" placeholder="What went well?" rows="2"></textarea>
+                        <label class="field-label">Highlight of the Day</label>
+                        <textarea id="night-highlight" placeholder="What are you most proud of today?" rows="2"></textarea>
                     </div>
-                    <div class="field-group">
-                        <label class="field-label">What Did I Learn?</label>
-                        <textarea id="night-learned" placeholder="Any insight, lesson, or realisation..." rows="2"></textarea>
-                    </div>
+
+                    <div class="night-section-label">🎮 Progress</div>
                     <div class="field-group two-col">
                         <div>
-                            <label class="field-label">What Went Well?</label>
-                            <textarea id="night-well" placeholder="..." rows="2"></textarea>
+                            <label class="field-label">Quest Progress</label>
+                            <textarea id="night-quests" placeholder="Which quests did you complete?" rows="2"></textarea>
                         </div>
                         <div>
-                            <label class="field-label">What Went Poorly?</label>
-                            <textarea id="night-poorly" placeholder="..." rows="2"></textarea>
+                            <label class="field-label">Skill Growth</label>
+                            <textarea id="night-skills" placeholder="What did you learn or practice today?" rows="2"></textarea>
                         </div>
                     </div>
-                    <div class="field-group">
-                        <label class="field-label">What Am I Grateful For?</label>
-                        <textarea id="night-grateful" placeholder="..." rows="2"></textarea>
+
+                    <div class="night-section-label">🧠 Self-Awareness</div>
+                    <div class="field-group two-col">
+                        <div>
+                            <label class="field-label">Biggest Challenge</label>
+                            <textarea id="night-challenge" placeholder="What got in your way?" rows="2"></textarea>
+                        </div>
+                        <div>
+                            <label class="field-label">How Did You Respond?</label>
+                            <textarea id="night-response" placeholder="Did you avoid it, push through, or adapt?" rows="2"></textarea>
+                        </div>
                     </div>
+
+                    <div class="night-section-label">🔍 Insights</div>
                     <div class="field-group">
-                        <label class="field-label">Tomorrow's Priority</label>
-                        <input type="text" id="night-tomorrow" placeholder="One thing to focus on tomorrow...">
+                        <label class="field-label">One Lesson Learned</label>
+                        <textarea id="night-lesson" placeholder="What would Future You want to remember?" rows="2"></textarea>
                     </div>
+
+                    <div class="night-section-label">🎯 Tomorrow</div>
+                    <div class="field-group">
+                        <label class="field-label">Highest Priority</label>
+                        <input type="text" id="night-tomorrow" placeholder="What's the one thing that must happen tomorrow?">
+                    </div>
+
                     <div class="sliders">
                         <label>Mood <span class="slider-val" id="n-mood-val">3</span>/5
                             <input type="range" id="n-mood" min="1" max="5" value="3"></label>
@@ -194,32 +210,138 @@
             <div id="entries"></div>
         </section>
 
-        <!-- PAGE: Quests -->
+        <!-- PAGE: Quests — Quest Board V2 -->
         <section class="page" id="page-quests">
-            <div class="page-header"><h1>Quests &amp; Goals</h1><p class="page-sub">Level up your life</p></div>
-            <div class="daily-quest-banner" id="daily-quest">
-                <div class="dq-header">
-                    <span class="dq-label">⚔️ Today's Main Quest</span>
-                    <button class="dq-refresh" onclick="generateDailyQuest()" title="Regenerate">↺</button>
-                </div>
-                <div class="dq-body" id="dq-body">Generating your quest...</div>
-                <div class="dq-footer" id="dq-footer"></div>
+            <div class="page-header">
+                <h1>Quest Board</h1>
+                <p class="page-sub">Your living quest log — auto-updated from Skills, Goals, Habits &amp; Journal</p>
             </div>
-            <form id="goal-form" class="inline-form">
-                <input id="goal-title" placeholder="Goal title..." required>
-                <select id="goal-category" required>
-                    <option value="" disabled selected>Category...</option>
-                    <option value="Study">📚 Study</option>
-                    <option value="Fitness">💪 Fitness</option>
-                    <option value="Career">💼 Career</option>
-                    <option value="Relationship">❤️ Relationship</option>
-                    <option value="Finance">💰 Finance</option>
-                    <option value="Creativity">🎨 Creativity</option>
-                    <option value="Personal Growth">🌱 Personal Growth</option>
-                </select>
-                <button type="submit">+ Add Goal</button>
-            </form>
-            <div id="goals"></div>
+
+            <!-- Board toolbar -->
+            <div class="qb-toolbar">
+                <div class="qb-stats" id="qb-stats">
+                    <span class="qb-stat"><span id="qb-pending">—</span> active</span>
+                    <span class="qb-stat-divider">·</span>
+                    <span class="qb-stat"><span id="qb-total">—</span> total</span>
+                </div>
+                <div class="qb-actions">
+                    <button class="qb-gen-btn" onclick="triggerQuestGeneration()" id="qb-gen-btn">
+                        ✦ Generate Quests
+                    </button>
+                    <button class="qb-add-btn btn-ghost" onclick="toggleQuestCreatePanel()">
+                        + Manual Quest
+                    </button>
+                </div>
+            </div>
+
+            <!-- Manual create panel (collapsed by default) -->
+            <div id="qb-create-panel" class="qb-create-panel" style="display:none">
+                <div class="qb-create-title">Create Quest</div>
+                <div class="qb-create-form">
+                    <input type="text" id="qbc-title" placeholder="Quest title…" class="qbc-input">
+                    <textarea id="qbc-desc" placeholder="Description (optional)…" rows="2" class="qbc-textarea"></textarea>
+                    <div class="qbc-row">
+                        <div class="qbc-field">
+                            <label class="qbc-label">Section</label>
+                            <select id="qbc-section" class="qbc-select">
+                                <option value="daily">📅 Daily</option>
+                                <option value="weekly">📆 Weekly</option>
+                                <option value="skill">🌳 Skill</option>
+                                <option value="recovery">🛡️ Recovery</option>
+                            </select>
+                        </div>
+                        <div class="qbc-field">
+                            <label class="qbc-label">Difficulty</label>
+                            <select id="qbc-diff" class="qbc-select">
+                                <option value="Easy">🟢 Easy</option>
+                                <option value="Normal" selected>🟡 Normal</option>
+                                <option value="Hard">🟠 Hard</option>
+                                <option value="Elite">🔴 Elite</option>
+                            </select>
+                        </div>
+                        <div class="qbc-field">
+                            <label class="qbc-label">Category</label>
+                            <select id="qbc-category" class="qbc-select">
+                                <option value="Personal Growth">🌱 Personal Growth</option>
+                                <option value="Study">📚 Study</option>
+                                <option value="Fitness">💪 Fitness</option>
+                                <option value="Finance">💰 Finance</option>
+                                <option value="Creativity">🎨 Creativity</option>
+                                <option value="Music">🎵 Music</option>
+                                <option value="Relationships">❤️ Relationships</option>
+                            </select>
+                        </div>
+                        <div class="qbc-field">
+                            <label class="qbc-label">Due Date</label>
+                            <input type="date" id="qbc-due" class="qbc-select">
+                        </div>
+                    </div>
+                    <div class="qbc-field" style="margin-top:.5rem">
+                        <label class="qbc-label">Suggested Tasks (one per line)</label>
+                        <textarea id="qbc-tasks" placeholder="Task 1&#10;Task 2&#10;Task 3" rows="3" class="qbc-textarea"></textarea>
+                    </div>
+                    <div class="qbc-actions">
+                        <button onclick="createManualQuest()" class="qbc-submit">Create Quest</button>
+                        <button onclick="toggleQuestCreatePanel()" class="btn-ghost btn-sm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quest Board Sections -->
+            <div id="quest-board" class="quest-board">
+                <div class="qb-loading">
+                    <div class="qb-loading-icon">⚔️</div>
+                    <div>Loading your quest board…</div>
+                </div>
+            </div>
+
+            <!-- Quest Edit Modal -->
+            <div id="quest-edit-modal" class="qb-modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+                <div class="qb-modal-box">
+                    <div class="qb-modal-header">
+                        <div class="qb-modal-title" id="qem-title">Edit Quest</div>
+                        <button class="hv2-modal-close" onclick="document.getElementById('quest-edit-modal').style.display='none'">✕</button>
+                    </div>
+                    <input type="hidden" id="qem-id">
+                    <div class="qbc-field" style="margin-bottom:.75rem">
+                        <label class="qbc-label">Title</label>
+                        <input type="text" id="qem-title-input" class="qbc-input">
+                    </div>
+                    <div class="qbc-field" style="margin-bottom:.75rem">
+                        <label class="qbc-label">Description</label>
+                        <textarea id="qem-desc" rows="2" class="qbc-textarea"></textarea>
+                    </div>
+                    <div class="qbc-row" style="margin-bottom:.75rem">
+                        <div class="qbc-field">
+                            <label class="qbc-label">Difficulty</label>
+                            <select id="qem-diff" class="qbc-select">
+                                <option value="Easy">🟢 Easy</option>
+                                <option value="Normal">🟡 Normal</option>
+                                <option value="Hard">🟠 Hard</option>
+                                <option value="Elite">🔴 Elite</option>
+                            </select>
+                        </div>
+                        <div class="qbc-field">
+                            <label class="qbc-label">Section</label>
+                            <select id="qem-section" class="qbc-select">
+                                <option value="daily">📅 Daily</option>
+                                <option value="weekly">📆 Weekly</option>
+                                <option value="skill">🌳 Skill</option>
+                                <option value="recovery">🛡️ Recovery</option>
+                                <option value="boss">👹 Boss</option>
+                            </select>
+                        </div>
+                        <div class="qbc-field">
+                            <label class="qbc-label">XP Reward</label>
+                            <input type="number" id="qem-xp" class="qbc-select" min="10" max="500">
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:.6rem;justify-content:flex-end">
+                        <button class="btn-ghost" onclick="document.getElementById('quest-edit-modal').style.display='none'">Cancel</button>
+                        <button onclick="saveQuestEdit()" class="qbc-submit">Save Changes</button>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <!-- PAGE: Skills -->

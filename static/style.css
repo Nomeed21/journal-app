@@ -1220,6 +1220,24 @@ body {
     margin-bottom: 0.4rem;
 }
 
+.night-section-label {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--accent-deep);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    padding: 0.5rem 0 0.4rem;
+    margin-top: 0.5rem;
+    border-top: 1px solid var(--line);
+    display: block;
+}
+
+.night-section-label:first-child {
+    margin-top: 0;
+    border-top: none;
+    padding-top: 0;
+}
+
 .field-group input[type="text"],
 .field-group textarea {
     margin-bottom: 0.5rem;
@@ -4141,3 +4159,685 @@ body {
 
 .legacy-tasks-block { border: 1px solid #ffe082; border-radius: 8px; padding: .6rem .75rem; background: #fff8e1; }
 .legacy-label { font-size: .7rem; color: #e65100; font-weight: 600; margin-bottom: .4rem; }
+/* ============================================================
+   QUEST BOARD V2 — RPG Quest Log
+   Sections · Chains · Auto-generation · Source indicators
+   ============================================================ */
+
+/* ── Toolbar ──────────────────────────────────────────────── */
+.qb-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+    gap: .75rem;
+    flex-wrap: wrap;
+}
+
+.qb-stats {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .82rem;
+    color: var(--ink-soft);
+}
+
+.qb-stat {
+    font-weight: 600;
+    color: var(--ink);
+}
+
+.qb-stat-divider {
+    color: var(--ink-faint);
+}
+
+.qb-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+}
+
+.qb-gen-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: .55rem 1.1rem;
+    font-size: .88rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    box-shadow: 0 2px 8px var(--shadow);
+    transition: background .15s, transform .1s;
+}
+
+.qb-gen-btn:hover { background: var(--accent-deep); transform: translateY(-1px); }
+.qb-gen-btn:disabled { opacity: .6; cursor: not-allowed; transform: none; }
+
+.qb-add-btn {
+    background: var(--paper-soft);
+    color: var(--ink-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    padding: .5rem 1rem;
+    font-size: .85rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: background .12s;
+}
+
+.qb-add-btn:hover { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--accent); transform: none; box-shadow: none; }
+
+/* ── Create Panel ─────────────────────────────────────────── */
+.qb-create-panel {
+    background: var(--paper-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    padding: 1.1rem 1.25rem;
+    margin-bottom: 1.25rem;
+    animation: qbSlideDown .2s ease;
+}
+
+@keyframes qbSlideDown {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.qb-create-title {
+    font-size: .9rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: .85rem;
+    padding-bottom: .6rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.qb-create-form { display: flex; flex-direction: column; gap: .6rem; }
+
+.qbc-input {
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    padding: .6rem .85rem;
+    font-family: var(--font-body);
+    font-size: .92rem;
+    color: var(--ink);
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+    margin: 0;
+    width: 100%;
+}
+
+.qbc-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.qbc-textarea {
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    padding: .55rem .85rem;
+    font-family: var(--font-body);
+    font-size: .88rem;
+    color: var(--ink);
+    outline: none;
+    resize: vertical;
+    margin: 0;
+    width: 100%;
+    transition: border-color .15s, box-shadow .15s;
+}
+
+.qbc-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.qbc-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: .5rem;
+}
+
+.qbc-field { display: flex; flex-direction: column; gap: .25rem; }
+
+.qbc-label {
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--ink-faint);
+}
+
+.qbc-select {
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    padding: .5rem .7rem;
+    font-family: var(--font-body);
+    font-size: .85rem;
+    color: var(--ink);
+    outline: none;
+    cursor: pointer;
+    transition: border-color .15s;
+    width: 100%;
+}
+
+.qbc-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.qbc-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    padding-top: .25rem;
+}
+
+.qbc-submit {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: .55rem 1.2rem;
+    font-size: .88rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 8px var(--shadow);
+    transition: background .15s;
+}
+
+.qbc-submit:hover { background: var(--accent-deep); transform: none; }
+
+/* ── Board Layout ─────────────────────────────────────────── */
+.quest-board {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+}
+
+/* ── Section Headers ──────────────────────────────────────── */
+.qb-section {
+    margin-bottom: 1.5rem;
+}
+
+.qb-section-header {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    margin-bottom: .65rem;
+    padding: 0 2px;
+}
+
+.qb-section-icon {
+    font-size: .95rem;
+    width: 22px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.qb-section-name {
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--ink-faint);
+}
+
+.qb-section-count {
+    font-size: .68rem;
+    background: var(--paper-soft);
+    color: var(--ink-faint);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .1rem .5rem;
+    margin-left: auto;
+    font-weight: 600;
+}
+
+.qb-section-empty {
+    font-size: .85rem;
+    color: var(--ink-faint);
+    font-style: italic;
+    padding: .5rem 2px;
+}
+
+/* Recommended section — warm rose tint */
+.qb-section--recommended .qb-card {
+    border-color: #e8bfcc;
+    background: #fffafb;
+}
+
+/* Boss section — amber accent */
+.qb-section--boss .qb-card {
+    border-color: #ffe082;
+}
+
+/* Completed section — muted */
+.qb-section--completed .qb-card {
+    opacity: .65;
+    filter: saturate(.55);
+}
+
+.qb-cards {
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+
+/* ── Quest Cards ──────────────────────────────────────────── */
+.qb-card {
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    overflow: hidden;
+    transition: border-color .15s, box-shadow .15s, transform .15s;
+    position: relative;
+}
+
+.qb-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 4px 16px var(--shadow);
+    transform: translateY(-1px);
+}
+
+.qb-card--recommended {
+    border-color: #dda8bc;
+    border-width: 1.5px;
+}
+
+.qb-card--completed {
+    pointer-events: none;
+}
+
+/* Source type left bar — 4px accent strip */
+.qb-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: 0;
+    width: 4px;
+    height: 100%;
+    border-radius: 14px 0 0 14px;
+    background: var(--line-strong);
+}
+
+.qb-card--source-skill::before    { background: #4caf50; }
+.qb-card--source-goal::before     { background: var(--accent); }
+.qb-card--source-milestone::before{ background: #b8617c; }
+.qb-card--source-habit::before    { background: #f7a94b; }
+.qb-card--source-journal::before  { background: #7c3aed; }
+.qb-card--source-boss::before     { background: #e65100; }
+.qb-card--source-manual::before   { background: #9e9e9e; }
+
+/* ── Card Head ────────────────────────────────────────────── */
+.qb-card-head {
+    display: flex;
+    align-items: flex-start;
+    gap: .75rem;
+    padding: .85rem 1rem .85rem 1.1rem;
+}
+
+.qb-card-title-block { flex: 1; min-width: 0; padding-left: .35rem; }
+
+.qb-card-title {
+    font-size: .95rem;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.35;
+    margin-bottom: .2rem;
+}
+
+.qb-card-desc {
+    font-size: .8rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+    margin-bottom: .4rem;
+}
+
+/* ── Meta Chips ───────────────────────────────────────────── */
+.qb-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .3rem;
+    padding: 0 1rem .65rem 1.5rem;
+}
+
+.qb-chip {
+    font-size: .68rem;
+    font-weight: 600;
+    border-radius: 6px;
+    padding: .2rem .55rem;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    background: var(--paper-soft);
+    color: var(--ink-soft);
+    border-color: var(--line-strong);
+}
+
+.qb-chip--diff-easy   { background: #e8f5e9; color: #2e7d32; border-color: #a5d6a7; }
+.qb-chip--diff-normal { background: #e3f2fd; color: #1565c0; border-color: #90caf9; }
+.qb-chip--diff-hard   { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
+.qb-chip--diff-elite  { background: #fce4ec; color: #880e4f; border-color: #f48fb1; }
+.qb-chip--cat         { background: var(--paper-soft); color: var(--ink-soft); border-color: var(--line-strong); }
+.qb-chip--xp          { background: #fdf5f7; color: var(--accent-deep); border-color: var(--line-strong); }
+.qb-chip--source      { background: var(--paper-soft); color: var(--ink-faint); border-color: var(--line); }
+.qb-chip--done        { background: #e8f5e9; color: #2e7d32; border-color: #a5d6a7; }
+.qb-chip--due-urgent  { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
+.qb-chip--due         { background: var(--paper-soft); color: var(--ink-faint); border-color: var(--line); }
+
+/* ── Progress Bar ─────────────────────────────────────────── */
+.qb-card-progress {
+    display: flex;
+    align-items: center;
+    gap: .65rem;
+    padding: 0 1rem .65rem 1.5rem;
+}
+
+.qb-prog-bar {
+    flex: 1;
+    height: 5px;
+    background: var(--line-strong);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.qb-prog-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width .35s ease;
+}
+
+.qb-prog-label {
+    font-size: .68rem;
+    color: var(--ink-faint);
+    font-weight: 600;
+    white-space: nowrap;
+    min-width: 28px;
+    text-align: right;
+}
+
+/* ── Skill Chain Banner ───────────────────────────────────── */
+.qb-skill-chain {
+    padding: .35rem 1rem .45rem 1.5rem;
+    background: #f1f8e9;
+    border-top: 1px solid #c8e6c9;
+    border-bottom: 1px solid #c8e6c9;
+    font-size: .72rem;
+    color: #2e7d32;
+    font-weight: 600;
+}
+
+/* ── Task List ────────────────────────────────────────────── */
+.qb-task-list {
+    padding: .35rem 1rem .1rem 1.5rem;
+    border-top: 1px solid var(--line);
+}
+
+.qb-task-row {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    padding: .38rem .1rem;
+    font-size: .84rem;
+    color: var(--ink-soft);
+    cursor: pointer;
+    border-bottom: 1px solid var(--line);
+    transition: color .1s;
+    position: relative;
+}
+
+.qb-task-row:last-of-type { border-bottom: none; }
+
+.qb-task-row:hover { color: var(--ink); }
+
+.qb-task-row input[type="checkbox"] {
+    width: 14px; height: 14px;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+    cursor: pointer;
+    margin: 0; padding: 0;
+    border: none; background: none; box-shadow: none;
+}
+
+.qb-task-title { flex: 1; line-height: 1.4; }
+
+.qb-task-done .qb-task-title {
+    text-decoration: line-through;
+    color: var(--ink-faint);
+}
+
+.qb-task-del {
+    background: none;
+    border: none;
+    color: transparent;
+    font-size: .75rem;
+    padding: .1rem .3rem;
+    cursor: pointer;
+    box-shadow: none;
+    flex-shrink: 0;
+    border-radius: 4px;
+    transition: color .1s, background .1s;
+    line-height: 1;
+}
+
+.qb-task-row:hover .qb-task-del { color: var(--ink-faint); }
+.qb-task-del:hover { color: #c62828 !important; background: #ffebee; transform: none; box-shadow: none; }
+
+/* Add task row */
+.qb-add-task-row {
+    display: flex;
+    gap: .4rem;
+    padding: .5rem .1rem .6rem;
+}
+
+.qb-add-task-input {
+    flex: 1;
+    font-size: .82rem;
+    padding: .38rem .65rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    background: var(--paper-soft);
+    color: var(--ink);
+    outline: none;
+    margin: 0;
+    transition: border-color .12s;
+}
+
+.qb-add-task-input:focus { border-color: var(--accent); box-shadow: none; }
+
+.qb-add-task-btn {
+    font-size: .78rem;
+    padding: .38rem .8rem;
+    background: var(--paper);
+    color: var(--ink-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    cursor: pointer;
+    box-shadow: none;
+    white-space: nowrap;
+    transition: background .1s;
+}
+
+.qb-add-task-btn:hover { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--accent); transform: none; box-shadow: none; }
+
+/* ── Quest Chain Visualization ────────────────────────────── */
+.qb-chain {
+    padding: .6rem 1rem .75rem 1.5rem;
+    border-top: 1px dashed var(--line-strong);
+    background: var(--paper-soft);
+}
+
+.qb-chain-label {
+    font-size: .65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--ink-faint);
+    margin-bottom: .45rem;
+}
+
+.qb-chain-connector {
+    display: flex;
+    flex-direction: column;
+    gap: .25rem;
+    padding-left: .25rem;
+    border-left: 2px solid var(--line-strong);
+    margin-left: .2rem;
+}
+
+.qb-chain-item {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .8rem;
+    color: var(--ink-soft);
+    padding: .15rem .4rem;
+    border-radius: 6px;
+    transition: background .1s;
+}
+
+.qb-chain-item:hover { background: var(--paper); }
+.qb-chain-item--done { color: #2e7d32; }
+
+.qb-chain-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    margin-left: -1.15rem;
+    border: 2px solid var(--paper-soft);
+    box-sizing: content-box;
+}
+
+.qb-chain-dot--locked { background: var(--line-strong); border-color: var(--paper-soft); }
+.qb-chain-dot--active { background: var(--accent); border-color: var(--accent-soft); }
+.qb-chain-dot--done   { background: #4caf50; border-color: #e8f5e9; }
+
+/* ── Card Footer ──────────────────────────────────────────── */
+.qb-card-foot {
+    display: flex;
+    align-items: center;
+    gap: .45rem;
+    padding: .65rem 1rem .75rem 1.5rem;
+    border-top: 1px solid var(--line);
+}
+
+.qb-complete-btn {
+    flex: 1;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 9px;
+    padding: .55rem 1rem;
+    font-size: .83rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+    transition: background .15s;
+    box-shadow: 0 1px 5px var(--shadow);
+}
+
+.qb-complete-btn:hover { background: var(--accent-deep); transform: none; box-shadow: none; }
+.qb-complete-btn:disabled { background: var(--line-strong); color: var(--ink-faint); cursor: not-allowed; box-shadow: none; }
+
+.qb-completed-badge {
+    flex: 1;
+    font-size: .82rem;
+    font-weight: 700;
+    color: #2e7d32;
+    background: #e8f5e9;
+    border: 1px solid #a5d6a7;
+    border-radius: 9px;
+    padding: .5rem 1rem;
+    text-align: left;
+}
+
+.qb-edit-btn,
+.qb-del-btn {
+    background: var(--paper-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: .45rem .6rem;
+    font-size: .85rem;
+    cursor: pointer;
+    color: var(--ink-faint);
+    box-shadow: none;
+    transition: background .1s, color .1s;
+    line-height: 1;
+}
+
+.qb-edit-btn:hover { background: var(--accent-soft); color: var(--accent-deep); border-color: var(--accent); transform: none; box-shadow: none; }
+.qb-del-btn:hover  { background: #ffebee; color: #c62828; border-color: #ef9a9a; transform: none; box-shadow: none; }
+
+/* ── Loading State ────────────────────────────────────────── */
+.qb-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .75rem;
+    padding: 3rem 1rem;
+    color: var(--ink-soft);
+    font-size: .9rem;
+}
+
+.qb-loading-icon {
+    font-size: 2rem;
+    animation: qbPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes qbPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: .5; transform: scale(.92); }
+}
+
+/* ── Edit Modal ───────────────────────────────────────────── */
+.qb-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(58, 44, 48, .45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+}
+
+.qb-modal-box {
+    background: var(--paper);
+    border-radius: 18px;
+    padding: 1.75rem;
+    max-width: 520px;
+    width: 100%;
+    box-shadow: 0 20px 50px rgba(0,0,0,.18);
+    animation: qbModalPop .25s cubic-bezier(.34,1.5,.64,1);
+}
+
+@keyframes qbModalPop {
+    from { transform: scale(.9); opacity: 0; }
+    to   { transform: scale(1);  opacity: 1; }
+}
+
+.qb-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.1rem;
+    gap: .75rem;
+}
+
+.qb-modal-title {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--ink);
+    flex: 1;
+}
+
+/* ── Urgency pulse animation ──────────────────────────────── */
+@keyframes urgentPulse {
+    0%, 100% { box-shadow: 0 0 0 0 var(--accent); }
+    50%       { box-shadow: 0 0 0 5px transparent; }
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+@media (max-width: 640px) {
+    .qb-toolbar { flex-direction: column; align-items: flex-start; }
+    .qb-card-foot { flex-wrap: wrap; }
+    .qb-complete-btn { min-width: 100%; }
+    .qbc-row { grid-template-columns: 1fr 1fr; }
+}

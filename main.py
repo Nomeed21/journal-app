@@ -399,18 +399,18 @@ def create_plan(plan: PlanCreate):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     supabase.table("daily_plans").upsert(
         {
-            "date":      today,
+            "plan_date": today,
             "main_goal": plan.main_goal,
             "tasks":     _json.dumps(plan.tasks),
         },
-        on_conflict="date"
+        on_conflict="plan_date"
     ).execute()
     return {"status": "saved"}
 
 @app.get("/plans/today")
 def get_today_plan():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    result = supabase.table("daily_plans").select("*").eq("date", today).execute()
+    result = supabase.table("daily_plans").select("*").eq("plan_date", today).execute()
     if not result.data:
         return {"plan": None}
     row = result.data[0]
@@ -423,7 +423,7 @@ def reflect_on_plan(data: dict):
     tasks = _json.dumps(data.get("tasks", []))
     supabase.table("daily_plans").update(
         {"tasks": tasks, "reflection_note": data.get("reflection_note", "")}
-    ).eq("date", today).execute()
+    ).eq("plan_date", today).execute()
     return {"status": "updated"}
 
 # ---------------------------------------------------------------------------
@@ -4157,6 +4157,652 @@ Be direct, warm, and specific. Max 80 words. Sound like a coach who cares."""
             "avg_focus":  avg_focus,
         },
     }
+
+
+
+# ===========================================================================
+# QUEST BOARD V2 — Auto-generated, chained, sectioned quest system
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
+class QuestBoardCreate(BaseModel):
+    title: str
+    description: str = ""
+    difficulty: str = "Normal"
+    section: str = "daily"          # recommended | daily | weekly | skill | recovery | boss | completed
+    source_type: str = "manual"     # manual | skill | goal | habit | journal | boss
+    source_id: str = ""             # dedup key
+    category: str = "Personal Growth"
+    xp_reward: int = 50
+    due_date: Optional[str] = None
+    parent_quest_id: Optional[int] = None
+    goal_id: Optional[int] = None
+    milestone_id: Optional[int] = None
+    suggested_tasks: list[str] = []
+
+class QuestBoardUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    difficulty: Optional[str] = None
+    section: Optional[str] = None
+    xp_reward: Optional[int] = None
+    due_date: Optional[str] = None
+
+class QuestBoardComplete(BaseModel):
+    quest_id: int
+
+# ---------------------------------------------------------------------------
+# Quest Board helpers
+# ---------------------------------------------------------------------------
+
+XP_BY_DIFFICULTY = {"Easy": 25, "Normal": 50, "Hard": 100, "Elite": 200, "Boss": 300}
+SECTION_ORDER     = ["recommended", "daily", "weekly", "skill", "recovery", "boss", "completed"]
+
+def _source_exists(source_type: str, source_id: str) -> bool:
+    """Check if a quest from this source already exists (deduplication)."""
+    if not source_id:
+        return False
+    try:
+        result = (
+            supabase.table("board_quests")
+            .select("id")
+            .eq("source_type", source_type)
+            .eq("source_id", str(source_id))
+            .execute()
+        )
+        return bool(result.data)
+    except Exception:
+        return False
+
+def _insert_board_quest(data: dict) -> Optional[dict]:
+    """Insert a board quest, returning the row or None on failure."""
+    try:
+        res = supabase.table("board_quests").insert(data).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"[board_quests insert error] {e}")
+        return None
+
+def _get_board_quests() -> list[dict]:
+    try:
+        rows = (
+            supabase.table("board_quests")
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+            .data
+        )
+        # Attach child quests
+        by_parent: dict[int, list] = defaultdict(list)
+        for r in rows:
+            pid = r.get("parent_quest_id")
+            if pid:
+                by_parent[pid].append(r)
+        for r in rows:
+            r["children"] = by_parent.get(r["id"], [])
+        return rows
+    except Exception:
+        return []
+
+def _fetch_board_tasks(quest_id: int) -> list[dict]:
+    try:
+        return supabase.table("board_quest_tasks").select("*").eq("quest_id", quest_id).order("created_at").execute().data
+    except Exception:
+        return []
+
+def _build_quest_card(q: dict) -> dict:
+    tasks    = _fetch_board_tasks(q["id"])
+    done_cnt = sum(1 for t in tasks if t.get("is_completed"))
+    total    = len(tasks)
+    progress = round(done_cnt / total * 100) if total else 0
+
+    # Unlock children when this is completed
+    children = q.get("children", [])
+
+    return {
+        **q,
+        "tasks":        tasks,
+        "task_done":    done_cnt,
+        "task_total":   total,
+        "progress":     progress,
+        "children":     children,
+    }
+
+# ---------------------------------------------------------------------------
+# Auto-generation: Skill Node Chains
+# ---------------------------------------------------------------------------
+
+def _gen_skill_chain(category: str) -> list[dict]:
+    """
+    For each newly-unlocked skill node, generate a chain of board quests:
+    one parent quest per node, with prerequisite nodes as parents.
+    """
+    tree = resolve_tree(category)
+    if not tree:
+        return []
+    generated = []
+    for node in tree["nodes"]:
+        if not node["unlocked"] or node["completed"]:
+            continue
+        src_id = f"skill:{node['id']}"
+        if _source_exists("skill", src_id):
+            continue
+        tasks = node.get("tasks", [])
+        xp    = node.get("xp_reward", 100)
+        # Find parent quest (if any prereq has a board quest)
+        parent_id = None
+        for prereq_id in node.get("prerequisites", []):
+            prereq_src = f"skill:{prereq_id}"
+            try:
+                prow = (
+                    supabase.table("board_quests")
+                    .select("id")
+                    .eq("source_type", "skill")
+                    .eq("source_id", prereq_src)
+                    .execute()
+                )
+                if prow.data:
+                    parent_id = prow.data[0]["id"]
+                    break
+            except Exception:
+                pass
+
+        row = _insert_board_quest({
+            "title":           f"Master: {node['name']}",
+            "description":     node.get("description", ""),
+            "difficulty":      node.get("difficulty", "Normal"),
+            "section":         "skill",
+            "source_type":     "skill",
+            "source_id":       src_id,
+            "category":        category,
+            "xp_reward":       xp,
+            "parent_quest_id": parent_id,
+            "is_completed":    False,
+            "suggested_tasks": _json.dumps(tasks),
+            "created_at":      datetime.now(timezone.utc).isoformat(),
+        })
+        if row:
+            # Auto-create tasks
+            for task_title in tasks[:10]:
+                try:
+                    supabase.table("board_quest_tasks").insert({
+                        "quest_id":    row["id"],
+                        "title":       task_title,
+                        "is_completed": False,
+                        "created_at":  datetime.now(timezone.utc).isoformat(),
+                    }).execute()
+                except Exception:
+                    pass
+            generated.append(row)
+    return generated
+
+# ---------------------------------------------------------------------------
+# Auto-generation: Goal Milestones
+# ---------------------------------------------------------------------------
+
+def _gen_goal_quests() -> list[dict]:
+    """Generate board quests from unstarted goals and milestones."""
+    summary   = build_goal_summary()
+    generated = []
+    for g in summary:
+        src_id = f"goal:{g['id']}"
+        if _source_exists("goal", src_id):
+            continue
+        if g["progress"] >= 100:
+            continue
+        xp = max(50, min(200, g.get("total_tasks", 0) * 20))
+        row = _insert_board_quest({
+            "title":        g["title"],
+            "description":  f"Progress toward your {g['category']} goal.",
+            "difficulty":   "Normal",
+            "section":      "weekly",
+            "source_type":  "goal",
+            "source_id":    src_id,
+            "category":     g["category"],
+            "xp_reward":    xp,
+            "goal_id":      g["id"],
+            "is_completed": False,
+            "created_at":   datetime.now(timezone.utc).isoformat(),
+        })
+        if row:
+            generated.append(row)
+        # Milestones → quests
+        for ms in g.get("milestones", []):
+            if ms.get("is_completed"):
+                continue
+            ms_src = f"milestone:{ms['id']}"
+            if _source_exists("milestone", ms_src):
+                continue
+            ms_row = _insert_board_quest({
+                "title":          ms["title"],
+                "description":    f"Milestone for goal: {g['title']}",
+                "difficulty":     "Normal",
+                "section":        "weekly",
+                "source_type":    "milestone",
+                "source_id":      ms_src,
+                "category":       g["category"],
+                "xp_reward":      75,
+                "goal_id":        g["id"],
+                "milestone_id":   ms["id"],
+                "is_completed":   False,
+                "due_date":       ms.get("target_date"),
+                "created_at":     datetime.now(timezone.utc).isoformat(),
+            })
+            if ms_row:
+                generated.append(ms_row)
+    return generated
+
+# ---------------------------------------------------------------------------
+# Auto-generation: Habit Recovery
+# ---------------------------------------------------------------------------
+
+def _gen_habit_recovery_quests() -> list[dict]:
+    """For habits with broken/at-risk streaks, generate recovery quests."""
+    today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    generated = []
+    try:
+        habit_result = supabase.table("habits").select("name, completed_at").execute()
+        habit_dates: dict[str, list] = defaultdict(list)
+        for row in habit_result.data:
+            habit_dates[row["name"]].append(row["completed_at"])
+        for name, dates in habit_dates.items():
+            if yesterday in dates and today not in dates:
+                src_id = f"habit:{name}:{today}"
+                if _source_exists("habit", src_id):
+                    continue
+                row = _insert_board_quest({
+                    "title":        f"Log '{name}' today",
+                    "description":  f"Your streak for '{name}' is at risk — log it to stay consistent.",
+                    "difficulty":   "Easy",
+                    "section":      "recovery",
+                    "source_type":  "habit",
+                    "source_id":    src_id,
+                    "category":     "Personal Growth",
+                    "xp_reward":    30,
+                    "is_completed": False,
+                    "due_date":     today,
+                    "created_at":   datetime.now(timezone.utc).isoformat(),
+                })
+                if row:
+                    generated.append(row)
+    except Exception:
+        pass
+    return generated
+
+# ---------------------------------------------------------------------------
+# Auto-generation: AI Journal Quests
+# ---------------------------------------------------------------------------
+
+def _gen_journal_quests(entry_content: str, entry_mood: int, entry_id: int) -> list[dict]:
+    """Use Groq to extract quests from a journal entry. Called after entry save."""
+    src_id = f"journal_entry:{entry_id}"
+    if _source_exists("journal", src_id):
+        return []
+    goal_data  = build_goal_summary()
+    categories = list({g["category"] for g in goal_data}) or list(SKILL_TREES.keys())
+    prompt = f"""You extract actionable quests from a personal journal entry for an RPG growth app.
+
+Journal entry (mood: {entry_mood}/5):
+"{entry_content[:600]}"
+
+Active categories: {', '.join(categories[:8])}
+
+Return 1-3 quests as JSON array. Only include quests if the entry clearly suggests actionable intentions.
+
+[
+  {{
+    "title": "specific action under 10 words",
+    "description": "one sentence",
+    "difficulty": "Easy|Normal|Hard",
+    "category": "one from the categories list",
+    "xp_reward": 25-100,
+    "section": "daily|weekly",
+    "suggested_tasks": ["task1","task2"]
+  }}
+]
+
+Return [] if no clear quests emerge. No markdown, pure JSON only."""
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6, max_tokens=400,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
+        quests_raw = _json.loads(raw.strip())
+        generated  = []
+        for q in (quests_raw if isinstance(quests_raw, list) else [])[:3]:
+            row = _insert_board_quest({
+                "title":           q.get("title", "Journal Quest"),
+                "description":     q.get("description", ""),
+                "difficulty":      q.get("difficulty", "Normal"),
+                "section":         q.get("section", "daily"),
+                "source_type":     "journal",
+                "source_id":       src_id,
+                "category":        q.get("category", "Personal Growth"),
+                "xp_reward":       q.get("xp_reward", 50),
+                "is_completed":    False,
+                "suggested_tasks": _json.dumps(q.get("suggested_tasks", [])),
+                "created_at":      datetime.now(timezone.utc).isoformat(),
+            })
+            if row:
+                # Auto-create suggested tasks
+                for task_title in q.get("suggested_tasks", [])[:5]:
+                    try:
+                        supabase.table("board_quest_tasks").insert({
+                            "quest_id":    row["id"],
+                            "title":       task_title,
+                            "is_completed": False,
+                            "created_at":  datetime.now(timezone.utc).isoformat(),
+                        }).execute()
+                    except Exception:
+                        pass
+                generated.append(row)
+        return generated
+    except Exception as e:
+        print(f"[journal quest gen error] {e}")
+        return []
+
+# ---------------------------------------------------------------------------
+# Auto-generation: Boss Quests (after boss is created)
+# ---------------------------------------------------------------------------
+
+def _gen_boss_quest(boss: dict) -> Optional[dict]:
+    src_id = f"boss:{boss['id']}"
+    if _source_exists("boss", src_id):
+        return None
+    reqs = boss.get("requirements", [])
+    if isinstance(reqs, str):
+        try: reqs = _json.loads(reqs)
+        except: reqs = []
+    tasks = [r["label"] for r in reqs if isinstance(r, dict) and "label" in r]
+    row = _insert_board_quest({
+        "title":           boss.get("name", "Weekly Boss"),
+        "description":     boss.get("description", ""),
+        "difficulty":      "Elite",
+        "section":         "boss",
+        "source_type":     "boss",
+        "source_id":       src_id,
+        "category":        boss.get("domain", "Personal Growth"),
+        "xp_reward":       boss.get("xp_reward", 200),
+        "is_completed":    False,
+        "due_date":        boss.get("deadline"),
+        "suggested_tasks": _json.dumps(tasks),
+        "created_at":      datetime.now(timezone.utc).isoformat(),
+    })
+    if row and tasks:
+        for task_title in tasks:
+            try:
+                supabase.table("board_quest_tasks").insert({
+                    "quest_id":    row["id"],
+                    "title":       task_title,
+                    "is_completed": False,
+                    "created_at":  datetime.now(timezone.utc).isoformat(),
+                }).execute()
+            except Exception:
+                pass
+    return row
+
+# ---------------------------------------------------------------------------
+# Recommendation engine
+# ---------------------------------------------------------------------------
+
+def _build_recommended_section(all_quests: list[dict]) -> list[dict]:
+    """
+    Score all non-completed quests and return top 3 as 'recommended'.
+    Scoring: due_date urgency + difficulty weight + source priority + section order
+    """
+    today = datetime.now(timezone.utc).date()
+    candidates = [q for q in all_quests if not q.get("is_completed") and q.get("section") != "completed"]
+
+    def score(q: dict) -> float:
+        s = 0.0
+        # Due date urgency
+        due = q.get("due_date")
+        if due:
+            try:
+                days_left = (datetime.strptime(due, "%Y-%m-%d").date() - today).days
+                if days_left <= 0:   s += 100
+                elif days_left <= 1: s += 80
+                elif days_left <= 3: s += 50
+                elif days_left <= 7: s += 30
+            except Exception:
+                pass
+        # Source priority
+        source_weight = {"boss": 50, "habit": 40, "skill": 30, "goal": 25, "journal": 20, "milestone": 15, "manual": 10}
+        s += source_weight.get(q.get("source_type", "manual"), 10)
+        # Difficulty
+        diff_weight = {"Elite": 20, "Hard": 15, "Normal": 10, "Easy": 5}
+        s += diff_weight.get(q.get("difficulty", "Normal"), 10)
+        # Section bonus
+        section_weight = {"recovery": 35, "boss": 30, "daily": 20, "weekly": 15, "skill": 10}
+        s += section_weight.get(q.get("section", "daily"), 5)
+        # Progress: prefer quests already partially done
+        prog = q.get("progress", 0)
+        if 0 < prog < 100:
+            s += 15
+        return s
+
+    ranked = sorted(candidates, key=score, reverse=True)[:3]
+    return ranked
+
+# ---------------------------------------------------------------------------
+# Quest Board endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/board/quests")
+def get_board_quests():
+    """
+    Return all board quests organised into sections.
+    Also runs auto-generation for skill chains + habit recovery.
+    """
+    # Trigger auto-gen (non-blocking, idempotent)
+    try:
+        for cat in SKILL_TREES:
+            _gen_skill_chain(cat)
+    except Exception:
+        pass
+    try:
+        _gen_habit_recovery_quests()
+    except Exception:
+        pass
+    try:
+        _gen_goal_quests()
+    except Exception:
+        pass
+
+    all_quests = _get_board_quests()
+    enriched   = [_build_quest_card(q) for q in all_quests]
+
+    # Separate top-level from children
+    top_level = [q for q in enriched if not q.get("parent_quest_id")]
+
+    # Build recommended
+    recommended = _build_recommended_section(top_level)
+    rec_ids     = {q["id"] for q in recommended}
+
+    sections: dict[str, list] = {s: [] for s in SECTION_ORDER}
+    sections["recommended"] = recommended
+    for q in top_level:
+        if q["id"] in rec_ids:
+            continue
+        sec = q.get("section", "daily")
+        if q.get("is_completed"):
+            sec = "completed"
+        if sec in sections:
+            sections[sec].append(q)
+        else:
+            sections["daily"].append(q)
+
+    # Attach chain info: for each quest list its children recursively
+    def attach_children(q_list):
+        return [
+            {**q, "chain": attach_children(q.get("children", []))}
+            for q in q_list
+        ]
+
+    for sec in sections:
+        sections[sec] = attach_children(sections[sec])
+
+    return {
+        "sections": sections,
+        "total":    len(enriched),
+        "pending":  sum(1 for q in enriched if not q.get("is_completed")),
+    }
+
+@app.post("/board/quests")
+def create_board_quest(q: QuestBoardCreate):
+    """Manually create a board quest."""
+    xp  = q.xp_reward or XP_BY_DIFFICULTY.get(q.difficulty, 50)
+    row = _insert_board_quest({
+        "title":           q.title,
+        "description":     q.description,
+        "difficulty":      q.difficulty,
+        "section":         q.section,
+        "source_type":     q.source_type or "manual",
+        "source_id":       q.source_id or f"manual:{datetime.now(timezone.utc).isoformat()}",
+        "category":        q.category,
+        "xp_reward":       xp,
+        "parent_quest_id": q.parent_quest_id,
+        "goal_id":         q.goal_id,
+        "milestone_id":    q.milestone_id,
+        "is_completed":    False,
+        "due_date":        q.due_date,
+        "suggested_tasks": _json.dumps(q.suggested_tasks),
+        "created_at":      datetime.now(timezone.utc).isoformat(),
+    })
+    if not row:
+        raise HTTPException(500, "Could not create quest")
+    # Auto-create suggested tasks
+    for task_title in q.suggested_tasks[:10]:
+        try:
+            supabase.table("board_quest_tasks").insert({
+                "quest_id":    row["id"],
+                "title":       task_title,
+                "is_completed": False,
+                "created_at":  datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except Exception:
+            pass
+    return {"status": "created", "quest": row}
+
+@app.put("/board/quests/{quest_id}")
+def update_board_quest(quest_id: int, data: QuestBoardUpdate):
+    update = {k: v for k, v in data.dict().items() if v is not None}
+    if not update:
+        raise HTTPException(400, "Nothing to update")
+    result = supabase.table("board_quests").update(update).eq("id", quest_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Quest not found")
+    return {"status": "updated", "quest": result.data[0]}
+
+@app.post("/board/quests/{quest_id}/complete")
+def complete_board_quest(quest_id: int):
+    """Mark a board quest complete, award XP, unlock children."""
+    quest = supabase.table("board_quests").select("*").eq("id", quest_id).execute()
+    if not quest.data:
+        raise HTTPException(404, "Quest not found")
+    q    = quest.data[0]
+    xp   = q.get("xp_reward", 50)
+    cat  = q.get("category", "Personal Growth")
+
+    supabase.table("board_quests").update({
+        "is_completed":  True,
+        "completed_at":  datetime.now(timezone.utc).isoformat(),
+        "section":       "completed",
+    }).eq("id", quest_id).execute()
+
+    ledger_add("board_quest", str(quest_id), cat, xp)
+    new_achievements = award_achievements()
+
+    # Unlock children: move from locked/hidden state to their section
+    try:
+        children = supabase.table("board_quests").select("id, section").eq("parent_quest_id", quest_id).execute().data
+        for child in children:
+            supabase.table("board_quests").update({"unlocked_at": datetime.now(timezone.utc).isoformat()}).eq("id", child["id"]).execute()
+    except Exception:
+        pass
+
+    return {
+        "status":           "completed",
+        "xp_earned":        xp,
+        "category":         cat,
+        "new_achievements": new_achievements,
+        "children_unlocked": len(children) if 'children' in dir() else 0,
+    }
+
+@app.delete("/board/quests/{quest_id}")
+def delete_board_quest(quest_id: int):
+    try:
+        supabase.table("board_quest_tasks").delete().eq("quest_id", quest_id).execute()
+    except Exception:
+        pass
+    result = supabase.table("board_quests").delete().eq("id", quest_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Quest not found")
+    return {"status": "deleted"}
+
+# Board quest tasks
+@app.post("/board/quests/{quest_id}/tasks")
+def add_board_task(quest_id: int, task: TaskCreate):
+    result = supabase.table("board_quest_tasks").insert({
+        "quest_id":    quest_id,
+        "title":       task.title,
+        "is_completed": False,
+        "created_at":  datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return result.data[0]
+
+@app.put("/board/tasks/{task_id}")
+def toggle_board_task(task_id: int):
+    task = supabase.table("board_quest_tasks").select("*").eq("id", task_id).single().execute().data
+    if not task:
+        raise HTTPException(404, "Task not found")
+    is_completing = not task["is_completed"]
+    supabase.table("board_quest_tasks").update({"is_completed": is_completing}).eq("id", task_id).execute()
+
+    # Check if all tasks done → auto-suggest completing quest
+    all_tasks = supabase.table("board_quest_tasks").select("is_completed").eq("quest_id", task["quest_id"]).execute().data
+    all_done  = all(t["is_completed"] for t in all_tasks) if all_tasks else False
+
+    return {"id": task_id, "is_completed": is_completing, "all_tasks_done": all_done, "quest_id": task["quest_id"]}
+
+@app.delete("/board/tasks/{task_id}")
+def delete_board_task(task_id: int):
+    supabase.table("board_quest_tasks").delete().eq("id", task_id).execute()
+    return {"status": "deleted"}
+
+# Trigger journal quest generation manually (called from frontend after entry save)
+@app.post("/board/generate/journal")
+def generate_journal_board_quests(data: dict):
+    content  = data.get("content", "")
+    mood     = data.get("mood", 3)
+    entry_id = data.get("entry_id", 0)
+    generated = _gen_journal_quests(content, mood, entry_id)
+    return {"generated": len(generated), "quests": generated}
+
+# Trigger skill chain generation
+@app.post("/board/generate/skills")
+def generate_skill_board_quests():
+    total = []
+    for cat in SKILL_TREES:
+        total.extend(_gen_skill_chain(cat))
+    return {"generated": len(total), "quests": total}
+
+# Trigger boss quest generation
+@app.post("/board/generate/boss/{boss_id}")
+def generate_boss_board_quest(boss_id: int):
+    boss = supabase.table("weekly_bosses").select("*").eq("id", boss_id).execute()
+    if not boss.data:
+        raise HTTPException(404, "Boss not found")
+    row = _gen_boss_quest(boss.data[0])
+    return {"generated": 1 if row else 0, "quest": row}
 
 # ---------------------------------------------------------------------------
 # Serve static files
