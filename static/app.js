@@ -294,15 +294,16 @@ entryForm.addEventListener("submit", async (e) => {
         }
     } else if (currentEntryType === "night") {
         const parts = [
-            gv("night-win")      ? `Win: ${gv("night-win")}` : "",
-            gv("night-learned")  ? `Learned: ${gv("night-learned")}` : "",
-            gv("night-well")     ? `Went well: ${gv("night-well")}` : "",
-            gv("night-poorly")   ? `Went poorly: ${gv("night-poorly")}` : "",
-            gv("night-grateful") ? `Grateful for: ${gv("night-grateful")}` : "",
-            gv("night-tomorrow") ? `Tomorrow: ${gv("night-tomorrow")}` : "",
+            gv("night-highlight")  ? `Highlight: ${gv("night-highlight")}` : "",
+            gv("night-quests")     ? `Quest progress: ${gv("night-quests")}` : "",
+            gv("night-skills")     ? `Skill growth: ${gv("night-skills")}` : "",
+            gv("night-challenge")  ? `Challenge: ${gv("night-challenge")}` : "",
+            gv("night-response")   ? `Response: ${gv("night-response")}` : "",
+            gv("night-lesson")     ? `Lesson: ${gv("night-lesson")}` : "",
+            gv("night-tomorrow")   ? `Tomorrow: ${gv("night-tomorrow")}` : "",
         ].filter(Boolean);
         entryData = {
-            title: gv("night-win").trim().slice(0, 60) || "Night Reflection",
+            title: gv("night-highlight").trim().slice(0, 60) || "Night Reflection",
             content: parts.join("\n"),
             mood: gi("n-mood"),
             energy: gi("n-energy"), focus: gi("n-focus"), tags: [], entry_type: "night",
@@ -310,7 +311,7 @@ entryForm.addEventListener("submit", async (e) => {
         if (nightTasks.length) {
             await fetch("/plans/today/reflect", {
                 method: "PUT", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tasks: nightTasks, reflection_note: gv("night-win") }),
+                body: JSON.stringify({ tasks: nightTasks, reflection_note: gv("night-highlight") }),
             });
         }
     } else {
@@ -553,13 +554,14 @@ window.editEntry = async function(id, title, content, mood, tags, entryType) {
         document.getElementById("m-mood").value = mood;
         document.getElementById("m-mood-val").textContent = mood;
     } else if (entryType === "night") {
-        const lines   = content.split("\\n");
-        const get     = (p) => (lines.find(l => l.startsWith(p)) || "").replace(p,"");
-        document.getElementById("night-win").value       = get("Win: ");
-        document.getElementById("night-learned").value   = get("Learned: ");
-        document.getElementById("night-well").value      = get("Went well: ");
-        document.getElementById("night-poorly").value    = get("Went poorly: ");
-        document.getElementById("night-grateful").value  = get("Grateful for: ");
+        const lines = content.split("\\n");
+        const get = (p) => (lines.find(l => l.startsWith(p)) || "").replace(p,"");
+        document.getElementById("night-highlight").value = get("Highlight: ");
+        document.getElementById("night-quests").value    = get("Quest progress: ");
+        document.getElementById("night-skills").value    = get("Skill growth: ");
+        document.getElementById("night-challenge").value = get("Challenge: ");
+        document.getElementById("night-response").value  = get("Response: ");
+        document.getElementById("night-lesson").value    = get("Lesson: ");
         document.getElementById("night-tomorrow").value  = get("Tomorrow: ");
         document.getElementById("n-mood").value          = mood;
         document.getElementById("n-mood-val").textContent = mood;

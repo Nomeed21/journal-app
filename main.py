@@ -1,5 +1,9 @@
 import os
 import json as _json
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("liainne")
+
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from collections import defaultdict
@@ -59,17 +63,7 @@ class ChatTurn(BaseModel):
 class ChatMessage(BaseModel):
     message: str
     history: list[ChatTurn] = []
-
-class HabitLog(BaseModel):
-    name: str
-    category: str = "Productivity"
-    difficulty: str = "Normal"   # Easy | Normal | Hard | Elite
-    linked_skill: Optional[str] = None  # category name of a skill tree
-
-class RecoveryTokenUse(BaseModel):
-    name: str
-    date: str  # YYYY-MM-DD
-
+    
 class GoalCreate(BaseModel):
     title: str
     category: str
@@ -103,13 +97,6 @@ class PlanCreate(BaseModel):
 
 class MasteryCheckSubmit(BaseModel):
     response: str
-
-
-class QuestCreate(BaseModel):
-    title: str
-    description: str = ""
-    difficulty: str = "Normal"
-    milestone_id: Optional[int] = None
 
 # ---------------------------------------------------------------------------
 # Skill-node tag helpers  (no schema migration needed)
@@ -184,16 +171,19 @@ def avg(lst, key=None):
 
 def ledger_add(source_type: str, source_id: str, category: str, xp: int):
     """Append an XP event. Idempotent via source_type+source_id upsert."""
-    supabase.table("xp_ledger").upsert(
-        {
-            "source_type": source_type,
-            "source_id":   str(source_id),
-            "category":    category,
-            "xp":          xp,
-            "earned_at":   datetime.now(timezone.utc).isoformat(),
-        },
-        on_conflict="source_type,source_id"
-    ).execute()
+    try:
+        supabase.table("xp_ledger").upsert(
+            {
+                "source_type": source_type,
+                "source_id":   str(source_id),
+                "category":    category,
+                "xp":          xp,
+                "earned_at":   datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="source_type,source_id"
+        ).execute()
+    except Exception as e:
+        logger.exception("ledger_add failed (%s/%s, %s, %s xp): %s", source_type, source_id, category, xp, e)
 
 def get_category_xp(category: str) -> int:
     """Total XP for a category from the ledger."""
@@ -239,16 +229,19 @@ DEFAULT_REWARD_COST = 1000  # e.g. "Leisure Time"
 
 def vp_add(source_type: str, source_id: str, amount: int, note: str = ""):
     """Append a VP event. Idempotent via source_type+source_id upsert, same pattern as ledger_add."""
-    supabase.table("vp_ledger").upsert(
-        {
-            "source_type": source_type,
-            "source_id":   str(source_id),
-            "amount":      amount,
-            "note":        note,
-            "created_at":  datetime.now(timezone.utc).isoformat(),
-        },
-        on_conflict="source_type,source_id"
-    ).execute()
+    try:
+        supabase.table("vp_ledger").upsert(
+            {
+                "source_type": source_type,
+                "source_id":   str(source_id),
+                "amount":      amount,
+                "note":        note,
+                "created_at":  datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="source_type,source_id"
+        ).execute()
+    except Exception as e:
+        logger.exception("vp_add failed (%s/%s, %s VP): %s", source_type, source_id, amount, e)
 
 def get_vp_balance() -> int:
     try:
@@ -374,7 +367,8 @@ def award_achievements():
                 ledger_add("achievement", ach["key"], "Personal Growth", ach["xp"])
                 newly_earned.append({"name": ach["name"], "xp": ach["xp"]})
         return newly_earned
-    except Exception:
+    except Exception as e:
+        logger.exception("award_achievements failed: %s", e)
         return []
 
 # ---------------------------------------------------------------------------
@@ -952,7 +946,7 @@ def _get_or_create_profile(name: str, skill_node_id: str = "", skill_tree: str =
         "name":             name,
         "skill_node_id":    skill_node_id,
         "skill_tree":       skill_tree,
-        "domain":           domain or _domain_for_skill_tree(skill_tree) if skill_tree else "Personal Growth",
+        "domain":           domain or (_domain_for_skill_tree(skill_tree) if skill_tree else "Personal Growth"),
         "evolution_stage":  1,
         "evolution_stages": [],
         "pending_evolution": False,
@@ -4580,7 +4574,7 @@ def _insert_board_quest(data: dict) -> Optional[dict]:
         res = supabase.table("board_quests").insert(data).execute()
         return res.data[0] if res.data else None
     except Exception as e:
-        print(f"[board_quests insert error] {e}")
+        logger.exception("board_quests insert error: %s", e)
         return None
 
 def _get_board_quests() -> list[dict]:
@@ -4786,8 +4780,8 @@ def _gen_habit_recovery_quests() -> list[dict]:
                 })
                 if row:
                     generated.append(row)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("_gen_habit_recovery_quests failed: %s", e)
     return generated
 
 # ---------------------------------------------------------------------------
@@ -4866,7 +4860,7 @@ Return [] if no clear quests emerge. No markdown, pure JSON only."""
                 generated.append(row)
         return generated
     except Exception as e:
-        print(f"[journal quest gen error] {e}")
+        logger.exception("_gen_journal_quests failed: %s", e)
         return []
 
 # ---------------------------------------------------------------------------
