@@ -4868,7 +4868,7 @@ body {
     .qbc-row { grid-template-columns: 1fr 1fr; }
 }
 /* ============================================
-   Theme Toggle Button
+   Theme Toggle
    ============================================ */
 
 .theme-toggle {
@@ -4884,14 +4884,12 @@ body {
     transition: background .15s, border-color .15s;
     width: 100%;
 }
-
 .theme-toggle:hover {
     background: var(--accent-soft);
     border-color: var(--accent);
     transform: none;
     box-shadow: none;
 }
-
 .theme-toggle-track {
     width: 32px;
     height: 18px;
@@ -4901,11 +4899,7 @@ body {
     flex-shrink: 0;
     transition: background .2s;
 }
-
-.theme-toggle-track.active {
-    background: var(--accent);
-}
-
+.theme-toggle-track.active { background: var(--accent); }
 .theme-toggle-thumb {
     width: 12px;
     height: 12px;
@@ -4917,11 +4911,7 @@ body {
     transition: transform .2s cubic-bezier(.34,1.5,.64,1);
     box-shadow: 0 1px 3px rgba(0,0,0,.2);
 }
-
-.theme-toggle-track.active .theme-toggle-thumb {
-    transform: translateX(14px);
-}
-
+.theme-toggle-track.active .theme-toggle-thumb { transform: translateX(14px); }
 .theme-toggle-label {
     font-size: .7rem;
     font-weight: 600;
@@ -4929,10 +4919,225 @@ body {
     line-height: 1.2;
     text-align: left;
 }
-
 .theme-toggle-label span {
     display: block;
     font-size: .62rem;
     color: var(--ink-faint);
     font-weight: 400;
 }
+
+/* ============================================
+   Chat -- Thinking indicator + Quest card
+   ============================================ */
+
+.chat-thinking {
+    color: var(--ink-faint) !important;
+    font-style: italic;
+    font-size: .85rem !important;
+    animation: chatPulse 1.2s ease-in-out infinite;
+}
+@keyframes chatPulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: .35; }
+}
+.chat-quest-card {
+    background: linear-gradient(135deg, var(--accent-soft) 0%, #fce4ec 100%);
+    border: 1.5px solid var(--line-strong);
+    border-left: 4px solid var(--accent);
+    border-radius: 12px;
+    padding: .85rem 1rem;
+    margin: .25rem 0 .25rem .5rem;
+    animation: cqcSlide .25s ease;
+}
+@keyframes cqcSlide {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.cqc-label {
+    font-size: .65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--accent-deep);
+    margin-bottom: .35rem;
+}
+.cqc-title {
+    font-family: var(--font-display);
+    font-size: .95rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: .25rem;
+    line-height: 1.3;
+}
+.cqc-desc {
+    font-size: .78rem;
+    color: var(--ink-soft);
+    margin-bottom: .45rem;
+    line-height: 1.4;
+}
+.cqc-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .25rem;
+    margin-bottom: .6rem;
+}
+.cqc-chip {
+    font-size: .65rem;
+    font-weight: 600;
+    background: var(--paper);
+    color: var(--ink-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: .15rem .45rem;
+    white-space: nowrap;
+}
+.cqc-actions { display: flex; gap: .4rem; align-items: center; }
+.cqc-view-btn {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: .38rem .8rem;
+    font-size: .78rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 5px var(--shadow);
+    transition: background .15s;
+}
+.cqc-view-btn:hover { background: var(--accent-deep); transform: none; box-shadow: none; }
+.cqc-dismiss {
+    background: none;
+    color: var(--ink-faint);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: .35rem .7rem;
+    font-size: .75rem;
+    cursor: pointer;
+    box-shadow: none;
+}
+.cqc-dismiss:hover { background: var(--paper-soft); color: var(--ink-soft); transform: none; box-shadow: none; }
+/* ============================================================
+   Habit → Quest Task auto-completion + Skill Node Mastery
+   ============================================================ */
+
+.qb-task-linked {
+    font-size: .68rem;
+    color: var(--accent-deep);
+    font-weight: 600;
+    background: var(--accent-soft);
+    border-radius: 6px;
+    padding: .05rem .35rem;
+    margin-left: .25rem;
+}
+
+.qb-task-habit-progress {
+    font-size: .72rem;
+    color: var(--ink-faint);
+    font-weight: 600;
+}
+
+.qb-task-auto-badge {
+    font-size: .64rem;
+    font-weight: 700;
+    background: #f3e8ff;
+    color: #5b21b6;
+    border: 1px solid #c4b5fd;
+    border-radius: 999px;
+    padding: .1rem .45rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.qb-task-link-btn {
+    background: none;
+    border: none;
+    color: var(--ink-faint);
+    font-size: .78rem;
+    padding: .1rem .3rem;
+    cursor: pointer;
+    box-shadow: none;
+    flex-shrink: 0;
+    transition: color .12s;
+}
+.qb-task-link-btn:hover { color: var(--accent-deep); background: none; transform: none; box-shadow: none; }
+
+.qb-task-row input[type="checkbox"]:disabled {
+    accent-color: var(--ink-faint);
+    cursor: not-allowed;
+}
+
+/* Skill node mastery breakdown */
+.skt-mastery {
+    border-top: 1px solid var(--line);
+    padding-top: .55rem;
+    margin-top: .1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+}
+
+.skt-mastery-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.skt-mastery-label {
+    font-size: .78rem;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.skt-mastered-badge {
+    font-size: .68rem;
+    font-weight: 700;
+    background: #fff8e1;
+    color: #e65100;
+    border: 1px solid #ffe082;
+    border-radius: 999px;
+    padding: .1rem .5rem;
+}
+
+.skt-mastery-bar-wrap {
+    height: 7px;
+    background: var(--line-strong);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.skt-mastery-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-deep));
+    border-radius: 4px;
+    transition: width .4s ease;
+}
+
+.skt-mastery-sub-row {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+}
+
+.skt-mastery-sub-label {
+    font-size: .68rem;
+    color: var(--ink-faint);
+    min-width: 62px;
+    flex-shrink: 0;
+}
+
+.skt-mastery-mini-wrap {
+    flex: 1;
+    height: 4px;
+    background: var(--line);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.skt-mastery-mini-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width .4s ease;
+}
+
+.skt-mastery-mini-fill--habit { background: #f7a94b; }
+.skt-mastery-mini-fill--quest { background: #4caf50; }

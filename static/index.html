@@ -498,6 +498,24 @@
         </div>
     </div>
 </div>
+<script>
+  // Must be global for onclick="toggleTheme()" to work
+  function toggleTheme() {
+    const current = document.documentElement.getAttribute("data-theme") || "ballerina";
+    const next = current === "ballerina" ? "gray" : "ballerina";
+    document.documentElement.setAttribute("data-theme", next);
+    localStorage.setItem("liainne-theme", next);
+    const track = document.getElementById("theme-track");
+    const label = document.getElementById("theme-label");
+    if (track) track.classList.toggle("active", next === "gray");
+    if (label) label.textContent = next === "gray" ? "Gray" : "Ballerina";
+  }
+  // Apply on load before paint
+  (function() {
+    const saved = localStorage.getItem("liainne-theme") || "ballerina";
+    document.documentElement.setAttribute("data-theme", saved);
+  })();
+</script>
 
 <script src="app.js"></script>
 </body>

@@ -76,6 +76,12 @@ class GoalCreate(BaseModel):
 
 class TaskCreate(BaseModel):
     title: str
+    linked_habit_name: str = ""
+    required_logs: int = 1
+
+class TaskHabitLink(BaseModel):
+    linked_habit_name: str
+    required_logs: int = 1
 
 class ActionEngineRequest(BaseModel):
     mood: int
@@ -1245,6 +1251,38 @@ def log_habit(habit: HabitLog):
 
     new_achievements = award_achievements()
 
+    # --- Automatic quest task progress from this habit log ------------------
+    # Idempotent: this block only runs once per calendar day per habit, because
+    # log_habit itself returns early ("already_logged") for repeat logs today.
+    auto_completed_tasks = []
+    try:
+        linked_tasks = (
+            supabase.table("board_quest_tasks")
+            .select("*")
+            .eq("linked_habit_name", habit.name)
+            .eq("is_completed", False)
+            .execute()
+            .data
+        )
+        for t in linked_tasks:
+            new_count = (t.get("current_logs") or 0) + 1
+            required  = t.get("required_logs") or 1
+            update_data = {"current_logs": new_count}
+            if new_count < required:
+                supabase.table("board_quest_tasks").update(update_data).eq("id", t["id"]).execute()
+            else:
+                completion = _mark_board_task_completed({**t, "current_logs": new_count}, auto=True)
+                auto_completed_tasks.append({
+                    "task_id":     t["id"],
+                    "task_title":  t["title"],
+                    "quest_id":    t["quest_id"],
+                    "current_logs": new_count,
+                    "required_logs": required,
+                    **completion,
+                })
+    except Exception:
+        pass
+
     return {
         "status":          "logged",
         "xp_earned":       xp_total,
@@ -1259,6 +1297,7 @@ def log_habit(habit: HabitLog):
         "new_achievements": new_achievements,
         "domain":          domain,
         "skill_tree":      skill_tree,
+        "auto_completed_tasks": auto_completed_tasks,
     }
 
 @app.get("/habits/streaks")
@@ -2509,6 +2548,84 @@ def _get_active_skill_goals(category: str) -> dict:
     except Exception:
         return {}
 
+# ---------------------------------------------------------------------------
+# Skill Node Mastery — 40% habit consistency + 60% quest completion
+# ---------------------------------------------------------------------------
+
+def _compute_node_habit_progress(category: str, node_id: str) -> float:
+    """
+    Average success-rate of habits linked to this skill node, with slow decay
+    for days missed since the last log (never an instant reset).
+    """
+    try:
+        profiles = (
+            supabase.table("habit_profiles")
+            .select("name")
+            .eq("skill_tree", category)
+            .eq("skill_node_id", node_id)
+            .execute()
+            .data
+        )
+        if not profiles:
+            return 0.0
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        scores = []
+        for p in profiles:
+            name = p["name"]
+            dates = sorted(
+                {r["completed_at"] for r in supabase.table("habits").select("completed_at").eq("name", name).execute().data},
+                reverse=True
+            )
+            if not dates:
+                scores.append(0.0)
+                continue
+            snap = _build_habit_snapshot(name, p, dates, today)
+            rate = snap["success_rate"]
+            last = datetime.strptime(dates[0], "%Y-%m-%d")
+            days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last).days
+            decayed = max(0.0, rate - days_since * 2)  # -2 pts/day of inactivity, floor at 0
+            scores.append(decayed)
+        return round(sum(scores) / len(scores), 1) if scores else 0.0
+    except Exception:
+        return 0.0
+
+def _compute_node_quest_progress(category: str, node_id: str) -> float:
+    """% of tasks complete in the board quest generated for this skill node."""
+    try:
+        src_id = f"skill:{node_id}"
+        rows = (
+            supabase.table("board_quests")
+            .select("id, is_completed")
+            .eq("source_type", "skill")
+            .eq("source_id", src_id)
+            .execute()
+            .data
+        )
+        if not rows:
+            return 0.0
+        q = rows[0]
+        if q.get("is_completed"):
+            return 100.0
+        tasks = supabase.table("board_quest_tasks").select("is_completed").eq("quest_id", q["id"]).execute().data
+        if not tasks:
+            return 0.0
+        done = sum(1 for t in tasks if t["is_completed"])
+        return round(done / len(tasks) * 100, 1)
+    except Exception:
+        return 0.0
+
+def compute_node_mastery(category: str, node_id: str) -> dict:
+    """mastery = 40% habit_progress + 60% quest_progress. Reuses existing habit/quest data — no new tables."""
+    habit_p = _compute_node_habit_progress(category, node_id)
+    quest_p = _compute_node_quest_progress(category, node_id)
+    mastery = round(habit_p * 0.4 + quest_p * 0.6, 1)
+    return {
+        "habit_progress": habit_p,
+        "quest_progress": quest_p,
+        "mastery":         mastery,
+        "mastered":        mastery >= 100 and quest_p >= 100,
+    }
+
 def resolve_tree(category: str) -> dict:
     tree_def = SKILL_TREES.get(category)
     if not tree_def:
@@ -2523,6 +2640,7 @@ def resolve_tree(category: str) -> dict:
         unlocked    = prereqs_met and xp_met
         completed   = node["id"] in completed_ids
         active      = active_goals.get(node["id"])
+        mastery_data = compute_node_mastery(category, node["id"])
         resolved.append({
             **node,
             "unlocked":    unlocked,
@@ -2532,6 +2650,10 @@ def resolve_tree(category: str) -> dict:
             "category_xp": xp,
             "active_goal": active,   # None or {goal_id, completed_tasks, total_tasks, progress}
             "leads_to": [n["id"] for n in tree_def["nodes"] if node["id"] in n["prerequisites"]],
+            "habit_progress": mastery_data["habit_progress"],
+            "quest_progress": mastery_data["quest_progress"],
+            "mastery":         mastery_data["mastery"],
+            "mastered":        mastery_data["mastered"],
         })
     return {**tree_def, "category": category, "category_xp": xp, "nodes": resolved}
 
@@ -3200,7 +3322,7 @@ def build_weekly_summary_block(all_light_entries: list[dict]) -> str:
         weekly[key]["count"] += 1
     rows = [
         f"{k}: avg mood {round(sum(v['moods'])/len(v['moods']),1)}/5, {v['count']} entries"
-        for k in sorted(weekly.keys())
+        for k, v in sorted(weekly.items())
     ]
     if len(rows) > MAX_WEEKLY_ROWS:
         h, t = rows[:MAX_WEEKLY_ROWS//2], rows[-(MAX_WEEKLY_ROWS//2):]
@@ -4806,37 +4928,14 @@ def update_board_quest(quest_id: int, data: QuestBoardUpdate):
 @app.post("/board/quests/{quest_id}/complete")
 def complete_board_quest(quest_id: int):
     """Mark a board quest complete, award XP, unlock children."""
-    quest = supabase.table("board_quests").select("*").eq("id", quest_id).execute()
-    if not quest.data:
-        raise HTTPException(404, "Quest not found")
-    q    = quest.data[0]
-    xp   = q.get("xp_reward", 50)
-    cat  = q.get("category", "Personal Growth")
-
-    supabase.table("board_quests").update({
-        "is_completed":  True,
-        "completed_at":  datetime.now(timezone.utc).isoformat(),
-        "section":       "completed",
-    }).eq("id", quest_id).execute()
-
-    ledger_add("board_quest", str(quest_id), cat, xp)
-    new_achievements = award_achievements()
-
-    # Unlock children: move from locked/hidden state to their section
-    try:
-        children = supabase.table("board_quests").select("id, section").eq("parent_quest_id", quest_id).execute().data
-        for child in children:
-            supabase.table("board_quests").update({"unlocked_at": datetime.now(timezone.utc).isoformat()}).eq("id", child["id"]).execute()
-    except Exception:
-        pass
-
-    return {
-        "status":           "completed",
-        "xp_earned":        xp,
-        "category":         cat,
-        "new_achievements": new_achievements,
-        "children_unlocked": len(children) if 'children' in dir() else 0,
-    }
+    result = _complete_board_quest_internal(quest_id)
+    if result is None:
+        # Either not found or already completed — check which for a clean error
+        existing = supabase.table("board_quests").select("id, is_completed").eq("id", quest_id).execute()
+        if not existing.data:
+            raise HTTPException(404, "Quest not found")
+        return {"status": "already_completed"}
+    return result
 
 @app.delete("/board/quests/{quest_id}")
 def delete_board_quest(quest_id: int):
@@ -4853,26 +4952,120 @@ def delete_board_quest(quest_id: int):
 @app.post("/board/quests/{quest_id}/tasks")
 def add_board_task(quest_id: int, task: TaskCreate):
     result = supabase.table("board_quest_tasks").insert({
-        "quest_id":    quest_id,
-        "title":       task.title,
-        "is_completed": False,
-        "created_at":  datetime.now(timezone.utc).isoformat(),
+        "quest_id":          quest_id,
+        "title":             task.title,
+        "is_completed":      False,
+        "linked_habit_name": task.linked_habit_name or None,
+        "required_logs":     task.required_logs or 1,
+        "current_logs":      0,
+        "created_at":        datetime.now(timezone.utc).isoformat(),
     }).execute()
     return result.data[0]
+
+@app.put("/board/tasks/{task_id}/link-habit")
+def link_task_to_habit(task_id: int, link: TaskHabitLink):
+    """Attach a habit to a quest task so logging that habit drives task progress."""
+    task = supabase.table("board_quest_tasks").select("*").eq("id", task_id).single().execute().data
+    if not task:
+        raise HTTPException(404, "Task not found")
+    supabase.table("board_quest_tasks").update({
+        "linked_habit_name": link.linked_habit_name,
+        "required_logs":     max(link.required_logs, 1),
+        "current_logs":      0,
+    }).eq("id", task_id).execute()
+    return {"status": "linked", "task_id": task_id, "linked_habit_name": link.linked_habit_name,
+            "required_logs": max(link.required_logs, 1)}
+
+@app.delete("/board/tasks/{task_id}/link-habit")
+def unlink_task_habit(task_id: int):
+    supabase.table("board_quest_tasks").update({
+        "linked_habit_name": None, "required_logs": 1, "current_logs": 0,
+    }).eq("id", task_id).execute()
+    return {"status": "unlinked", "task_id": task_id}
+
+def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
+    """
+    Centralized board-quest completion: awards XP, unlocks children, checks achievements.
+    Reused by the manual /complete endpoint AND by habit-driven auto-completion.
+    Idempotent — returns None if already completed.
+    """
+    quest = supabase.table("board_quests").select("*").eq("id", quest_id).execute()
+    if not quest.data:
+        return None
+    q = quest.data[0]
+    if q.get("is_completed"):
+        return None
+    xp  = q.get("xp_reward", 50)
+    cat = q.get("category", "Personal Growth")
+
+    supabase.table("board_quests").update({
+        "is_completed": True,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "section":      "completed",
+    }).eq("id", quest_id).execute()
+
+    ledger_add("board_quest", str(quest_id), cat, xp)
+    new_achievements = award_achievements()
+
+    children_unlocked = 0
+    try:
+        children = supabase.table("board_quests").select("id").eq("parent_quest_id", quest_id).execute().data
+        for child in children:
+            supabase.table("board_quests").update(
+                {"unlocked_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", child["id"]).execute()
+        children_unlocked = len(children)
+    except Exception:
+        pass
+
+    return {
+        "status":            "completed",
+        "xp_earned":         xp,
+        "category":          cat,
+        "new_achievements":  new_achievements,
+        "children_unlocked": children_unlocked,
+    }
+
+def _mark_board_task_completed(task: dict, auto: bool = False) -> dict:
+    """
+    Centralized task-completion side effects: marks the task done, checks whether
+    its parent quest is now fully done, and — if so — runs it through the same
+    completion pipeline as a manually-completed quest (XP, achievements, unlocks).
+    """
+    task_id  = task["id"]
+    quest_id = task["quest_id"]
+    update = {"is_completed": True}
+    if auto:
+        update["auto_completed"] = True
+    supabase.table("board_quest_tasks").update(update).eq("id", task_id).execute()
+
+    all_tasks = supabase.table("board_quest_tasks").select("is_completed").eq("quest_id", quest_id).execute().data
+    all_done  = all(t["is_completed"] for t in all_tasks) if all_tasks else False
+
+    quest_completion = None
+    if all_done:
+        quest_completion = _complete_board_quest_internal(quest_id)
+
+    return {
+        "id": task_id, "is_completed": True, "auto_completed": auto,
+        "all_tasks_done": all_done, "quest_id": quest_id,
+        "quest_completion": quest_completion,
+    }
 
 @app.put("/board/tasks/{task_id}")
 def toggle_board_task(task_id: int):
     task = supabase.table("board_quest_tasks").select("*").eq("id", task_id).single().execute().data
     if not task:
         raise HTTPException(404, "Task not found")
-    is_completing = not task["is_completed"]
-    supabase.table("board_quest_tasks").update({"is_completed": is_completing}).eq("id", task_id).execute()
 
-    # Check if all tasks done → auto-suggest completing quest
+    if not task["is_completed"]:
+        return _mark_board_task_completed(task, auto=False)
+
+    # Unchecking — only allowed for non-habit-linked tasks (linked tasks are habit-driven)
+    supabase.table("board_quest_tasks").update({"is_completed": False, "auto_completed": False}).eq("id", task_id).execute()
     all_tasks = supabase.table("board_quest_tasks").select("is_completed").eq("quest_id", task["quest_id"]).execute().data
     all_done  = all(t["is_completed"] for t in all_tasks) if all_tasks else False
-
-    return {"id": task_id, "is_completed": is_completing, "all_tasks_done": all_done, "quest_id": task["quest_id"]}
+    return {"id": task_id, "is_completed": False, "all_tasks_done": all_done, "quest_id": task["quest_id"]}
 
 @app.delete("/board/tasks/{task_id}")
 def delete_board_task(task_id: int):

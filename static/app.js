@@ -1,13 +1,8 @@
 document.addEventListener("DOMContentLoaded", () => {
 
 // ---------------------------------------------------------------------------
-// Theme switcher — Ballerina / Monotone Gray
+// Theme switcher -- Ballerina / Monotone Gray
 // ---------------------------------------------------------------------------
-const THEMES = {
-    ballerina: { label: "Ballerina", active: false },
-    gray:      { label: "Gray",      active: true  },
-};
-
 function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("liainne-theme", theme);
@@ -17,12 +12,10 @@ function applyTheme(theme) {
     if (label) label.textContent = theme === "gray" ? "Gray" : "Ballerina";
 }
 
-window.toggleTheme = function() {
-    const current = document.documentElement.getAttribute("data-theme") || "ballerina";
-    applyTheme(current === "ballerina" ? "gray" : "ballerina");
-};
+// Apply saved theme now that DOM elements exist
+applyTheme(localStorage.getItem("liainne-theme") || "ballerina");
 
-// Apply saved theme immediately on load
+// Restore saved theme immediately (before any render)
 (function() {
     const saved = localStorage.getItem("liainne-theme") || "ballerina";
     applyTheme(saved);
@@ -794,6 +787,7 @@ if (habitForm) {
                 _toast(`⬆️ ${data.evolution_ready.message}`, "#ff9800", 5000);
             }
             if (data.habit_quest) _showHabitQuestBanner(data.habit_quest, name);
+            _handleAutoCompletedTasks(data.auto_completed_tasks);
         }
 
         habitForm.reset();
@@ -1026,9 +1020,28 @@ window.quickLogHabit = async function(name) {
     if (data.habit_quest) _showHabitQuestBanner(data.habit_quest, name);
     if (data.adaptation)  setTimeout(() => _toast(`✦ ${data.adaptation}`, "var(--ink)", 4000), 1200);
 
+    _handleAutoCompletedTasks(data.auto_completed_tasks);
+
     loadStreaks();
     loadXPHUD();
 };
+
+// ── Auto-completion feedback (habit → linked quest task) ──────────────────
+function _handleAutoCompletedTasks(autoCompleted) {
+    if (!autoCompleted || !autoCompleted.length) return;
+    autoCompleted.forEach((t, i) => {
+        setTimeout(() => {
+            _toast(`⚡ "${t.task_title}" auto-completed from your habit log!`, "#7c3aed", 3500);
+            if (t.quest_completion) {
+                showXPFlash(t.quest_completion.xp_earned, t.quest_completion.category || "Quest");
+                if (t.quest_completion.new_achievements) showAchievementToast(t.quest_completion.new_achievements);
+                setTimeout(() => _toast("⚔️ Linked quest auto-completed!", "#2e7d32", 3000), 400);
+            }
+        }, i * 900);
+    });
+    // Quest board may now have different progress/completion state
+    if (document.getElementById("page-quests")?.classList.contains("active")) loadQuestBoard();
+}
 
 // ── Quest Banner ──────────────────────────────────────────────
 function _showHabitQuestBanner(quest, habitName) {
@@ -1339,16 +1352,58 @@ chatForm.addEventListener("submit", async (e) => {
     const message = input.value.trim();
     if (!message) return;
     input.value = "";
+
     chatMessages.innerHTML += `<div class="chat-msg user">${message}</div>`;
     chatMessages.scrollTop  = chatMessages.scrollHeight;
+
+    // Thinking indicator
+    const thinkingId = `thinking-${Date.now()}`;
+    chatMessages.innerHTML += `<div class="chat-msg assistant chat-thinking" id="${thinkingId}">✦ thinking…</div>`;
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
     const data = await (await fetch("/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, history: conversationHistory }),
     })).json();
+
+    document.getElementById(thinkingId)?.remove();
+
     conversationHistory.push({ role: "user",      content: message });
     conversationHistory.push({ role: "assistant", content: data.response });
     chatMessages.innerHTML += `<div class="chat-msg assistant">${data.response}</div>`;
-    chatMessages.scrollTop  = chatMessages.scrollHeight;
+
+    // Quest created -- toast + inline card
+    if (data.quest_created) {
+        const q    = data.quest_created;
+        const diff = q.difficulty || "Normal";
+        const diffColors = { Easy: "#4caf50", Normal: "#2196f3", Hard: "#f7a94b", Elite: "#e91e63" };
+        const diffColor  = diffColors[diff] || "#2196f3";
+
+        // Achievement-style toast
+        _toast(`⚔️ Quest created: <strong>${q.title}</strong>`, "#5b21b6", 4000);
+
+        // Inline card
+        chatMessages.innerHTML += `
+            <div class="chat-quest-card" id="cqc-${q.id}">
+                <div class="cqc-label">⚔️ Quest Added to Board</div>
+                <div class="cqc-title">${q.title}</div>
+                ${q.description ? `<div class="cqc-desc">${q.description}</div>` : ""}
+                <div class="cqc-chips">
+                    <span class="cqc-chip" style="color:${diffColor};border-color:${diffColor}40;background:${diffColor}12">${diff}</span>
+                    <span class="cqc-chip">${q.category || "General"}</span>
+                    <span class="cqc-chip">+${q.xp_reward || 50} XP</span>
+                    <span class="cqc-chip">${q.section || "daily"}</span>
+                </div>
+                <div class="cqc-actions">
+                    <button class="cqc-view-btn" onclick="showPage('quests');loadQuestBoard()">View Quest Board</button>
+                    <button class="cqc-dismiss" onclick="document.getElementById('cqc-${q.id}').remove()">Dismiss</button>
+                </div>
+            </div>`;
+
+        showXPFlash(q.xp_reward || 50, q.category || "Quest");
+    }
+
+    chatMessages.scrollTop = chatMessages.scrollHeight;
 });
 
 // ---------------------------------------------------------------------------
@@ -1526,13 +1581,24 @@ function buildQuestCard(q, sectionKey) {
     let taskListHtml = "";
     if (tasks.length && !isCompleted) {
         taskListHtml = `<div class="qb-task-list">
-            ${tasks.map(t => `
+            ${tasks.map(t => {
+                const linked = t.linked_habit_name;
+                const progressLabel = linked
+                    ? ` <span class="qb-task-habit-progress">(${t.current_logs || 0}/${t.required_logs || 1})</span>`
+                    : "";
+                const linkedTag = linked ? ` <span class="qb-task-linked" title="Linked to habit">🔗 ${_escHtml(linked)}</span>` : "";
+                const autoBadge = t.auto_completed ? `<span class="qb-task-auto-badge" title="Auto-completed from habit">⚡ Auto-completed from Habit</span>` : "";
+                const linkBtn   = !linked ? `<button class="qb-task-link-btn" onclick="linkTaskToHabit(${t.id}, ${q.id})" title="Link to a habit">🔗</button>` : "";
+                return `
                 <label class="qb-task-row ${t.is_completed ? 'qb-task-done' : ''}" id="qbt-row-${t.id}">
-                    <input type="checkbox" ${t.is_completed ? "checked" : ""}
+                    <input type="checkbox" ${t.is_completed ? "checked" : ""} ${linked ? "disabled title='Completes automatically from the linked habit'" : ""}
                         onchange="toggleBoardTask(${t.id}, ${q.id}, this, '${questTitleEsc}', '${questCategoryEsc}')">
-                    <span class="qb-task-title">${_escHtml(t.title)}</span>
+                    <span class="qb-task-title">${_escHtml(t.title)}${linkedTag}${progressLabel}</span>
+                    ${autoBadge}
+                    ${linkBtn}
                     <button class="qb-task-del" onclick="deleteBoardTask(${t.id}, ${q.id}, event)" title="Remove">✕</button>
-                </label>`).join("")}
+                </label>`;
+            }).join("")}
             <div class="qb-add-task-row">
                 <input type="text" class="qb-add-task-input" id="qadd-${q.id}"
                     placeholder="Add task…"
@@ -1648,6 +1714,26 @@ window.deleteQuestBoard = async function(questId, e) {
     loadQuestBoard();
 };
 
+window.linkTaskToHabit = async function(taskId, questId) {
+    const habitNames = Object.keys(currentHabits || {});
+    const suggestion = habitNames.length ? `\n\nYour habits: ${habitNames.join(", ")}` : "";
+    const habitName = prompt(`Link this task to which habit?${suggestion}`);
+    if (!habitName || !habitName.trim()) return;
+    const reqRaw = prompt("How many logs of this habit are needed to complete the task?", "1");
+    const required = Math.max(1, parseInt(reqRaw) || 1);
+    try {
+        const res = await fetch(`/board/tasks/${taskId}/link-habit`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ linked_habit_name: habitName.trim(), required_logs: required }),
+        });
+        if (!res.ok) { _toast("Could not link habit.", "#ef5350"); return; }
+        _toast(`🔗 Linked to "${habitName.trim()}" — logging it will progress this task.`, "var(--accent-deep)", 3500);
+        loadQuestBoard();
+    } catch (_) {
+        _toast("Could not link habit.", "#ef5350");
+    }
+};
+
 window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCategory) {
     cb.disabled = true;
     try {
@@ -1655,6 +1741,14 @@ window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCa
         const row  = document.getElementById(`qbt-row-${taskId}`);
         if (row) row.classList.toggle("qb-task-done", data.is_completed);
         cb.disabled = false;
+
+        // If completing this task finished the whole quest, XP was already awarded
+        // server-side — reflect it here instead of waiting for a manual "Complete" click.
+        if (data.quest_completion) {
+            showXPFlash(data.quest_completion.xp_earned, data.quest_completion.category || questCategory || "Quest");
+            if (data.quest_completion.new_achievements) showAchievementToast(data.quest_completion.new_achievements);
+            _toast("⚔️ Quest auto-completed!", "#2e7d32", 3000);
+        }
 
         // Auto-log a habit whenever a task is checked off (not unchecked)
         if (data.is_completed && questTitle) {
@@ -1917,6 +2011,27 @@ function buildNodeCard(node, tree) {
         ctaHtml = `<div class="skt-locked-msg">🔒 ${reqs || "Complete prerequisites"}</div>`;
     }
 
+    // Mastery — 40% habit consistency + 60% quest completion
+    const masteryPct = node.mastery ?? 0;
+    const habitPct   = node.habit_progress ?? 0;
+    const questPct   = node.quest_progress ?? 0;
+    const masteryHtml = `
+        <div class="skt-mastery">
+            <div class="skt-mastery-row">
+                <span class="skt-mastery-label">Mastery ${masteryPct}%</span>
+                ${node.mastered ? '<span class="skt-mastered-badge">🏆 Mastered</span>' : ''}
+            </div>
+            <div class="skt-mastery-bar-wrap"><div class="skt-mastery-bar" style="width:${masteryPct}%"></div></div>
+            <div class="skt-mastery-sub-row">
+                <span class="skt-mastery-sub-label">Habit ${habitPct}%</span>
+                <div class="skt-mastery-mini-wrap"><div class="skt-mastery-mini-fill skt-mastery-mini-fill--habit" style="width:${habitPct}%"></div></div>
+            </div>
+            <div class="skt-mastery-sub-row">
+                <span class="skt-mastery-sub-label">Quest ${questPct}%</span>
+                <div class="skt-mastery-mini-wrap"><div class="skt-mastery-mini-fill skt-mastery-mini-fill--quest" style="width:${questPct}%"></div></div>
+            </div>
+        </div>`;
+
     el.innerHTML = `
         <div class="skt-node-head">
             <div class="skt-node-state-dot skt-dot--${state}"></div>
@@ -1931,6 +2046,7 @@ function buildNodeCard(node, tree) {
         ${prereqNames.length ? `<div class="skt-node-meta">Requires: ${prereqNames.map(n => `<span class="skt-req">${n}</span>`).join("")}</div>` : ""}
         ${unlocksNames.length ? `<div class="skt-node-meta">Unlocks: ${unlocksNames.map(n => `<span class="skt-unlocks">${n}</span>`).join("")}</div>` : ""}
         ${progressHtml}
+        ${masteryHtml}
         <div class="skt-node-foot">${ctaHtml}</div>`;
 
     return el;
