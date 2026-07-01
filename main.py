@@ -1546,7 +1546,25 @@ def delete_habit(habit_name: str):
         supabase.table("xp_ledger").delete().eq("source_type", "habit_node").like("source_id", f"{habit_name}:%").execute()
     except Exception:
         pass
-    return {"status": "deleted", "name": habit_name}
+    # Unlink any quest tasks that were driven by this habit so they don't get
+    # stuck waiting forever on a habit that no longer exists.
+    unlinked_tasks = 0
+    try:
+        linked = (
+            supabase.table("board_quest_tasks")
+            .select("id")
+            .eq("linked_habit_name", habit_name)
+            .execute()
+            .data
+        )
+        if linked:
+            supabase.table("board_quest_tasks").update({
+                "linked_habit_name": None, "required_logs": 1, "current_logs": 0,
+            }).eq("linked_habit_name", habit_name).execute()
+            unlinked_tasks = len(linked)
+    except Exception as e:
+        logger.exception("Failed to unlink quest tasks for deleted habit '%s': %s", habit_name, e)
+    return {"status": "deleted", "name": habit_name, "unlinked_tasks": unlinked_tasks}
 
 @app.put("/habits/{habit_name}")
 def update_habit(habit_name: str, req: HabitUpdate):
@@ -1563,6 +1581,14 @@ def update_habit(habit_name: str, req: HabitUpdate):
             supabase.table("habit_recovery_tokens_v2").update({"habit_name": new_name}).eq("habit_name", habit_name).execute()
         except Exception:
             pass
+        # Re-point any quest tasks that were linked to the old habit name —
+        # otherwise they keep watching for a habit name that no longer exists.
+        try:
+            supabase.table("board_quest_tasks").update(
+                {"linked_habit_name": new_name}
+            ).eq("linked_habit_name", habit_name).execute()
+        except Exception as e:
+            logger.exception("Failed to re-link quest tasks from '%s' to '%s': %s", habit_name, new_name, e)
 
     # Update or create profile with new name / skill node / domain
     node_name = _node_name(req.skill_tree, req.skill_node_id) if req.skill_node_id else ""

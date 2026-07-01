@@ -1756,28 +1756,6 @@ window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCa
             _toast("⚔️ Quest auto-completed!", "#2e7d32", 3000);
         }
 
-        // Auto-log a habit whenever a task is checked off (not unchecked)
-        if (data.is_completed && questTitle) {
-            const habitName = questTitle.length > 50 ? questTitle.slice(0, 50) : questTitle;
-            fetch("/habits", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    name:       habitName,
-                    skill_tree: questCategory || "Personal Growth",
-                }),
-            }).then(r => r.json()).then(hd => {
-                if (hd.status !== "already_logged") {
-                    if (hd.xp_earned) showXPFlash(hd.xp_earned, hd.domain || questCategory || "Habits");
-                    if (hd.new_achievements) showAchievementToast(hd.new_achievements);
-                    if (hd.xp_modifiers?.length)
-                        _toast(hd.xp_modifiers.map(m => m.label).join(" · "), "var(--accent)", 2500);
-                    _toast(`🔥 Habit logged: "${habitName}"`, "#4caf50", 2500);
-                }
-                loadXPHUD();
-            }).catch(() => {});
-        }
-
         // If all tasks done, suggest completing quest
         if (data.all_tasks_done) {
             const card = document.getElementById(`qb-card-${questId}`);
