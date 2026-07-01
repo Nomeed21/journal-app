@@ -394,52 +394,26 @@
                 <div id="habit-ai-insight">Loading…</div>
             </div>
 
-            <!-- Log Habit Form -->
+            <!-- Add Habit (create only — habits log automatically via matching quest completions) -->
             <form id="habit-form" class="habit-log-form">
                 <div class="hlf-row">
                     <input type="text" id="habit-name" placeholder="Habit name…" required class="hlf-name">
-                    <button type="submit" class="hlf-btn">Log Habit</button>
+                    <button type="submit" class="hlf-btn">Add Habit</button>
                 </div>
                 <div class="hlf-options-row">
-                    <label class="hlf-field">
-                        <span class="hlf-label">Category</span>
-                        <select id="habit-category" class="hlf-select">
-                            <option value="Physical">🏃 Physical</option>
-                            <option value="Learning">📚 Learning</option>
-                            <option value="Mind">🧘 Mind</option>
-                            <option value="Social">👥 Social</option>
-                            <option value="Productivity" selected>⚡ Productivity</option>
-                            <option value="Creativity">🎨 Creativity</option>
+                    <label class="hlf-field" style="flex:2">
+                        <span class="hlf-label">Link to Skill Node</span>
+                        <select id="habit-skill-node" class="hlf-select">
+                            <option value="">— None (general habit) —</option>
                         </select>
-                    </label>
-                    <label class="hlf-field">
-                        <span class="hlf-label">Difficulty</span>
-                        <select id="habit-difficulty" class="hlf-select">
-                            <option value="Easy">🟢 Easy (+5 XP)</option>
-                            <option value="Normal" selected>🟡 Normal (+10 XP)</option>
-                            <option value="Hard">🟠 Hard (+20 XP)</option>
-                            <option value="Elite">🔴 Elite (+30 XP)</option>
-                        </select>
-                    </label>
-                    <label class="hlf-field">
-                        <span class="hlf-label">Link to Skill Tree</span>
-                        <select id="habit-skill" class="hlf-select">
-                            <option value="">— None —</option>
-                            <option value="Study">📚 Study</option>
-                            <option value="Fitness">💪 Fitness</option>
-                            <option value="Finance">💰 Finance</option>
-                            <option value="Creativity">🎨 Creativity</option>
-                            <option value="Personal Growth">🌱 Personal Growth</option>
-                        </select>
+                        <span id="habit-node-preview" class="hv2-node-preview"></span>
                     </label>
                 </div>
+                <p class="plan-loading" style="margin-top:.5rem">
+                    Habits log themselves — completing any quest in a habit's skill tree/category on a given day
+                    counts as that habit being done for the day.
+                </p>
             </form>
-
-            <!-- Heatmap -->
-            <div class="habit-heatmap-card">
-                <div class="hm-label">📅 Activity Heatmap</div>
-                <div id="habit-heatmap" class="hm-grid"></div>
-            </div>
 
             <!-- Streaks / Habit cards -->
             <div id="streaks"></div>

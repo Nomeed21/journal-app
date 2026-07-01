@@ -626,10 +626,6 @@ async function _loadHabitsData() {
         currentHabits = data.streaks || {};
         _renderDomainBalance(data.balance || []);
     } catch (_) {}
-    try {
-        const heatRes = await fetch("/habits/heatmap?days=365");
-        if (heatRes.ok) _renderHeatmap(await heatRes.json());
-    } catch (_) {}
 }
 
 // ── Domain Balance ────────────────────────────────────────────
@@ -684,29 +680,6 @@ async function _loadActiveSynergies() {
     } catch (_) { if (el) el.style.display = "none"; }
 }
 
-// ── Heatmap ───────────────────────────────────────────────────
-function _renderHeatmap(data) {
-    const el = document.getElementById("habit-heatmap");
-    if (!el) return;
-    const countMap = {};
-    data.forEach(d => { countMap[d.date] = d.count; });
-    const today = new Date();
-    const cols = [];
-    for (let w = 51; w >= 0; w--) {
-        const col = [];
-        for (let d = 0; d < 7; d++) {
-            const dt = new Date(today);
-            dt.setDate(dt.getDate() - (w * 7 + d));
-            const key = dt.toISOString().slice(0, 10);
-            const cnt = countMap[key] || 0;
-            const op = cnt === 0 ? 0.06 : Math.min(0.15 + cnt * 0.22, 1);
-            col.push(`<div class="hv2-hm-cell" title="${key}: ${cnt} habit${cnt !== 1 ? 's' : ''}" style="background:rgba(217,138,160,${op})"></div>`);
-        }
-        cols.push(`<div class="hv2-hm-col">${col.join("")}</div>`);
-    }
-    el.innerHTML = cols.join("");
-}
-
 // ── Create Panel toggle ───────────────────────────────────────
 window.toggleHabitCreatePanel = function() {
     const body = document.getElementById("hv2-create-body");
@@ -746,7 +719,9 @@ function _buildSkillNodePicker() {
     });
 }
 
-// ── Habit Form Submit ─────────────────────────────────────────
+// ── Habit Form Submit — creates a habit profile only. Habits are no longer
+// manually logged; a habit's streak comes from completed quests in its
+// linked skill tree/category (see backend _habit_quest_dates).
 const habitForm = document.getElementById("habit-form");
 if (habitForm) {
     habitForm.addEventListener("submit", async (e) => {
@@ -758,46 +733,23 @@ if (habitForm) {
         const tree   = opt?.dataset?.tree || "";
         if (!name) return;
 
-        // Create profile if node selected
-        if (nodeId && tree) {
-            await fetch("/habits/profile", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ name, skill_node_id: nodeId, skill_tree: tree }),
-            });
-        }
-
-        // Log immediately
-        const res  = await fetch("/habits", {
+        const res = await fetch("/habits/profile", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, skill_node_id: nodeId, skill_tree: tree }),
         });
-        const data = await res.json();
-
-        if (data.status === "already_logged") {
-            _toast("✓ Already logged today", "#4caf50");
-        } else {
-            if (data.xp_earned) showXPFlash(data.xp_earned, data.domain || "Habits");
-            if (data.new_achievements) showAchievementToast(data.new_achievements);
-            if (data.xp_modifiers?.length) {
-                _toast(data.xp_modifiers.map(m => m.label).join(" · "), "var(--accent)", 3000);
-            }
-            if (data.new_synergies?.length) {
-                data.new_synergies.forEach((s, i) =>
-                    setTimeout(() => _toast(`⚗️ ${s.name}: ${s.bonus}`, "#7c3aed", 4500), i * 700)
-                );
-            }
-            if (data.evolution_ready) {
-                _toast(`⬆️ ${data.evolution_ready.message}`, "#ff9800", 5000);
-            }
-            if (data.habit_quest) _showHabitQuestBanner(data.habit_quest, name);
-            _handleAutoCompletedTasks(data.auto_completed_tasks);
+        if (!res.ok) {
+            _toast("Could not create habit.", "#ef5350");
+            return;
         }
+        _toast(tree
+            ? `✓ "${name}" added — any completed ${tree} quest will count as logging it.`
+            : `✓ "${name}" added — link it to a skill tree to start tracking it.`,
+            "#4caf50", 3500);
 
         habitForm.reset();
         const preview = document.getElementById("habit-node-preview");
         if (preview) preview.textContent = "";
         loadStreaks();
-        loadXPHUD();
     });
 }
 
@@ -912,9 +864,7 @@ function _buildHabitCard(name, h) {
         <div class="hv2-token-row">
             <span class="hv2-token-count">🛡️ ${tokens.available} token${tokens.available !== 1 ? 's' : ''}</span>
             <div class="hv2-token-actions">
-                <button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','restore')" title="Restore a missed day">↩ Restore</button>
                 <button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','skip')" title="Skip today without breaking streak">⏭ Skip</button>
-                <button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','bonus_xp')" title="+50% XP on next log">⚡ Bonus XP</button>
                 ${tokens.available >= 2 ? `<button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','freeze')" title="Freeze streak 3 days">❄️ Freeze</button>` : ""}
                 ${tokens.available >= 2 ? `<button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','boss_reduce')" title="Reduce Weekly Boss difficulty">⚔️ Boss</button>` : ""}
                 ${tokens.available >= 2 ? `<button class="hv2-token-btn" onclick="spendToken('${_esc(name)}','quest_recover')" title="Recover failed quest">♻️ Quest</button>` : ""}
@@ -962,11 +912,11 @@ function _buildHabitCard(name, h) {
                 ${synHtml ? `<div class="hv2-synergies">${synHtml}</div>` : ""}
             </div>
 
-            <!-- Actions -->
+            <!-- Status (read-only — logging is derived from quest completions) -->
             <div class="hv2-actions">
-                ${!doneToday
-                    ? `<button class="hv2-log-btn" onclick="quickLogHabit('${_esc(name)}')">Log Today</button>`
-                    : `<button class="hv2-log-btn hv2-log-btn--done" disabled>✓ Logged</button>`}
+                <span class="hv2-log-btn ${doneToday ? 'hv2-log-btn--done' : ''}" style="cursor:default" title="${doneToday ? 'A quest in this habit\'s category was completed today' : 'No quest in this habit\'s category completed yet today'}">
+                    ${doneToday ? '✓ Done Today' : '○ Not Yet Today'}
+                </span>
                 <div class="hv2-icon-btns">
                     <button class="hv2-stats-btn" onclick="openStatsModal('${_esc(name)}')" title="Stats">📊</button>
                     <button class="hv2-stats-btn" onclick="openEditHabitModal('${_esc(name)}')" title="Edit">✏️</button>
@@ -983,93 +933,9 @@ function _buildHabitCard(name, h) {
     </div>`;
 }
 
-// ── Log Habit ─────────────────────────────────────────────────
-window.quickLogHabit = async function(name) {
-    const h = currentHabits[name] || {};
-    const res  = await fetch("/habits", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            name,
-            skill_node_id: h.skill_node_id || "",
-            skill_tree:    h.skill_tree    || "",
-        }),
-    });
-    const data = await res.json();
-
-    if (data.status === "already_logged") {
-        _toast("✓ Already logged today", "#4caf50");
-        return;
-    }
-
-    // XP flash with modifiers
-    if (data.xp_earned) showXPFlash(data.xp_earned, data.domain || "Habits");
-    if (data.new_achievements) showAchievementToast(data.new_achievements);
-
-    if (data.xp_modifiers?.length) {
-        const labels = data.xp_modifiers.map(m => m.label).join(" · ");
-        _toast(`${labels}`, "var(--accent)", 3000);
-    }
-
-    if (data.new_synergies?.length) {
-        data.new_synergies.forEach((s, i) =>
-            setTimeout(() => _toast(`⚗️ ${s.name}: ${s.bonus}`, "#7c3aed", 4500), i * 800)
-        );
-    }
-
-    if (data.evolution_ready) {
-        _toast(`⬆️ ${data.evolution_ready.message}`, "#ff9800", 5000);
-    }
-
-    if (data.habit_quest) _showHabitQuestBanner(data.habit_quest, name);
-    if (data.adaptation)  setTimeout(() => _toast(`✦ ${data.adaptation}`, "var(--ink)", 4000), 1200);
-
-    _handleAutoCompletedTasks(data.auto_completed_tasks);
-
-    loadStreaks();
-    loadXPHUD();
-};
-
-// ── Auto-completion feedback (habit → linked quest task) ──────────────────
-function _handleAutoCompletedTasks(autoCompleted) {
-    if (!autoCompleted || !autoCompleted.length) return;
-    autoCompleted.forEach((t, i) => {
-        setTimeout(() => {
-            _toast(`⚡ "${t.task_title}" auto-completed from your habit log!`, "#7c3aed", 3500);
-            if (t.quest_completion) {
-                showXPFlash(t.quest_completion.xp_earned, t.quest_completion.category || "Quest");
-                if (t.quest_completion.vp_earned) setTimeout(() => _toast(`💰 +${t.quest_completion.vp_earned} VP earned`, "#d6a73a", 2800), 300);
-                if (t.quest_completion.new_achievements) showAchievementToast(t.quest_completion.new_achievements);
-                setTimeout(() => _toast("⚔️ Linked quest auto-completed!", "#2e7d32", 3000), 400);
-            }
-        }, i * 900);
-    });
-    // Quest board may now have different progress/completion state
-    if (document.getElementById("page-quests")?.classList.contains("active")) loadQuestBoard();
-}
-
-// ── Quest Banner ──────────────────────────────────────────────
-function _showHabitQuestBanner(quest, habitName) {
-    let b = document.getElementById("habit-quest-banner");
-    if (!b) {
-        b = document.createElement("div");
-        b.id = "habit-quest-banner";
-        b.className = "hv2-quest-banner";
-        const sec = document.getElementById("page-habits");
-        const streaks = document.getElementById("streaks");
-        sec.insertBefore(b, streaks);
-    }
-    b.innerHTML = `
-        <div class="hv2-qb-label">⚔️ Quest generated from "${habitName}"</div>
-        <div class="hv2-qb-title">${quest.title}</div>
-        <div class="hv2-qb-meta">
-            ${quest.description ? `<span>${quest.description}</span>` : ""}
-            <span class="dq-chip">⏱ ${quest.duration_minutes}m</span>
-            <span class="dq-chip">${quest.difficulty}</span>
-        </div>
-        <button class="btn-ghost btn-sm" onclick="this.closest('.hv2-quest-banner').style.display='none'">Dismiss</button>`;
-    b.style.display = "block";
-    b.classList.add("show");
-}
+// Manual habit logging removed. A habit's "done today" state is now derived
+// server-side from completed quests in its linked skill tree/category
+// (see _habit_quest_dates in main.py) — there is no client-side log action.
 
 // ── Evolution ─────────────────────────────────────────────────
 window.confirmEvolution = async function(name, confirmed) {
@@ -1089,14 +955,12 @@ window.confirmEvolution = async function(name, confirmed) {
 // ── Recovery Tokens ───────────────────────────────────────────
 window.spendToken = async function(name, type) {
     const DESCS = {
-        restore:      "Restore yesterday's missed log — your streak will be protected.",
         skip:         "Skip today without breaking your streak.",
-        bonus_xp:     "Activate +50% XP for your next log.",
         freeze:       "Freeze your streak for 3 days (vacation mode).",
         boss_reduce:  "Reduce next Weekly Boss difficulty. (costs 2 tokens)",
         quest_recover:"Recover your most recently failed quest. (costs 2 tokens)",
     };
-    const COSTS = { restore: 1, skip: 1, bonus_xp: 1, reroll: 1, freeze: 2, boss_reduce: 2, quest_recover: 2 };
+    const COSTS = { skip: 1, reroll: 1, freeze: 2, boss_reduce: 2, quest_recover: 2 };
     const tokens = currentHabits[name]?.recovery_tokens?.available || 0;
     const cost = COSTS[type] || 1;
     if (tokens < cost) { _toast(`Need ${cost} token(s), you have ${tokens}.`, "#ef5350"); return; }
@@ -1587,19 +1451,14 @@ function buildQuestCard(q, sectionKey) {
         taskListHtml = `<div class="qb-task-list">
             ${tasks.map(t => {
                 const linked = t.linked_habit_name;
-                const progressLabel = linked
-                    ? ` <span class="qb-task-habit-progress">(${t.current_logs || 0}/${t.required_logs || 1})</span>`
-                    : "";
-                const linkedTag = linked ? ` <span class="qb-task-linked" title="Linked to habit">🔗 ${_escHtml(linked)}</span>` : "";
-                const autoBadge = t.auto_completed ? `<span class="qb-task-auto-badge" title="Auto-completed from habit">⚡ Auto-completed from Habit</span>` : "";
-                const linkBtn   = !linked ? `<button class="qb-task-link-btn" onclick="linkTaskToHabit(${t.id}, ${q.id})" title="Link to a habit">🔗</button>` : "";
+                const linkedTag = linked ? ` <span class="qb-task-linked" title="Previously linked to a habit">🔗 ${_escHtml(linked)}</span>` : "";
+                const autoBadge = t.auto_completed ? `<span class="qb-task-auto-badge" title="Auto-completed">⚡ Auto-completed</span>` : "";
                 return `
                 <label class="qb-task-row ${t.is_completed ? 'qb-task-done' : ''}" id="qbt-row-${t.id}">
-                    <input type="checkbox" ${t.is_completed ? "checked" : ""} ${linked ? "disabled title='Completes automatically from the linked habit'" : ""}
+                    <input type="checkbox" ${t.is_completed ? "checked" : ""}
                         onchange="toggleBoardTask(${t.id}, ${q.id}, this, '${questTitleEsc}', '${questCategoryEsc}')">
-                    <span class="qb-task-title">${_escHtml(t.title)}${linkedTag}${progressLabel}</span>
+                    <span class="qb-task-title">${_escHtml(t.title)}${linkedTag}</span>
                     ${autoBadge}
-                    ${linkBtn}
                     <button class="qb-task-del" onclick="deleteBoardTask(${t.id}, ${q.id}, event)" title="Remove">✕</button>
                 </label>`;
             }).join("")}
@@ -1717,26 +1576,6 @@ window.deleteQuestBoard = async function(questId, e) {
     if (!confirm("Delete this quest?")) return;
     await fetch(`/board/quests/${questId}`, { method: "DELETE" });
     loadQuestBoard();
-};
-
-window.linkTaskToHabit = async function(taskId, questId) {
-    const habitNames = Object.keys(currentHabits || {});
-    const suggestion = habitNames.length ? `\n\nYour habits: ${habitNames.join(", ")}` : "";
-    const habitName = prompt(`Link this task to which habit?${suggestion}`);
-    if (!habitName || !habitName.trim()) return;
-    const reqRaw = prompt("How many logs of this habit are needed to complete the task?", "1");
-    const required = Math.max(1, parseInt(reqRaw) || 1);
-    try {
-        const res = await fetch(`/board/tasks/${taskId}/link-habit`, {
-            method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ linked_habit_name: habitName.trim(), required_logs: required }),
-        });
-        if (!res.ok) { _toast("Could not link habit.", "#ef5350"); return; }
-        _toast(`🔗 Linked to "${habitName.trim()}" — logging it will progress this task.`, "var(--accent-deep)", 3500);
-        loadQuestBoard();
-    } catch (_) {
-        _toast("Could not link habit.", "#ef5350");
-    }
 };
 
 window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCategory) {

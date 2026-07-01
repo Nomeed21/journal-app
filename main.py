@@ -43,6 +43,16 @@ XP_PER_LEVEL     = 500
 RECENT_DAYS      = 14
 MAX_WEEKLY_ROWS  = 26
 
+# Single-user app: hardcoded local offset (Philippines, UTC+8) used only for
+# time-of-day-sensitive gameplay logic like the "morning" XP bonus window.
+# Not used for date-bucketing (streaks/entries stay in UTC to avoid
+# rewriting every day-boundary calculation in the app).
+LOCAL_TZ_OFFSET_HOURS = 8
+
+def local_hour_now() -> int:
+    """Current hour (0-23) in the app's configured local timezone."""
+    return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)).hour
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -386,15 +396,14 @@ def predictive_analytics() -> dict:
     today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Streak risk
-    habit_result = supabase.table("habits").select("name, completed_at").execute()
-    habit_dates: dict[str, list] = defaultdict(list)
-    for row in habit_result.data:
-        habit_dates[row["name"]].append(row["completed_at"])
-    streak_at_risk = [
-        n for n, dates in habit_dates.items()
-        if yesterday in dates and today not in dates
-    ]
+    # Streak risk — habits whose skill-tree/category had a quest completed
+    # yesterday but not today
+    profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+    streak_at_risk = []
+    for p in profiles:
+        dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+        if yesterday in dates and today not in dates:
+            streak_at_risk.append(p["name"])
 
     # Goal failure risk
     goal_data = build_goal_summary()
@@ -678,15 +687,6 @@ def delete_entry(entry_id: int):
 
 # ── Pydantic additions ────────────────────────────────────────────────────
 
-class HabitLog(BaseModel):
-    name: str
-    skill_node_id: str = ""        # e.g. "cs_python"
-    skill_tree:    str = ""        # e.g. "Study"
-    # Legacy compat fields (ignored if skill_node_id provided)
-    category:      str = "Productivity"
-    difficulty:    str = "Normal"
-    linked_skill:  Optional[str] = None
-
 class HabitCreate(BaseModel):
     name:          str
     skill_node_id: str
@@ -781,6 +781,30 @@ def _node_name(skill_tree: str, node_id: str) -> str:
             return n["name"]
     return node_id
 
+def _habit_quest_dates(skill_tree: str = "", domain: str = "") -> list[str]:
+    """
+    Source of truth for "was this habit done today/this day": any completed
+    board quest whose category matches the habit's skill tree or domain.
+    Manual habit logging no longer exists — this replaces the old `habits`
+    table lookups everywhere a habit's log dates were needed.
+    Returns dates (YYYY-MM-DD) sorted descending, deduplicated.
+    """
+    cats = {c for c in (skill_tree, domain) if c}
+    if not cats:
+        return []
+    try:
+        rows = (
+            supabase.table("board_quests")
+            .select("completed_at")
+            .eq("is_completed", True)
+            .in_("category", list(cats))
+            .execute()
+            .data
+        )
+        return sorted({r["completed_at"][:10] for r in rows if r.get("completed_at")}, reverse=True)
+    except Exception:
+        return []
+
 def _all_skill_nodes_flat() -> list[dict]:
     """Flat list of {tree, node_id, name, domain} for the habit-creation picker."""
     result = []
@@ -797,115 +821,13 @@ def _all_skill_nodes_flat() -> list[dict]:
             })
     return result
 
-# ── XP Modifiers ──────────────────────────────────────────────────────────
-
-def _compute_xp(
-    habit_name: str,
-    base_xp: int,
-    streak: int,
-    today: str,
-    domain: str,
-    first_today: bool,
-    ai_recommended: bool = False,
-) -> tuple[int, list[dict]]:
-    """Compute final XP with all modifiers. Returns (total_xp, modifiers_list)."""
-    mods = []
-    total = base_xp
-
-    # Morning completion (before 10am UTC)
-    hour = datetime.now(timezone.utc).hour
-    if hour < 10:
-        bonus = round(base_xp * 0.25)
-        mods.append({"key": "morning", "label": "☀️ Morning", "bonus": bonus})
-        total += bonus
-
-    # First habit of the day
-    if first_today:
-        bonus = round(base_xp * 0.15)
-        mods.append({"key": "first_habit", "label": "⚡ First Today", "bonus": bonus})
-        total += bonus
-
-    # Perfect week (7-day streak)
-    if streak > 0 and streak % 7 == 0:
-        bonus = round(base_xp * 0.5)
-        mods.append({"key": "perfect_week", "label": "🔥 Perfect Week", "bonus": bonus})
-        total += bonus
-
-    # AI recommended
-    if ai_recommended:
-        bonus = round(base_xp * 0.3)
-        mods.append({"key": "ai_rec", "label": "✦ AI Recommended", "bonus": bonus})
-        total += bonus
-
-    # Domain underdeveloped — check if domain has low XP
-    try:
-        dom_defn = DOMAIN_DEFINITIONS.get(domain, {})
-        dom_cats = set(dom_defn.get("skill_keys", []) + dom_defn.get("goal_cats", []))
-        dom_xp = sum(get_category_xp(c) for c in dom_cats)
-        all_xp = get_total_xp()
-        if all_xp > 0 and dom_xp / all_xp < 0.1:  # less than 10% share
-            bonus = round(base_xp * 0.4)
-            mods.append({"key": "underdog", "label": "📈 Domain Boost", "bonus": bonus})
-            total += bonus
-    except Exception:
-        pass
-
-    # Active synergy bonus from today
-    try:
-        synergies = supabase.table("habit_synergies").select("key").eq("earned_at", today).execute().data
-        if synergies:
-            bonus = round(base_xp * 0.2)
-            mods.append({"key": "synergy", "label": "⚗️ Synergy Active", "bonus": bonus})
-            total += bonus
-    except Exception:
-        pass
-
-    # Bonus XP token active
-    try:
-        bonus_token = supabase.table("habit_recovery_tokens_v2").select("id").eq("habit_name", habit_name).eq("token_type", "bonus_xp").is_("used_at", None).limit(1).execute().data
-        if bonus_token:
-            bonus = round(base_xp * 0.5)
-            mods.append({"key": "token_bonus", "label": "🛡️ XP Token", "bonus": bonus})
-            total += bonus
-            # Mark used
-            supabase.table("habit_recovery_tokens_v2").update({"used_at": datetime.now(timezone.utc).isoformat()}).eq("id", bonus_token[0]["id"]).execute()
-    except Exception:
-        pass
-
-    return max(total, base_xp), mods
-
-# ── Synergy Detection ─────────────────────────────────────────────────────
-
-def _detect_synergies(habits_logged_today: list[str], today: str) -> list[dict]:
-    """Check if today's habit completions triggered any synergies."""
-    combined = " ".join(h.lower() for h in habits_logged_today)
-    new_synergies = []
-    for rule in SYNERGY_RULES:
-        keywords_hit = sum(1 for kw in rule["keywords"] if kw in combined)
-        if keywords_hit >= 2:
-            # Check not already awarded today
-            try:
-                existing = supabase.table("habit_synergies").select("id").eq("synergy_key", rule["key"]).eq("earned_at", today).execute()
-                if existing.data:
-                    continue
-            except Exception:
-                pass
-            expires = (datetime.now(timezone.utc) + timedelta(days=rule["days"])).strftime("%Y-%m-%d")
-            try:
-                supabase.table("habit_synergies").insert({
-                    "synergy_key":     rule["key"],
-                    "name":            rule["name"],
-                    "bonus_desc":      rule["bonus"],
-                    "habits_involved": habits_logged_today,
-                    "earned_at":       today,
-                    "expires_at":      expires,
-                }).execute()
-            except Exception:
-                pass
-            new_synergies.append({"name": rule["name"], "bonus": rule["bonus"]})
-    return new_synergies
-
 # ── Mastery + Evolution ───────────────────────────────────────────────────
+# NOTE: habit XP modifiers and synergy detection used to fire on manual habit
+# log events. Manual logging has been removed — a habit's activity is now
+# derived entirely from completed quests in its skill tree/category (see
+# _habit_quest_dates), and XP is awarded once, at quest completion time, via
+# _complete_board_quest_internal. There is no separate "habit log" XP event
+# anymore, so those modifier/synergy systems were removed with it.
 
 def _mastery(total: int) -> dict:
     level, label = 1, "Beginner"
@@ -961,17 +883,18 @@ def _get_or_create_profile(name: str, skill_node_id: str = "", skill_tree: str =
 # ── Recovery Tokens ───────────────────────────────────────────────────────
 
 def _count_tokens(habit_name: str) -> dict:
-    """Count earned vs used tokens for a habit."""
+    """Count earned vs used tokens for a habit, based on its quest-derived log dates."""
     try:
-        # Earned: 1 per 14-day streak segment (legacy formula)
-        log = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
-        dates_asc = sorted({r["completed_at"] for r in log.data})
-        earned = _recovery_tokens_from_dates(dates_asc)
+        profile = supabase.table("habit_profiles").select("skill_tree, domain").eq("name", habit_name).limit(1).execute().data
+        skill_tree = profile[0].get("skill_tree", "") if profile else ""
+        domain     = profile[0].get("domain", "")     if profile else ""
+        dates_asc = sorted(_habit_quest_dates(skill_tree, domain))
 
         # Used V2 tokens
         used_rows = supabase.table("habit_recovery_tokens_v2").select("token_type").eq("habit_name", habit_name).execute().data
         used_count = len(used_rows)
 
+        earned = _recovery_tokens_from_dates(dates_asc)
         available = max(0, earned - used_count)
         return {"earned": earned, "used": used_count, "available": available, "history": used_rows}
     except Exception:
@@ -1061,90 +984,67 @@ def _build_habit_snapshot(name: str, profile: dict, dates_desc: list[str], today
 # ── Legacy helpers (kept for backwards compat calls) ─────────────────────
 
 def _compute_streaks_raw() -> dict:
-    """Returns the streaks dict expected by AI insight, insights page, etc."""
+    """
+    Returns the streaks dict expected by AI insight, insights page, etc.
+    Habits no longer have their own log events — a habit's dates are every
+    day on which a quest in its skill tree/category was completed.
+    """
     try:
-        log = supabase.table("habits").select("name, completed_at").order("completed_at", desc=True).execute()
-        habit_dates: dict[str, list] = defaultdict(list)
-        for row in log.data:
-            habit_dates[row["name"]].append(row["completed_at"])
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        profiles = {r["name"]: r for r in supabase.table("habit_profiles").select("*").execute().data}
+        today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        profiles = supabase.table("habit_profiles").select("*").execute().data
         out = {}
-        for name, dates in habit_dates.items():
-            unique_desc = sorted(set(dates), reverse=True)
-            prof = profiles.get(name, {})
-            snap = _build_habit_snapshot(name, prof, unique_desc, today)
+        for prof in profiles:
+            name       = prof["name"]
+            dates_desc = _habit_quest_dates(prof.get("skill_tree", ""), prof.get("domain", ""))
+            snap       = _build_habit_snapshot(name, prof, dates_desc, today)
+            # Evolution used to be flagged the moment a manual log crossed a
+            # threshold. There's no discrete log event anymore, so we check
+            # it live whenever streaks are computed instead.
+            if not prof.get("pending_evolution") and _check_evolution_ready(name, snap["total_logs"]):
+                try:
+                    supabase.table("habit_profiles").update({"pending_evolution": True}).eq("name", name).execute()
+                    snap["pending_evolution"] = True
+                except Exception:
+                    pass
             out[name] = snap
         return out
     except Exception:
         return {}
 
 def _build_life_balance(streaks: dict) -> list[dict]:
-    """Domain-based balance (replaces old category-based balance)."""
+    """Domain-based balance, derived from completed quests (last 14 days)."""
     start14 = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
     expected = 14
-    by_domain: dict[str, list] = defaultdict(list)
+    by_domain: dict[str, set] = defaultdict(set)
     try:
-        log = supabase.table("habits").select("name, completed_at").gte("completed_at", start14).execute()
-        profiles = {r["name"]: r for r in supabase.table("habit_profiles").select("name, domain").execute().data}
-        for row in log.data:
-            dom = profiles.get(row["name"], {}).get("domain") or "Personal Growth"
-            by_domain[dom].append(row["completed_at"])
+        rows = (
+            supabase.table("board_quests")
+            .select("category, completed_at")
+            .eq("is_completed", True)
+            .gte("completed_at", start14)
+            .execute()
+            .data
+        )
+        for row in rows:
+            if not row.get("completed_at"):
+                continue
+            cat = row.get("category") or "Personal Growth"
+            dom = cat if cat in DOMAIN_DEFINITIONS else _domain_for_skill_tree(cat)
+            by_domain[dom].add(row["completed_at"][:10])
     except Exception:
         pass
     all_domains = list(DOMAIN_DEFINITIONS.keys())
     out = []
     for dom in all_domains:
-        dates  = by_domain.get(dom, [])
-        unique = len(set(dates))
-        rate   = round(unique / expected * 100)
-        out.append({"category": dom, "rate": min(rate, 100), "logs": unique})
+        dates  = by_domain.get(dom, set())
+        rate   = round(len(dates) / expected * 100)
+        out.append({"category": dom, "rate": min(rate, 100), "logs": len(dates)})
     return out
 
-def _build_habit_heatmap(days: int = 365) -> list[dict]:
-    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-    try:
-        result = supabase.table("habits").select("completed_at").gte("completed_at", start).execute()
-        counts: dict[str, int] = defaultdict(int)
-        for row in result.data:
-            counts[row["completed_at"]] += 1
-        return [{"date": d, "count": c} for d, c in sorted(counts.items())]
-    except Exception:
-        return []
-
 # ── Quest Generation from Habits ─────────────────────────────────────────
-
-def _generate_habit_quest(habit_name: str, skill_node_name: str, domain: str, stage: int) -> Optional[dict]:
-    """AI generates a specific daily/weekly quest from this habit."""
-    try:
-        prompt = f"""You generate quests for a personal growth RPG.
-
-Habit: "{habit_name}"
-Skill Node: "{skill_node_name}"
-Domain: "{domain}"
-Evolution Stage: {stage}
-
-Generate ONE concrete, achievable quest for today tied to this habit.
-Stage 1 = beginner (5-10 min), Stage 3+ = intermediate (20-30 min).
-
-Reply ONLY in JSON (no markdown):
-{{
-  "title": "specific action under 10 words",
-  "description": "one sentence describing what to do",
-  "duration_minutes": a number,
-  "difficulty": "Easy|Normal|Hard"
-}}"""
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7, max_tokens=150,
-        )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
-        return _json.loads(raw.strip())
-    except Exception:
-        return None
+# (Per-log AI quest generation removed along with manual logging — habit
+# quests are now generated the same way as everything else on the board:
+# via the skill/goal/journal generators in the Quest Board V2 section below.)
 
 def _generate_evolution_stages(habit_name: str, skill_node_name: str) -> list[dict]:
     """AI generates 5 evolution stages for a habit."""
@@ -1176,26 +1076,7 @@ Reply ONLY in JSON array (no markdown):
     except Exception:
         return []
 
-def _ai_adapt_habit(habit_name: str, success_rate: int, streak: int, stage: int) -> Optional[str]:
-    """Returns adaptation suggestion if habit is struggling or thriving."""
-    if success_rate >= 70 and streak >= 7:
-        direction = "evolve"
-    elif success_rate < 40:
-        direction = "simplify"
-    else:
-        return None
-    try:
-        prompt = f"""Habit: "{habit_name}", success rate: {success_rate}%, streak: {streak} days, stage: {stage}.
-Direction: {direction}.
-Give ONE sentence of specific advice (max 20 words). {"Recommend a harder version." if direction=="evolve" else "Recommend a simpler version to rebuild momentum."}"""
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7, max_tokens=60,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception:
-        return None
+
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
@@ -1238,161 +1119,9 @@ def create_habit_profile(req: HabitCreate):
 
     return {"status": "ok", "domain": domain, "node_name": node_name, "stages": stages}
 
-@app.post("/habits")
-def log_habit(habit: HabitLog):
-    """Log a habit completion with full V2 enrichment."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    # Idempotent
-    existing = supabase.table("habits").select("id").eq("name", habit.name).eq("completed_at", today).execute()
-    if existing.data:
-        return {"status": "already_logged", "message": f"'{habit.name}' already logged today."}
-
-    # Resolve profile
-    profile = _get_or_create_profile(
-        habit.name,
-        habit.skill_node_id or "",
-        habit.skill_tree or habit.linked_skill or "",
-        _domain_for_skill_tree(habit.skill_tree or habit.linked_skill or ""),
-    )
-    skill_tree     = profile.get("skill_tree") or habit.skill_tree or habit.linked_skill or ""
-    skill_node_id  = profile.get("skill_node_id") or habit.skill_node_id or ""
-    domain         = profile.get("domain") or _domain_for_skill_tree(skill_tree)
-    base_xp        = profile.get("base_xp") or 10
-
-    # Check if first habit logged today
-    already_today = supabase.table("habits").select("id").eq("completed_at", today).execute()
-    first_today   = len(already_today.data) == 0
-
-    # Get current streak for modifier
-    all_dates_desc = sorted(
-        {r["completed_at"] for r in supabase.table("habits").select("completed_at").eq("name", habit.name).execute().data},
-        reverse=True
-    )
-    streak = calc_streak(all_dates_desc, today)
-
-    xp_total, modifiers = _compute_xp(habit.name, base_xp, streak, today, domain, first_today)
-
-    # Insert log row — only use columns that exist in the base schema
-    result = supabase.table("habits").insert({
-        "name":         habit.name,
-        "completed_at": today,
-        "created_at":   datetime.now(timezone.utc).isoformat(),
-    }).execute()
-
-    # XP to ledger — domain and skill tree both
-    ledger_add("habit", f"{habit.name}:{today}", "Personal Growth", xp_total)
-    if skill_tree and skill_tree in SKILL_TREES:
-        ledger_add("habit_skill", f"{habit.name}:{today}:skill", skill_tree, xp_total)
-
-    # Skill node XP contribution
-    if skill_node_id and skill_tree:
-        ledger_add("habit_node", f"{habit.name}:{today}:{skill_node_id}", skill_tree, round(xp_total * 0.5))
-
-    # Updated streak/totals
-    all_dates_desc = sorted(
-        {r["completed_at"] for r in supabase.table("habits").select("completed_at").eq("name", habit.name).execute().data},
-        reverse=True
-    )
-    total  = len(all_dates_desc)
-    streak = calc_streak(all_dates_desc, today)
-
-    # Synergy detection
-    today_habits = [r["name"] for r in supabase.table("habits").select("name").eq("completed_at", today).execute().data]
-    new_synergies = _detect_synergies(today_habits, today)
-
-    # Evolution check
-    evo_ready = _check_evolution_ready(habit.name, total)
-    if evo_ready:
-        try:
-            supabase.table("habit_profiles").update({"pending_evolution": True}).eq("name", habit.name).execute()
-        except Exception:
-            pass
-
-    # Generate a habit quest (non-blocking, best-effort)
-    habit_quest = None
-    try:
-        node_name   = _node_name(skill_tree, skill_node_id)
-        habit_quest = _generate_habit_quest(habit.name, node_name, domain, profile.get("evolution_stage", 1))
-        # Auto-create quest if we have a matching goal
-        if habit_quest:
-            goal_data = build_goal_summary()
-            cat_goal  = next((g for g in goal_data if g.get("category") == skill_tree), None)
-            if cat_goal:
-                supabase.table("quests").insert({
-                    "goal_id":      cat_goal["id"],
-                    "title":        habit_quest["title"],
-                    "description":  habit_quest.get("description", ""),
-                    "difficulty":   habit_quest.get("difficulty", "Normal"),
-                    "is_completed": False,
-                    "created_at":   datetime.now(timezone.utc).isoformat(),
-                }).execute()
-    except Exception:
-        pass
-
-    # Adaptation advice
-    mastery    = _mastery(total)
-    snap       = _build_habit_snapshot(habit.name, profile, all_dates_desc, today)
-    adaptation = _ai_adapt_habit(habit.name, snap["success_rate"], streak, profile.get("evolution_stage", 1))
-
-    new_achievements = award_achievements()
-
-    # --- Automatic quest task progress from this habit log ------------------
-    # Idempotent: this block only runs once per calendar day per habit, because
-    # log_habit itself returns early ("already_logged") for repeat logs today.
-    auto_completed_tasks = []
-    try:
-        linked_tasks = (
-            supabase.table("board_quest_tasks")
-            .select("*")
-            .eq("linked_habit_name", habit.name)
-            .eq("is_completed", False)
-            .execute()
-            .data
-        )
-        for t in linked_tasks:
-            new_count = (t.get("current_logs") or 0) + 1
-            required  = t.get("required_logs") or 1
-            update_data = {"current_logs": new_count}
-            if new_count < required:
-                supabase.table("board_quest_tasks").update(update_data).eq("id", t["id"]).execute()
-            else:
-                completion = _mark_board_task_completed({**t, "current_logs": new_count}, auto=True)
-                auto_completed_tasks.append({
-                    "task_id":     t["id"],
-                    "task_title":  t["title"],
-                    "quest_id":    t["quest_id"],
-                    "current_logs": new_count,
-                    "required_logs": required,
-                    **completion,
-                })
-    except Exception:
-        pass
-
-    return {
-        "status":          "logged",
-        "xp_earned":       xp_total,
-        "xp_modifiers":    modifiers,
-        "streak":          streak,
-        "total_logs":      total,
-        "mastery":         mastery,
-        "evolution_ready": evo_ready,
-        "new_synergies":   new_synergies,
-        "habit_quest":     habit_quest,
-        "adaptation":      adaptation,
-        "new_achievements": new_achievements,
-        "domain":          domain,
-        "skill_tree":      skill_tree,
-        "auto_completed_tasks": auto_completed_tasks,
-    }
-
 @app.get("/habits/streaks")
 def get_streaks():
     return _compute_streaks_raw()
-
-@app.get("/habits/heatmap")
-def get_heatmap(days: int = 365):
-    return _build_habit_heatmap(days)
 
 @app.get("/habits/balance")
 def get_life_balance():
@@ -1405,10 +1134,9 @@ def get_life_balance():
 @app.get("/habits/stats/{habit_name}")
 def get_habit_stats(habit_name: str):
     """Full lifetime statistics for one habit."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    log   = supabase.table("habits").select("completed_at").eq("name", habit_name).execute()
-    dates_desc = sorted({r["completed_at"] for r in log.data}, reverse=True)
+    today      = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     profile    = _get_or_create_profile(habit_name)
+    dates_desc = _habit_quest_dates(profile.get("skill_tree", ""), profile.get("domain", ""))
     snap       = _build_habit_snapshot(habit_name, profile, dates_desc, today)
 
     # Milestones reached
@@ -1423,10 +1151,10 @@ def get_habit_stats(habit_name: str):
     base_xp = profile.get("base_xp") or 10
     total_xp = base_xp * len(dates_desc)
 
-    # Heatmap for this specific habit
+    # Heatmap for this specific habit (one quest-completion day = one cell)
     heatmap_counts: dict[str, int] = defaultdict(int)
-    for row in log.data:
-        heatmap_counts[row["completed_at"]] += 1
+    for d in dates_desc:
+        heatmap_counts[d] += 1
     heatmap = [{"date": d, "count": c} for d, c in sorted(heatmap_counts.items())]
 
     return {
@@ -1493,13 +1221,10 @@ def use_recovery_token(req: RecoveryTokenUse):
     effect = {}
 
     if req.token_type == "restore":
-        # Insert a recovered completion using only base schema columns
-        supabase.table("habits").insert({
-            "name":         req.name,
-            "completed_at": req.date,
-            "created_at":   datetime.now(timezone.utc).isoformat(),
-        }).execute()
-        effect = {"restored_date": req.date, "message": "Missed day restored — streak protected."}
+        # NOTE: a habit's activity is now derived from completed quests in its
+        # skill tree/category — there's no separate log row to restore anymore.
+        # The token is still spent, but there's nothing to backfill.
+        effect = {"restored_date": req.date, "message": "Streaks now come from quest completions, so there's no log to restore — completing a quest in this habit's category today will count instead."}
 
     elif req.token_type == "boss_reduce":
         effect = {"message": "Next boss difficulty will be reduced when generated."}
@@ -1652,10 +1377,14 @@ def habit_ai_insights():
     mood_by_date: dict[str, list] = defaultdict(list)
     for e in entries:
         mood_by_date[e["created_at"][:10]].append(e["mood"])
-    habit_result   = supabase.table("habits").select("name, completed_at").execute()
     habits_by_date: dict[str, list] = defaultdict(list)
-    for r in habit_result.data:
-        habits_by_date[r["completed_at"]].append(r["name"])
+    try:
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+        for p in profiles:
+            for d in _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", "")):
+                habits_by_date[d].append(p["name"])
+    except Exception:
+        pass
 
     moods_with, moods_without = [], []
     for date, moods in mood_by_date.items():
@@ -2666,8 +2395,11 @@ def _get_active_skill_goals(category: str) -> dict:
 
 def _compute_node_habit_progress(category: str, node_id: str) -> float:
     """
-    Average success-rate of habits linked to this skill node, with slow decay
-    for days missed since the last log (never an instant reset).
+    Success-rate of quest-derived activity for habits linked to this skill
+    node, with slow decay for days missed since the last completion (never
+    an instant reset). Since a habit's dates now come from any completed
+    quest in its skill_tree/category, and skill_tree == category here,
+    all linked habits share the same underlying date set.
     """
     try:
         profiles = (
@@ -2680,24 +2412,16 @@ def _compute_node_habit_progress(category: str, node_id: str) -> float:
         )
         if not profiles:
             return 0.0
+        dates = _habit_quest_dates(category)
+        if not dates:
+            return 0.0
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        scores = []
-        for p in profiles:
-            name = p["name"]
-            dates = sorted(
-                {r["completed_at"] for r in supabase.table("habits").select("completed_at").eq("name", name).execute().data},
-                reverse=True
-            )
-            if not dates:
-                scores.append(0.0)
-                continue
-            snap = _build_habit_snapshot(name, p, dates, today)
-            rate = snap["success_rate"]
-            last = datetime.strptime(dates[0], "%Y-%m-%d")
-            days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last).days
-            decayed = max(0.0, rate - days_since * 2)  # -2 pts/day of inactivity, floor at 0
-            scores.append(decayed)
-        return round(sum(scores) / len(scores), 1) if scores else 0.0
+        snap  = _build_habit_snapshot(profiles[0]["name"], {"skill_tree": category}, dates, today)
+        rate  = snap["success_rate"]
+        last  = datetime.strptime(dates[0], "%Y-%m-%d")
+        days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last).days
+        decayed = max(0.0, rate - days_since * 2)  # -2 pts/day of inactivity, floor at 0
+        return round(decayed, 1)
     except Exception:
         return 0.0
 
@@ -3288,16 +3012,14 @@ def detect_triggers(mood: int, content: str) -> dict:
         worst = stale_cats[0]
         reasons.append(f"{worst['category']} goals inactive for {worst['oldest_goal_days']}+ days")
         context_parts.append(f"Stale category: {worst['category']} ({worst['completion_rate']}% done)")
-    habit_result = supabase.table("habits").select("name, completed_at").execute()
+    profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute()
     today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-    habit_dates: dict[str, list] = defaultdict(list)
-    for row in habit_result.data:
-        habit_dates[row["name"]].append(row["completed_at"])
-    at_risk = [
-        n for n, dates in habit_dates.items()
-        if yesterday in dates and today not in dates
-    ]
+    at_risk = []
+    for p in (profiles.data or []):
+        dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+        if yesterday in dates and today not in dates:
+            at_risk.append(p["name"])
     if at_risk:
         reasons.append(f"streak at risk: {', '.join(at_risk)}")
         context_parts.append(f"Habits not done today (streak at risk): {', '.join(at_risk)}")
@@ -3466,27 +3188,22 @@ def build_trend_stats_block(all_light_entries: list[dict]) -> str:
     return "\n".join(lines)
 
 def build_habit_block() -> str:
-    result = supabase.table("habits").select("name, completed_at").order("completed_at", desc=True).execute()
-    habit_dates: dict[str, list] = defaultdict(list)
-    for row in result.data:
-        habit_dates[row["name"]].append(row["completed_at"])
-    if not habit_dates:
-        return "No habits tracked yet."
-    # Resolve domain/category from habit_profiles (no _fetch_habit_meta needed)
     try:
-        profiles_res = supabase.table("habit_profiles").select("name, domain, skill_tree").execute()
-        habit_meta = {
-            r["name"]: {"category": r.get("domain") or r.get("skill_tree") or "General"}
-            for r in profiles_res.data
-        }
+        profiles = supabase.table("habit_profiles").select("name, domain, skill_tree").execute().data
     except Exception:
-        habit_meta = {}
+        profiles = []
+    if not profiles:
+        return "No habits tracked yet."
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return "\n".join(
-        f"- {name} [{habit_meta.get(name, {}).get('category', '?')}]: {calc_streak(sorted(set(dates), reverse=True), today)}-day streak, "
-        f"{len(dates)} total, last done {sorted(set(dates), reverse=True)[0] if dates else 'never'}"
-        for name, dates in habit_dates.items()
-    )
+    lines = []
+    for p in profiles:
+        name  = p["name"]
+        cat   = p.get("domain") or p.get("skill_tree") or "General"
+        dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+        streak = calc_streak(dates, today)
+        last   = dates[0] if dates else "never"
+        lines.append(f"- {name} [{cat}]: {streak}-day streak, {len(dates)} total, last done {last}")
+    return "\n".join(lines)
 
 def build_semantic_matches_block(message: str, exclude_ids: set[int]) -> str:
     query_emb = generate_embedding(message)
@@ -3950,28 +3667,27 @@ def build_domain(name: str, defn: dict) -> dict:
     completed_tasks = sum(g["completed_tasks"] for g in domain_goals)
     progress        = round(completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
 
-    # Habits in domain — look up domain via habit_profiles instead of category column
+    # Habits in domain — derived from completed quests whose category matches
+    # this domain (directly, or via the domain's skill trees)
     try:
-        habit_result = supabase.table("habits").select("name, completed_at").execute()
-        profiles_res = supabase.table("habit_profiles").select("name, domain").execute()
-        profile_map  = {r["name"]: r.get("domain", "Personal Growth") for r in profiles_res.data}
-        today        = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        domain_habits: dict[str, dict] = {}
-        for row in habit_result.data:
-            habit_domain = profile_map.get(row["name"], "Personal Growth")
-            if habit_domain == name:  # match by domain name directly
-                n = row["name"]
-                if n not in domain_habits:
-                    domain_habits[n] = {"dates": []}
-                domain_habits[n]["dates"].append(row["completed_at"])
+        domain_cats = set(defn["skill_keys"]) | {name}
+        profiles_res = (
+            supabase.table("habit_profiles")
+            .select("name, domain, skill_tree")
+            .execute()
+            .data
+        )
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         habit_summary = []
-        for hname, hdata in domain_habits.items():
-            unique = sorted(set(hdata["dates"]), reverse=True)
+        for p in profiles_res:
+            if p.get("domain") != name and p.get("skill_tree") not in domain_cats:
+                continue
+            dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
             habit_summary.append({
-                "name":           hname,
-                "streak":         calc_streak(unique, today),
-                "total":          len(unique),
-                "done_today":     today in unique,
+                "name":           p["name"],
+                "streak":         calc_streak(dates, today),
+                "total":          len(dates),
+                "done_today":     today in dates,
             })
     except Exception:
         habit_summary = []
@@ -4782,23 +4498,22 @@ def _gen_habit_recovery_quests() -> list[dict]:
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     generated = []
     try:
-        habit_result = supabase.table("habits").select("name, completed_at").execute()
-        habit_dates: dict[str, list] = defaultdict(list)
-        for row in habit_result.data:
-            habit_dates[row["name"]].append(row["completed_at"])
-        for name, dates in habit_dates.items():
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+        for p in profiles:
+            name  = p["name"]
+            dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
             if yesterday in dates and today not in dates:
                 src_id = f"habit:{name}:{today}"
                 if _source_exists("habit", src_id):
                     continue
                 row = _insert_board_quest({
-                    "title":        f"Log '{name}' today",
-                    "description":  f"Your streak for '{name}' is at risk — log it to stay consistent.",
+                    "title":        f"Do a '{name}'-category quest today",
+                    "description":  f"'{name}' relies on {p.get('skill_tree') or p.get('domain') or 'this'} quests — its streak is at risk without one today.",
                     "difficulty":   "Easy",
                     "section":      "recovery",
                     "source_type":  "habit",
                     "source_id":    src_id,
-                    "category":     "Personal Growth",
+                    "category":     p.get("skill_tree") or p.get("domain") or "Personal Growth",
                     "xp_reward":    30,
                     "is_completed": False,
                     "due_date":     today,
@@ -4976,31 +4691,55 @@ def _build_recommended_section(all_quests: list[dict]) -> list[dict]:
 # Quest Board endpoints
 # ---------------------------------------------------------------------------
 
+# Quest-board auto-generation (skill chains, habit recovery, goal quests) used
+# to run in full on every single GET /board/quests call — fine when the board
+# is empty, wasteful once you have real data, since each call fans out into
+# O(skill nodes + habits + goals) Supabase round-trips just to find nothing
+# new to create most of the time. This throttles it to at most once per
+# BOARD_GENERATION_THROTTLE_SECONDS per process. It's an in-memory timestamp
+# (not persisted), which is fine for this single-process, single-user app —
+# worst case after a restart is one extra generation pass on the first load.
+BOARD_GENERATION_THROTTLE_SECONDS = 300  # 5 minutes
+_last_board_generation_at: Optional[datetime] = None
+
+def _run_board_generation_if_due(force: bool = False):
+    """Run quest-board auto-generation, but at most once per throttle window."""
+    global _last_board_generation_at
+    now = datetime.now(timezone.utc)
+    if not force and _last_board_generation_at is not None:
+        elapsed = (now - _last_board_generation_at).total_seconds()
+        if elapsed < BOARD_GENERATION_THROTTLE_SECONDS:
+            return False  # skipped — ran recently enough
+    try:
+        _expire_stale_daily_quests()
+    except Exception as e:
+        logger.exception("_expire_stale_daily_quests failed: %s", e)
+    try:
+        for cat in SKILL_TREES:
+            _gen_skill_chain(cat)
+    except Exception as e:
+        logger.exception("_gen_skill_chain failed: %s", e)
+    try:
+        _gen_habit_recovery_quests()
+    except Exception as e:
+        logger.exception("_gen_habit_recovery_quests failed: %s", e)
+    try:
+        _gen_goal_quests()
+    except Exception as e:
+        logger.exception("_gen_goal_quests failed: %s", e)
+    _last_board_generation_at = now
+    return True  # ran
+
 @app.get("/board/quests")
 def get_board_quests():
     """
     Return all board quests organised into sections.
-    Also runs auto-generation for skill chains + habit recovery.
+    Auto-generation (skill chains, habit recovery, goal quests) runs at most
+    once per BOARD_GENERATION_THROTTLE_SECONDS rather than on every call —
+    use POST /board/generate/* endpoints (or the "Generate Quests" button,
+    which forces a run) if you need it to happen immediately.
     """
-    # Daily quests that missed their day are removed, not carried over.
-    try:
-        _expire_stale_daily_quests()
-    except Exception:
-        pass
-    # Trigger auto-gen (non-blocking, idempotent)
-    try:
-        for cat in SKILL_TREES:
-            _gen_skill_chain(cat)
-    except Exception:
-        pass
-    try:
-        _gen_habit_recovery_quests()
-    except Exception:
-        pass
-    try:
-        _gen_goal_quests()
-    except Exception:
-        pass
+    _run_board_generation_if_due()
 
     all_quests = _get_board_quests()
     enriched   = [_build_quest_card(q) for q in all_quests]
@@ -5251,13 +4990,15 @@ def generate_journal_board_quests(data: dict):
     generated = _gen_journal_quests(content, mood, entry_id)
     return {"generated": len(generated), "quests": generated}
 
-# Trigger skill chain generation
+# Trigger full quest generation (skills + habits + goals), bypassing the throttle —
+# this backs the "Generate Quests" button, which is an explicit request to run now.
 @app.post("/board/generate/skills")
 def generate_skill_board_quests():
-    total = []
-    for cat in SKILL_TREES:
-        total.extend(_gen_skill_chain(cat))
-    return {"generated": len(total), "quests": total}
+    before = {q["id"] for q in _get_board_quests()}
+    _run_board_generation_if_due(force=True)
+    after  = _get_board_quests()
+    new_quests = [q for q in after if q["id"] not in before]
+    return {"generated": len(new_quests), "quests": new_quests}
 
 # Trigger boss quest generation
 @app.post("/board/generate/boss/{boss_id}")
