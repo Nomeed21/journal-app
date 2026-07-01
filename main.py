@@ -230,6 +230,98 @@ def xp_to_level(xp: int) -> dict:
     return {"level": level, "xp": xp, "xp_in_level": progress, "xp_to_next": XP_PER_LEVEL - progress}
 
 # ---------------------------------------------------------------------------
+# Virtual Peso (VP) — real-world reward currency
+# Deliberately scarce: only a fully-completed quest grants VP (1 VP each) —
+# not individual tasks, not habit logs, not journaling. 1000 VP = a leisure reward.
+# ---------------------------------------------------------------------------
+
+DEFAULT_REWARD_COST = 1000  # e.g. "Leisure Time"
+
+def vp_add(source_type: str, source_id: str, amount: int, note: str = ""):
+    """Append a VP event. Idempotent via source_type+source_id upsert, same pattern as ledger_add."""
+    supabase.table("vp_ledger").upsert(
+        {
+            "source_type": source_type,
+            "source_id":   str(source_id),
+            "amount":      amount,
+            "note":        note,
+            "created_at":  datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="source_type,source_id"
+    ).execute()
+
+def get_vp_balance() -> int:
+    try:
+        rows = supabase.table("vp_ledger").select("amount").execute().data
+        return sum(r["amount"] for r in rows)
+    except Exception:
+        return 0
+
+class RewardCreate(BaseModel):
+    title: str
+    cost: int = DEFAULT_REWARD_COST
+
+@app.get("/currency/balance")
+def currency_balance():
+    return {"balance": get_vp_balance()}
+
+@app.get("/currency/history")
+def currency_history(limit: int = 50):
+    try:
+        rows = supabase.table("vp_ledger").select("*").order("created_at", desc=True).limit(limit).execute().data
+    except Exception:
+        rows = []
+    return {"history": rows, "balance": get_vp_balance()}
+
+@app.get("/currency/rewards")
+def list_rewards():
+    try:
+        rows = supabase.table("vp_rewards").select("*").order("cost").execute().data
+    except Exception:
+        rows = []
+    if not rows:
+        # Seed one sensible default so the shop isn't empty on first use
+        try:
+            seeded = supabase.table("vp_rewards").insert({
+                "title": "Leisure Time", "cost": DEFAULT_REWARD_COST,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            rows = seeded.data or []
+        except Exception:
+            rows = [{"id": 0, "title": "Leisure Time", "cost": DEFAULT_REWARD_COST}]
+    return {"rewards": rows, "balance": get_vp_balance()}
+
+@app.post("/currency/rewards")
+def create_reward(reward: RewardCreate):
+    result = supabase.table("vp_rewards").insert({
+        "title": reward.title.strip() or "Reward",
+        "cost":  max(reward.cost, 1),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return {"status": "created", "reward": result.data[0]}
+
+@app.delete("/currency/rewards/{reward_id}")
+def delete_reward(reward_id: int):
+    supabase.table("vp_rewards").delete().eq("id", reward_id).execute()
+    return {"status": "deleted"}
+
+@app.post("/currency/rewards/{reward_id}/redeem")
+def redeem_reward(reward_id: int):
+    reward = supabase.table("vp_rewards").select("*").eq("id", reward_id).single().execute().data
+    if not reward:
+        raise HTTPException(404, "Reward not found")
+    balance = get_vp_balance()
+    if balance < reward["cost"]:
+        raise HTTPException(400, f"Not enough VP. Need {reward['cost']}, have {balance}.")
+    vp_add(
+        "redemption",
+        f"{reward_id}:{datetime.now(timezone.utc).isoformat()}",
+        -reward["cost"],
+        note=f"Redeemed: {reward['title']}",
+    )
+    return {"status": "redeemed", "reward": reward, "balance": get_vp_balance()}
+
+# ---------------------------------------------------------------------------
 # Achievement system
 # ---------------------------------------------------------------------------
 
@@ -2958,6 +3050,7 @@ def get_achievements():
     return {
         "earned":    earned,
         "total_xp":  total_xp,
+        "vp_balance": get_vp_balance(),
         "level_info": xp_to_level(total_xp),
         "all_achievements": [{"name": a["name"], "xp": a["xp"]} for a in ACHIEVEMENTS],
     }
@@ -3489,6 +3582,8 @@ def _create_quest_from_chat(quest_data: dict):
     xp       = int(quest_data.get("xp_reward") or XP_BY_DIFFICULTY.get(diff, 50))
     tasks    = quest_data.get("tasks") or []
     section  = quest_data.get("section", "daily")
+    if section == "daily" and _daily_quest_count() >= DAILY_QUEST_LIMIT:
+        section = "weekly"
     category = quest_data.get("category", "Personal Growth")
     row = _insert_board_quest({
         "title":           title,
@@ -4423,6 +4518,45 @@ class QuestBoardComplete(BaseModel):
 
 XP_BY_DIFFICULTY = {"Easy": 25, "Normal": 50, "Hard": 100, "Elite": 200, "Boss": 300}
 SECTION_ORDER     = ["recommended", "daily", "weekly", "skill", "recovery", "boss", "completed"]
+DAILY_QUEST_LIMIT = 2  # only 2 "daily" quests may be active at once
+
+def _daily_quest_count() -> int:
+    """Active (incomplete) quests currently sitting in the 'daily' section."""
+    try:
+        rows = (
+            supabase.table("board_quests")
+            .select("id")
+            .eq("section", "daily")
+            .eq("is_completed", False)
+            .execute()
+            .data
+        )
+        return len(rows)
+    except Exception:
+        return 0
+
+def _expire_stale_daily_quests():
+    """
+    A 'daily' quest that wasn't completed by the end of the day it was created
+    is deleted rather than carried over — it doesn't get a second day.
+    """
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        rows = (
+            supabase.table("board_quests")
+            .select("id, created_at")
+            .eq("section", "daily")
+            .eq("is_completed", False)
+            .execute()
+            .data
+        )
+        for r in rows:
+            created_date = (r.get("created_at") or "")[:10]
+            if created_date and created_date < today:
+                supabase.table("board_quest_tasks").delete().eq("quest_id", r["id"]).execute()
+                supabase.table("board_quests").delete().eq("id", r["id"]).execute()
+    except Exception:
+        pass
 
 def _source_exists(source_type: str, source_id: str) -> bool:
     """Check if a quest from this source already exists (deduplication)."""
@@ -4701,11 +4835,14 @@ Return [] if no clear quests emerge. No markdown, pure JSON only."""
         quests_raw = _json.loads(raw.strip())
         generated  = []
         for q in (quests_raw if isinstance(quests_raw, list) else [])[:3]:
+            section = q.get("section", "daily")
+            if section == "daily" and _daily_quest_count() >= DAILY_QUEST_LIMIT:
+                section = "weekly"  # daily is full — route the rest to weekly instead of dropping them
             row = _insert_board_quest({
                 "title":           q.get("title", "Journal Quest"),
                 "description":     q.get("description", ""),
                 "difficulty":      q.get("difficulty", "Normal"),
-                "section":         q.get("section", "daily"),
+                "section":         section,
                 "source_type":     "journal",
                 "source_id":       src_id,
                 "category":        q.get("category", "Personal Growth"),
@@ -4825,6 +4962,11 @@ def get_board_quests():
     Return all board quests organised into sections.
     Also runs auto-generation for skill chains + habit recovery.
     """
+    # Daily quests that missed their day are removed, not carried over.
+    try:
+        _expire_stale_daily_quests()
+    except Exception:
+        pass
     # Trigger auto-gen (non-blocking, idempotent)
     try:
         for cat in SKILL_TREES:
@@ -4882,6 +5024,12 @@ def get_board_quests():
 @app.post("/board/quests")
 def create_board_quest(q: QuestBoardCreate):
     """Manually create a board quest."""
+    if q.section == "daily" and _daily_quest_count() >= DAILY_QUEST_LIMIT:
+        raise HTTPException(
+            400,
+            f"Daily quest limit reached ({DAILY_QUEST_LIMIT}/day). "
+            "Complete one, or choose Weekly/Skill instead.",
+        )
     xp  = q.xp_reward or XP_BY_DIFFICULTY.get(q.difficulty, 50)
     row = _insert_board_quest({
         "title":           q.title,
@@ -5005,6 +5153,7 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
     }).eq("id", quest_id).execute()
 
     ledger_add("board_quest", str(quest_id), cat, xp)
+    vp_add("board_quest", str(quest_id), 1, note=f"Quest completed: {q.get('title', '')}")
     new_achievements = award_achievements()
 
     children_unlocked = 0
@@ -5021,6 +5170,7 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
     return {
         "status":            "completed",
         "xp_earned":         xp,
+        "vp_earned":         1,
         "category":          cat,
         "new_achievements":  new_achievements,
         "children_unlocked": children_unlocked,

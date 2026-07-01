@@ -63,7 +63,8 @@ async function loadXPHUD() {
             <div class="xp-hud-bar-wrap">
                 <div class="xp-hud-bar-fill" style="width:${Math.round(info.xp_in_level/5)}%"></div>
             </div>
-            <div class="xp-hud-text">${info.xp_in_level} / 500 XP</div>`;
+            <div class="xp-hud-text">${info.xp_in_level} / 500 XP</div>
+            <div class="vp-hud-text">💰 ${data.vp_balance ?? 0} VP</div>`;
     } catch (_) {}
 }
 
@@ -1034,6 +1035,7 @@ function _handleAutoCompletedTasks(autoCompleted) {
             _toast(`⚡ "${t.task_title}" auto-completed from your habit log!`, "#7c3aed", 3500);
             if (t.quest_completion) {
                 showXPFlash(t.quest_completion.xp_earned, t.quest_completion.category || "Quest");
+                if (t.quest_completion.vp_earned) setTimeout(() => _toast(`💰 +${t.quest_completion.vp_earned} VP earned`, "#d6a73a", 2800), 300);
                 if (t.quest_completion.new_achievements) showAchievementToast(t.quest_completion.new_achievements);
                 setTimeout(() => _toast("⚔️ Linked quest auto-completed!", "#2e7d32", 3000), 400);
             }
@@ -1696,6 +1698,7 @@ window.completeQuestBoard = async function(questId, btn) {
     try {
         const data = await (await fetch(`/board/quests/${questId}/complete`, { method: "POST" })).json();
         if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Quest");
+        if (data.vp_earned) _toast(`💰 +${data.vp_earned} VP earned`, "#d6a73a", 2800);
         if (data.new_achievements) showAchievementToast(data.new_achievements);
         if (data.children_unlocked > 0)
             _toast(`🔓 ${data.children_unlocked} new quest${data.children_unlocked > 1 ? 's' : ''} unlocked!`, "#2e7d32", 3500);
@@ -1746,6 +1749,7 @@ window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCa
         // server-side — reflect it here instead of waiting for a manual "Complete" click.
         if (data.quest_completion) {
             showXPFlash(data.quest_completion.xp_earned, data.quest_completion.category || questCategory || "Quest");
+            if (data.quest_completion.vp_earned) _toast(`💰 +${data.quest_completion.vp_earned} VP earned`, "#d6a73a", 2800);
             if (data.quest_completion.new_achievements) showAchievementToast(data.quest_completion.new_achievements);
             _toast("⚔️ Quest auto-completed!", "#2e7d32", 3000);
         }
@@ -1822,7 +1826,7 @@ window.createManualQuest = async function() {
     const tasks    = tasksRaw ? tasksRaw.split("\n").map(t => t.trim()).filter(Boolean) : [];
     const xpMap    = { Easy: 25, Normal: 50, Hard: 100, Elite: 200 };
 
-    await fetch("/board/quests", {
+    const res = await fetch("/board/quests", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             title, description: desc, section, difficulty: diff,
@@ -1830,6 +1834,11 @@ window.createManualQuest = async function() {
             due_date: due || null, suggested_tasks: tasks, source_type: "manual",
         }),
     });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        _toast(err.detail || "Could not create quest.", "#ef5350", 4000);
+        return;
+    }
     // Reset form
     ["qbc-title","qbc-desc","qbc-tasks"].forEach(id => {
         const el = document.getElementById(id);
@@ -2132,6 +2141,7 @@ async function loadDomains() {
     }
     loadActionEngine();
     loadCurrentBosses();
+    loadRewards();
 }
 
 function buildDomainCard(d) {
@@ -2336,6 +2346,93 @@ window.defeatBoss = async function(bossId, btn) {
     } catch (_) {
         btn.disabled = false;
         btn.textContent = "⚔️ Mark Defeated";
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Virtual Peso — Rewards Shop
+// 1 VP per completed quest. Spend it on real things you actually want.
+// ---------------------------------------------------------------------------
+
+async function loadRewards() {
+    const grid   = document.getElementById("rewards-grid");
+    const banner = document.getElementById("vp-balance-banner");
+    if (!grid) return;
+    try {
+        const data = await (await fetch("/currency/rewards")).json();
+        const balance = data.balance ?? 0;
+        if (banner) {
+            banner.innerHTML = `
+                <span class="vp-balance-amount">💰 ${balance} VP</span>
+                <span class="vp-balance-sub">1 VP per completed quest — spend it on something real</span>`;
+        }
+        const rewards = data.rewards || [];
+        grid.innerHTML = rewards.map(r => {
+            const affordable = balance >= r.cost;
+            return `<div class="reward-card ${affordable ? 'reward-card--affordable' : ''}">
+                <div class="reward-card-title">${_escHtml(r.title)}</div>
+                <div class="reward-card-cost">${r.cost} VP</div>
+                <div class="reward-card-actions">
+                    <button class="reward-redeem-btn" ${affordable ? "" : "disabled"} onclick="redeemReward(${r.id}, this)">
+                        ${affordable ? "🎁 Redeem" : "🔒 Locked"}
+                    </button>
+                    <button class="reward-del-btn" onclick="deleteReward(${r.id})" title="Remove">🗑</button>
+                </div>
+            </div>`;
+        }).join("") || "<p class='empty-state'>No rewards yet — add something you'd love to earn.</p>";
+    } catch (_) {
+        grid.innerHTML = "<p class='empty-state'>Could not load rewards.</p>";
+    }
+}
+
+window.toggleRewardCreatePanel = function() {
+    const panel = document.getElementById("reward-create-panel");
+    if (!panel) return;
+    panel.style.display = panel.style.display === "none" ? "" : "none";
+    if (panel.style.display !== "none") document.getElementById("reward-title")?.focus();
+};
+
+window.createReward = async function() {
+    const titleEl = document.getElementById("reward-title");
+    const costEl  = document.getElementById("reward-cost");
+    const title = titleEl?.value.trim();
+    const cost  = parseInt(costEl?.value) || 1000;
+    if (!title) { _toast("Give the reward a name.", "#ef5350"); return; }
+    await fetch("/currency/rewards", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, cost }),
+    });
+    titleEl.value = "";
+    costEl.value  = "1000";
+    document.getElementById("reward-create-panel").style.display = "none";
+    loadRewards();
+    _toast("💰 Reward added to your shop.", "var(--accent-deep)", 2200);
+};
+
+window.deleteReward = async function(id) {
+    if (!confirm("Delete this reward?")) return;
+    await fetch(`/currency/rewards/${id}`, { method: "DELETE" });
+    loadRewards();
+};
+
+window.redeemReward = async function(id, btn) {
+    if (!confirm("Redeem this reward? The VP will be deducted.")) return;
+    btn.disabled = true;
+    btn.textContent = "Redeeming…";
+    try {
+        const res  = await fetch(`/currency/rewards/${id}/redeem`, { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) {
+            _toast(data.detail || "Not enough VP.", "#ef5350", 3500);
+            loadRewards();
+            return;
+        }
+        _toast(`🎉 Redeemed "${data.reward.title}"! Go enjoy it.`, "#2e7d32", 4500);
+        loadRewards();
+        loadXPHUD();
+    } catch (_) {
+        _toast("Redemption failed.", "#ef5350");
+        loadRewards();
     }
 };
 

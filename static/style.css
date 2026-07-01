@@ -5141,3 +5141,121 @@ body {
 
 .skt-mastery-mini-fill--habit { background: #f7a94b; }
 .skt-mastery-mini-fill--quest { background: #4caf50; }
+
+/* ============================================================
+   Virtual Peso — XP HUD badge + Rewards Shop
+   ============================================================ */
+
+.vp-hud-text {
+    font-size: .68rem;
+    font-weight: 700;
+    color: #b8860b;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 999px;
+    padding: .12rem .5rem;
+    margin-top: .3rem;
+    display: inline-block;
+}
+
+.vp-balance-banner {
+    background: linear-gradient(135deg, #fff8e1 0%, #fff3cd 100%);
+    border: 1.5px solid #ffe082;
+    border-left: 4px solid #d6a73a;
+    border-radius: 14px;
+    padding: .9rem 1.25rem;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: baseline;
+    gap: .75rem;
+    flex-wrap: wrap;
+}
+
+.vp-balance-amount {
+    font-family: var(--font-display);
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: #8a6512;
+}
+
+.vp-balance-sub {
+    font-size: .8rem;
+    color: var(--ink-soft);
+}
+
+.reward-card {
+    background: var(--paper);
+    border: 1.5px solid var(--line-strong);
+    border-top: 4px solid #d6a73a;
+    border-radius: 14px;
+    padding: 1.1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: .55rem;
+    opacity: .7;
+    transition: box-shadow .15s, transform .15s, opacity .15s;
+}
+
+.reward-card--affordable {
+    opacity: 1;
+    box-shadow: 0 4px 14px rgba(214,167,58,.18);
+}
+
+.reward-card:hover { transform: translateY(-1px); }
+
+.reward-card-title {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.reward-card-cost {
+    font-size: .85rem;
+    font-weight: 700;
+    color: #8a6512;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 999px;
+    padding: .2rem .6rem;
+    align-self: flex-start;
+}
+
+.reward-card-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+}
+
+.reward-redeem-btn {
+    flex: 1;
+    background: #d6a73a;
+    color: #fff;
+    border: none;
+    border-radius: 9px;
+    padding: .5rem 1rem;
+    font-size: .85rem;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(214,167,58,.3);
+    transition: background .15s;
+}
+.reward-redeem-btn:hover { background: #b8860b; transform: none; box-shadow: none; }
+.reward-redeem-btn:disabled {
+    background: var(--line-strong);
+    color: var(--ink-faint);
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.reward-del-btn {
+    background: var(--paper-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: .5rem .65rem;
+    font-size: .85rem;
+    cursor: pointer;
+    color: var(--ink-faint);
+    box-shadow: none;
+}
+.reward-del-btn:hover { background: #ffebee; color: #c62828; border-color: #ef9a9a; transform: none; box-shadow: none; }

@@ -73,6 +73,25 @@
             </div>
             <div id="boss-battles" class="boss-grid">Loading…</div>
 
+            <!-- Rewards Shop -->
+            <div class="section-header-row" style="margin-top:2rem">
+                <h2 class="section-h2">💰 Rewards Shop</h2>
+                <button class="btn-ghost btn-sm" onclick="toggleRewardCreatePanel()">+ New Reward</button>
+            </div>
+            <div id="vp-balance-banner" class="vp-balance-banner">Loading balance…</div>
+            <div id="reward-create-panel" class="qb-create-panel" style="display:none">
+                <div class="qb-create-title">New Reward</div>
+                <div class="qb-create-form">
+                    <input type="text" id="reward-title" placeholder="What do you want to buy yourself?" class="qbc-input">
+                    <input type="number" id="reward-cost" placeholder="Cost in VP" value="1000" min="1" class="qbc-input">
+                    <div class="qbc-actions">
+                        <button onclick="createReward()" class="qbc-submit">Add Reward</button>
+                        <button onclick="toggleRewardCreatePanel()" class="btn-ghost btn-sm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+            <div id="rewards-grid" class="boss-grid">Loading…</div>
+
             <!-- Domain Cards -->
             <div class="section-header-row" style="margin-top:2rem">
                 <h2 class="section-h2">🌐 Domain Overview</h2>
