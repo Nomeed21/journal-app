@@ -3564,36 +3564,16 @@ def _save_monthly_review(mk: str, review_text: str):
     except Exception as e:
         logger.exception("Failed to cache monthly review for %s: %s", mk, e)
 
-@app.get("/monthly-review")
-def monthly_review(year: Optional[int] = None, month: Optional[int] = None, force: bool = False):
-    now = datetime.now(timezone.utc)
-    y = year or now.year
-    m = month or now.month
-    if m < 1 or m > 12:
-        raise HTTPException(400, "Invalid month")
-    # Don't allow generating a review for a month that hasn't happened yet
-    if (y, m) > (now.year, now.month):
-        raise HTTPException(400, "That month hasn't happened yet.")
-
-    mk = _month_key(y, m)
-    month_label = f"{MONTH_NAMES_FULL[m - 1]} {y}"
-
-    # Serve the saved review instead of re-generating every time, unless the
-    # caller explicitly asks for a fresh one.
-    if not force:
-        cached = _get_cached_monthly_review(mk)
-        if cached:
-            return {
-                "review":       cached["review"],
-                "year":         y,
-                "month":        m,
-                "cached":       True,
-                "generated_at": cached.get("created_at"),
-            }
-
+def _compute_month_stats(y: int, m: int) -> Optional[dict]:
+    """
+    Cheap (no-LLM) stats block for a given month — used both to build the
+    review prompt and to power the visual stats strip on the frontend,
+    regardless of whether the review text itself is freshly generated or
+    served from cache.
+    """
     entries = get_month_entries(y, m)
     if not entries:
-        return {"review": f"No journal entries found for {month_label} yet.", "year": y, "month": m, "cached": False}
+        return None
     moods    = [e["mood"]   for e in entries]
     energies = [e.get("energy", 3) for e in entries]
     focuses  = [e.get("focus",  3) for e in entries]
@@ -3619,8 +3599,7 @@ def monthly_review(year: Optional[int] = None, month: Optional[int] = None, forc
             .execute().data]
     except Exception:
         pass
-    context = {
-        "month":         month_label,
+    return {
         "entry_count":   len(entries),
         "avg_mood":      round(sum(moods)    / len(moods),    1),
         "avg_energy":    round(sum(energies) / len(energies), 1),
@@ -3633,7 +3612,47 @@ def monthly_review(year: Optional[int] = None, month: Optional[int] = None, forc
         "total_xp": total_xp, "best_category": best_cat,
         "stalled_categories": stale_cats,
         "achievements_this_month": achievements,
-        "recent_entries": [f"{e['title']}: {e['content'][:150]}" for e in entries[-5:]],
+        "_entries": entries,  # internal — used to build the prompt, stripped before response
+    }
+
+@app.get("/monthly-review")
+def monthly_review(year: Optional[int] = None, month: Optional[int] = None, force: bool = False):
+    now = datetime.now(timezone.utc)
+    y = year or now.year
+    m = month or now.month
+    if m < 1 or m > 12:
+        raise HTTPException(400, "Invalid month")
+    # Don't allow generating a review for a month that hasn't happened yet
+    if (y, m) > (now.year, now.month):
+        raise HTTPException(400, "That month hasn't happened yet.")
+
+    mk = _month_key(y, m)
+    month_label = f"{MONTH_NAMES_FULL[m - 1]} {y}"
+    stats = _compute_month_stats(y, m)
+    stats_public = {k: v for k, v in stats.items() if k != "_entries"} if stats else None
+
+    # Serve the saved review instead of re-generating every time, unless the
+    # caller explicitly asks for a fresh one.
+    if not force:
+        cached = _get_cached_monthly_review(mk)
+        if cached:
+            return {
+                "review":       cached["review"],
+                "year":         y,
+                "month":        m,
+                "cached":       True,
+                "generated_at": cached.get("created_at"),
+                "stats":        stats_public,
+            }
+
+    if not stats:
+        return {"review": f"No journal entries found for {month_label} yet.", "year": y, "month": m,
+                "cached": False, "stats": None}
+
+    context = {
+        "month": month_label,
+        **stats_public,
+        "recent_entries": [f"{e['title']}: {e['content'][:150]}" for e in stats["_entries"][-5:]],
     }
     prompt = f"""You are LiAInne. Create a monthly review for {month_label}.
 
@@ -3655,7 +3674,7 @@ Give actionable focus areas. Natural language, not statistics lists."""
     )
     review_text = response.choices[0].message.content
     _save_monthly_review(mk, review_text)
-    return {"review": review_text, "year": y, "month": m, "cached": False}
+    return {"review": review_text, "year": y, "month": m, "cached": False, "stats": stats_public}
 
 # ---------------------------------------------------------------------------
 # Life Domains — aggregate XP/goals/habits/skills per domain

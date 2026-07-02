@@ -1383,6 +1383,66 @@ window.selectReviewMonth = async function(year, month, force = false) {
     }
 };
 
+const MRC_SECTION_META = {
+    "wins":                 { icon: "🏆", cls: "wins" },
+    "challenges":           { icon: "🌩️", cls: "challenges" },
+    "patterns":             { icon: "🔍", cls: "patterns" },
+    "focus for next month": { icon: "🎯", cls: "focus" },
+    "overview":             { icon: "✦",  cls: "" },
+};
+
+function _mrcInline(text) {
+    return _escHtml(text)
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/(?<!\*)\*(?!\*)(.+?)\*(?!\*)/g, "<em>$1</em>");
+}
+
+// Splits review markdown ("## Header\n...body...") into {title, html} blocks.
+// Consecutive "- " / "* " lines become a <ul>; everything else becomes <p>.
+function _mrcParseSections(review) {
+    const lines = review.split("\n");
+    const sections = [];
+    let current = null;
+    lines.forEach(line => {
+        const m = line.match(/^#{1,3}\s*(.+?)\s*$/);
+        if (m) {
+            current = { title: m[1].trim(), lines: [] };
+            sections.push(current);
+        } else if (current) {
+            current.lines.push(line);
+        } else {
+            if (!sections.length || sections[0].title !== "Overview") {
+                current = { title: "Overview", lines: [] };
+                sections.unshift(current);
+            }
+            current.lines.push(line);
+        }
+    });
+    if (!sections.length) return [];
+    return sections.map(s => {
+        const bodyLines = s.lines.map(l => l.trim()).filter(Boolean);
+        let html = "", inList = false;
+        bodyLines.forEach(l => {
+            const isBullet = /^[-*]\s+/.test(l);
+            if (isBullet) {
+                if (!inList) { html += "<ul>"; inList = true; }
+                html += `<li>${_mrcInline(l.replace(/^[-*]\s+/, ""))}</li>`;
+            } else {
+                if (inList) { html += "</ul>"; inList = false; }
+                html += `<p>${_mrcInline(l)}</p>`;
+            }
+        });
+        if (inList) html += "</ul>";
+        return { title: s.title, html: html || "<p style='font-style:italic;color:var(--ink-faint)'>Nothing noted.</p>" };
+    });
+}
+
+function _mrcTrend(trend) {
+    if (trend === "trending up")   return `<span class="mrc-stat-chip-trend mrc-trend-up">↑ rising</span>`;
+    if (trend === "trending down") return `<span class="mrc-stat-chip-trend mrc-trend-down">↓ falling</span>`;
+    return `<span class="mrc-stat-chip-trend mrc-trend-flat">→ steady</span>`;
+}
+
 function renderMonthlyReviewResult(data) {
     const el = document.getElementById("monthly-review");
     const noteHtml = data.cached
@@ -1390,7 +1450,39 @@ function renderMonthlyReviewResult(data) {
             <button type="button" class="mrc-regen-btn" onclick="selectReviewMonth(${data.year}, ${data.month}, true)">↻ Regenerate</button></div>`
         : `<div class="mrc-cached-note">✦ Freshly generated
             <button type="button" class="mrc-regen-btn" onclick="selectReviewMonth(${data.year}, ${data.month}, true)">↻ Regenerate</button></div>`;
-    el.innerHTML = `${noteHtml}<div class="mrc-review-text">${data.review.replace(/\n/g, "<br>")}</div>`;
+
+    const s = data.stats;
+    let statsHtml = "", achHtml = "";
+    if (s) {
+        statsHtml = `<div class="mrc-stats-strip">
+            <div class="mrc-stat-chip"><div class="mrc-stat-chip-val">${s.avg_mood}/5</div><div class="mrc-stat-chip-label">Mood</div>${_mrcTrend(s.mood_trend)}</div>
+            <div class="mrc-stat-chip"><div class="mrc-stat-chip-val">${s.avg_energy}/5</div><div class="mrc-stat-chip-label">Energy</div>${_mrcTrend(s.energy_trend)}</div>
+            <div class="mrc-stat-chip"><div class="mrc-stat-chip-val">${s.avg_focus}/5</div><div class="mrc-stat-chip-label">Focus</div>${_mrcTrend(s.focus_trend)}</div>
+            <div class="mrc-stat-chip"><div class="mrc-stat-chip-val">${s.entry_count}</div><div class="mrc-stat-chip-label">Entries</div></div>
+            <div class="mrc-stat-chip"><div class="mrc-stat-chip-val">${s.completed_quests}/${s.total_quests}</div><div class="mrc-stat-chip-label">Quests</div></div>
+            <div class="mrc-stat-chip"><div class="mrc-stat-chip-val">${s.total_xp}</div><div class="mrc-stat-chip-label">Total XP</div></div>
+        </div>`;
+        if (s.achievements_this_month && s.achievements_this_month.length) {
+            achHtml = `<div class="mrc-achievements-row">
+                ${s.achievements_this_month.map(a => `<span class="mrc-ach-pill">🏆 ${_escHtml(a)}</span>`).join("")}
+            </div>`;
+        }
+    }
+
+    const sections = _mrcParseSections(data.review || "");
+    const sectionsHtml = sections.length
+        ? `<div class="mrc-sections">
+            ${sections.map(sec => {
+                const meta = MRC_SECTION_META[sec.title.toLowerCase()] || { icon: "✦", cls: "" };
+                return `<div class="mrc-section-card ${meta.cls ? 'mrc-section-card--' + meta.cls : ''}">
+                    <div class="mrc-section-title"><span class="mrc-section-icon">${meta.icon}</span>${_escHtml(sec.title)}</div>
+                    <div class="mrc-section-body">${sec.html}</div>
+                </div>`;
+            }).join("")}
+        </div>`
+        : `<div class="mrc-review-text">${_escHtml(data.review || "").replace(/\n/g, "<br>")}</div>`;
+
+    el.innerHTML = `${noteHtml}${statsHtml}${achHtml}${sectionsHtml}`;
 }
 
 // ---------------------------------------------------------------------------
