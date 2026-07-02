@@ -40,7 +40,7 @@ function showPage(pageId) {
     if (pageId === "skills")   loadSkills();
     if (pageId === "habits")   loadStreaks();
     if (pageId === "insights") { loadCharts(); loadInsights(); }
-    if (pageId === "review")   {}
+    if (pageId === "review")   { renderReviewCalendar(); }
     if (pageId === "journal")  { loadProactiveCoaching(); loadTodayStatus(); }
     if (pageId === "domains")  loadDomains();
 }
@@ -197,37 +197,14 @@ async function loadNightChecklist() {
     }
     el.innerHTML = "<p class='plan-loading'>Loading today's plan…</p>";
     try {
-        // Fetch plan and habits independently so one failure doesn't kill the other
-        let data = { plan: null }, streaks = {};
+        let data = { plan: null };
         try {
             const planRes = await fetch("/plans/today");
             if (planRes.ok) data = await planRes.json();
         } catch (_) {}
-        try {
-            const streaksRes = await fetch("/habits/balance");
-            if (streaksRes.ok) {
-                const habData = await streaksRes.json();
-                streaks = habData.streaks || {};
-            }
-        } catch (_) {}
-        // Habit checklist
-        const habitNames = Object.keys(streaks);
-        let habitSection = "";
-        if (habitNames.length) {
-            habitSection = `
-                <div class="ms-label" style="margin-top:.75rem">Today's Habits</div>
-                ${habitNames.map(name => {
-                    const s = streaks[name];
-                    const cat = s.category || "Productivity";
-                    return `<label class="night-task-row">
-                        <input type="checkbox" class="night-habit-check" data-name="${name}" data-cat="${cat}">
-                        <span>${name} <em style="font-size:.75rem;color:var(--ink-faint)">${s.current_streak}-day streak</em></span>
-                    </label>`;
-                }).join("")}`;
-        }
 
         if (!data.plan || (!data.plan.main_goal && !(data.plan.tasks || []).length)) {
-            el.innerHTML = `<p class='plan-loading'>No morning plan found.</p>${habitSection}`;
+            el.innerHTML = "<p class='plan-loading'>No morning plan found.</p>";
             nightTasks = [];
         } else {
             nightTasks = (data.plan.tasks || []).map(t => ({ ...t, completed: t.completed || false }));
@@ -239,23 +216,11 @@ async function loadNightChecklist() {
                     <span>${t.title}</span>
                 </label>`).join("");
             el.innerHTML = `<label class="field-label">Today's Plan — How Did It Go?</label>${goalLine}
-                ${taskRows || "<p class='plan-loading'>No tasks were planned.</p>"}
-                ${habitSection}`;
+                ${taskRows || "<p class='plan-loading'>No tasks were planned.</p>"}`;
         }
         el.querySelectorAll(".night-check").forEach(cb =>
             cb.addEventListener("change", () => { nightTasks[+cb.dataset.index].completed = cb.checked; })
         );
-        // Quick-log habits from night reflection
-        el.querySelectorAll(".night-habit-check").forEach(cb => {
-            cb.addEventListener("change", async () => {
-                if (cb.checked) {
-                    await fetch("/habits", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ name: cb.dataset.name, category: cb.dataset.cat, difficulty: "Normal" }),
-                    });
-                }
-            });
-        });
     } catch (_) {
         el.innerHTML = "<p class='plan-loading'>Error rendering night checklist. Check the console.</p>";
     }
@@ -272,6 +237,7 @@ entryForm.addEventListener("submit", async (e) => {
     e.preventDefault();
 
     let entryData;
+    let tomorrowPriorityText = "";
 
     if (currentEntryType === "morning") {
         const tasks = [gv("morning-task-1"), gv("morning-task-2"), gv("morning-task-3")]
@@ -293,6 +259,7 @@ entryForm.addEventListener("submit", async (e) => {
             });
         }
     } else if (currentEntryType === "night") {
+        tomorrowPriorityText = gv("night-tomorrow").trim();
         const parts = [
             gv("night-highlight")  ? `Highlight: ${gv("night-highlight")}` : "",
             gv("night-quests")     ? `Quest progress: ${gv("night-quests")}` : "",
@@ -377,6 +344,31 @@ entryForm.addEventListener("submit", async (e) => {
         }).then(r => r.json()).then(data => {
             if (data.generated > 0) {
                 _toast(`✦ ${data.generated} quest${data.generated > 1 ? 's' : ''} added to your Quest Board from this entry!`, "var(--accent-deep)", 3500);
+            }
+        }).catch(() => {});
+    }
+
+    // Night entry: turn tomorrow's stated priority into a quest due tomorrow
+    if (currentEntryType === "night" && tomorrowPriorityText) {
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const dueDate = tomorrow.toISOString().slice(0, 10);
+        fetch("/board/quests", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                title: tomorrowPriorityText,
+                description: "Tomorrow's top priority, set during last night's reflection.",
+                section: "weekly",
+                difficulty: "Normal",
+                category: "Personal Growth",
+                xp_reward: 50,
+                due_date: dueDate,
+                source_type: "manual",
+                source_id: `night_priority:${dueDate}`,
+            }),
+        }).then(r => r.json()).then(data => {
+            if (data.status === "created") {
+                _toast(`🎯 Added to Quests for tomorrow: "${tomorrowPriorityText}"`, "var(--accent-deep)", 3500);
             }
         }).catch(() => {});
     }
@@ -1330,12 +1322,76 @@ async function loadAIInsight() {
 // ---------------------------------------------------------------------------
 // Monthly review
 // ---------------------------------------------------------------------------
-document.getElementById("generate-review").addEventListener("click", async () => {
+// ---------------------------------------------------------------------------
+// Monthly review — months-only calendar picker
+// ---------------------------------------------------------------------------
+const MRC_MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+const mrcCurrentDate   = new Date();
+let reviewCalYear      = mrcCurrentDate.getFullYear();
+let reviewSelectedMonth = null; // { year, month } (month is 1-indexed)
+
+function renderReviewCalendar() {
+    const yearEl = document.getElementById("mrc-cal-year");
+    const grid   = document.getElementById("mrc-months-grid");
+    const nextBtn = document.getElementById("mrc-next-year");
+    if (!yearEl || !grid) return;
+
+    yearEl.textContent = reviewCalYear;
+    const curYear  = mrcCurrentDate.getFullYear();
+    const curMonth = mrcCurrentDate.getMonth() + 1; // 1-indexed
+    if (nextBtn) nextBtn.disabled = reviewCalYear >= curYear;
+
+    grid.innerHTML = MRC_MONTH_NAMES.map((name, i) => {
+        const monthNum   = i + 1;
+        const isFuture   = reviewCalYear > curYear || (reviewCalYear === curYear && monthNum > curMonth);
+        const isCurrent  = reviewCalYear === curYear && monthNum === curMonth;
+        const isSelected = reviewSelectedMonth && reviewSelectedMonth.year === reviewCalYear && reviewSelectedMonth.month === monthNum;
+        const cls = [
+            "mrc-month-btn",
+            isFuture   ? "mrc-month-btn--future"   : "",
+            isCurrent  ? "mrc-month-btn--current"  : "",
+            isSelected ? "mrc-month-btn--selected" : "",
+        ].filter(Boolean).join(" ");
+        return `<button type="button" class="${cls}" ${isFuture ? "disabled" : ""}
+            onclick="selectReviewMonth(${reviewCalYear}, ${monthNum})">${name}</button>`;
+    }).join("");
+}
+
+window.changeReviewYear = function(delta) {
+    const curYear = mrcCurrentDate.getFullYear();
+    const next = reviewCalYear + delta;
+    if (next > curYear) return; // never navigate into the future
+    reviewCalYear = next;
+    renderReviewCalendar();
+};
+
+window.selectReviewMonth = async function(year, month, force = false) {
+    reviewSelectedMonth = { year, month };
+    renderReviewCalendar();
     const el = document.getElementById("monthly-review");
-    el.textContent = "Generating…";
-    const data = await (await fetch("/monthly-review")).json();
-    el.innerHTML = data.review.replace(/\n/g, "<br>");
-});
+    el.innerHTML = `<p class="plan-loading">${force ? "Regenerating" : "Loading"} review for ${MRC_MONTH_NAMES[month - 1]} ${year}…</p>`;
+    try {
+        const res  = await fetch(`/monthly-review?year=${year}&month=${month}${force ? "&force=true" : ""}`);
+        const data = await res.json();
+        if (!res.ok) {
+            el.textContent = data.detail || "Could not generate review for that month.";
+            return;
+        }
+        renderMonthlyReviewResult(data);
+    } catch (_) {
+        el.textContent = "Could not generate review. Check your connection and try again.";
+    }
+};
+
+function renderMonthlyReviewResult(data) {
+    const el = document.getElementById("monthly-review");
+    const noteHtml = data.cached
+        ? `<div class="mrc-cached-note">📌 Showing a saved review${data.generated_at ? " · generated " + new Date(data.generated_at).toLocaleDateString() : ""}
+            <button type="button" class="mrc-regen-btn" onclick="selectReviewMonth(${data.year}, ${data.month}, true)">↻ Regenerate</button></div>`
+        : `<div class="mrc-cached-note">✦ Freshly generated
+            <button type="button" class="mrc-regen-btn" onclick="selectReviewMonth(${data.year}, ${data.month}, true)">↻ Regenerate</button></div>`;
+    el.innerHTML = `${noteHtml}<div class="mrc-review-text">${data.review.replace(/\n/g, "<br>")}</div>`;
+}
 
 // ---------------------------------------------------------------------------
 // QUEST BOARD V2 — Auto-generated, chained, sectioned RPG quest log

@@ -3519,20 +3519,81 @@ If level >= 5, acknowledge their progress warmly."""
 # Monthly review
 # ---------------------------------------------------------------------------
 
-def get_current_month_entries():
-    now   = datetime.now(timezone.utc)
-    start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+MONTH_NAMES_FULL = ["January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November", "December"]
+
+def get_month_entries(year: int, month: int):
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    end   = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if month == 12 else datetime(year, month + 1, 1, tzinfo=timezone.utc)
     return (
         supabase.table("journal_entries")
         .select("title, content, mood, energy, focus, created_at")
-        .gte("created_at", start.isoformat()).order("created_at").execute()
+        .gte("created_at", start.isoformat())
+        .lt("created_at", end.isoformat())
+        .order("created_at").execute()
     ).data
 
+def _month_key(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+def _get_cached_monthly_review(mk: str) -> Optional[dict]:
+    """Look up a previously-generated review so we don't hit the LLM every time
+    the same month is opened. Reads from the monthly_reviews table."""
+    try:
+        result = supabase.table("monthly_reviews").select("*").eq("month_key", mk).limit(1).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        logger.exception("Failed to read cached monthly review for %s: %s", mk, e)
+        return None
+
+def _save_monthly_review(mk: str, review_text: str):
+    """Upsert the generated review into monthly_reviews, keyed by month_key."""
+    try:
+        existing = supabase.table("monthly_reviews").select("id").eq("month_key", mk).limit(1).execute()
+        if existing.data:
+            supabase.table("monthly_reviews").update({
+                "review":     review_text,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("month_key", mk).execute()
+        else:
+            supabase.table("monthly_reviews").insert({
+                "month_key":  mk,
+                "review":     review_text,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+    except Exception as e:
+        logger.exception("Failed to cache monthly review for %s: %s", mk, e)
+
 @app.get("/monthly-review")
-def monthly_review():
-    entries = get_current_month_entries()
+def monthly_review(year: Optional[int] = None, month: Optional[int] = None, force: bool = False):
+    now = datetime.now(timezone.utc)
+    y = year or now.year
+    m = month or now.month
+    if m < 1 or m > 12:
+        raise HTTPException(400, "Invalid month")
+    # Don't allow generating a review for a month that hasn't happened yet
+    if (y, m) > (now.year, now.month):
+        raise HTTPException(400, "That month hasn't happened yet.")
+
+    mk = _month_key(y, m)
+    month_label = f"{MONTH_NAMES_FULL[m - 1]} {y}"
+
+    # Serve the saved review instead of re-generating every time, unless the
+    # caller explicitly asks for a fresh one.
+    if not force:
+        cached = _get_cached_monthly_review(mk)
+        if cached:
+            return {
+                "review":       cached["review"],
+                "year":         y,
+                "month":        m,
+                "cached":       True,
+                "generated_at": cached.get("created_at"),
+            }
+
+    entries = get_month_entries(y, m)
     if not entries:
-        return {"review": "Not enough journal entries this month yet."}
+        return {"review": f"No journal entries found for {month_label} yet.", "year": y, "month": m, "cached": False}
     moods    = [e["mood"]   for e in entries]
     energies = [e.get("energy", 3) for e in entries]
     focuses  = [e.get("focus",  3) for e in entries]
@@ -3550,12 +3611,16 @@ def monthly_review():
     stale_cats  = [c["category"] for c in cat_health if c["stale"]]
     achievements = []
     try:
+        ach_start = datetime(y, m, 1, tzinfo=timezone.utc)
+        ach_end   = datetime(y + 1, 1, 1, tzinfo=timezone.utc) if m == 12 else datetime(y, m + 1, 1, tzinfo=timezone.utc)
         achievements = [r["name"] for r in supabase.table("achievements").select("name, earned_at")
-            .gte("earned_at", datetime(datetime.now().year, datetime.now().month, 1, tzinfo=timezone.utc).isoformat())
+            .gte("earned_at", ach_start.isoformat())
+            .lt("earned_at", ach_end.isoformat())
             .execute().data]
     except Exception:
         pass
     context = {
+        "month":         month_label,
         "entry_count":   len(entries),
         "avg_mood":      round(sum(moods)    / len(moods),    1),
         "avg_energy":    round(sum(energies) / len(energies), 1),
@@ -3570,7 +3635,7 @@ def monthly_review():
         "achievements_this_month": achievements,
         "recent_entries": [f"{e['title']}: {e['content'][:150]}" for e in entries[-5:]],
     }
-    prompt = f"""You are LiAInne. Create a monthly review.
+    prompt = f"""You are LiAInne. Create a monthly review for {month_label}.
 
 Context: {context}
 
@@ -3588,7 +3653,9 @@ Give actionable focus areas. Natural language, not statistics lists."""
         messages=[{"role": "system", "content": prompt}],
         temperature=0.7, max_tokens=500,
     )
-    return {"review": response.choices[0].message.content}
+    review_text = response.choices[0].message.content
+    _save_monthly_review(mk, review_text)
+    return {"review": review_text, "year": y, "month": m, "cached": False}
 
 # ---------------------------------------------------------------------------
 # Life Domains — aggregate XP/goals/habits/skills per domain

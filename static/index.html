@@ -432,8 +432,17 @@
         <!-- PAGE: Monthly Review -->
         <section class="page" id="page-review">
             <div class="page-header"><h1>Monthly Review</h1><p class="page-sub">Reflect on the bigger picture</p></div>
-            <button id="generate-review">Generate Review</button>
-            <div id="monthly-review" class="review-body">Click Generate Review to start.</div>
+
+            <div class="mrc-calendar" id="mrc-calendar">
+                <div class="mrc-cal-header">
+                    <button type="button" class="mrc-nav-btn" id="mrc-prev-year" onclick="changeReviewYear(-1)">‹</button>
+                    <span class="mrc-cal-year" id="mrc-cal-year">—</span>
+                    <button type="button" class="mrc-nav-btn" id="mrc-next-year" onclick="changeReviewYear(1)">›</button>
+                </div>
+                <div class="mrc-months-grid" id="mrc-months-grid"></div>
+            </div>
+
+            <div id="monthly-review" class="review-body">Pick a month above to generate its review.</div>
         </section>
 
     </main>
