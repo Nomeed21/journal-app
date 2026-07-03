@@ -15,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from supabase import create_client
+from supabase.lib.client_options import SyncClientOptions
+import httpx
 from groq import Groq
 
 load_dotenv()
@@ -31,7 +33,58 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+
+# ---------------------------------------------------------------------------
+# Supabase client — resilient HTTP transport
+# ---------------------------------------------------------------------------
+# Default supabase-py client reuses HTTP/2 keep-alive connections. Supabase's
+# edge/pooler will silently close idle connections server-side; the next
+# request that tries to reuse one gets httpx.RemoteProtocolError("Server
+# disconnected") and 500s the whole endpoint (this crashed /ai-insight, but
+# any endpoint chaining several supabase calls — /action-engine,
+# /board/quests, /coaching/proactive, /daily-quest, etc. — is equally
+# exposed). Mitigations:
+#   1. http2=False — avoids HTTP/2 stream-reset edge cases behind proxies.
+#   2. keepalive_expiry — client proactively drops idle connections before
+#      the server does, shrinking the window where a dead connection can
+#      get reused. This does NOT eliminate the race, just narrows it.
+# httpcore's own `retries` option only retries failures while *establishing*
+# a new connection — it does not cover a pooled connection that was reused
+# and then found dead mid-response (exactly what this traceback shows, in
+# _receive_response). That case needs an application-level retry — see
+# db_retry() below, used to wrap the request-facing entrypoints.
+_supabase_http_client = httpx.Client(
+    http2=False,
+    timeout=30,
+    limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=15),
+)
+
+supabase = create_client(
+    os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"],
+    options=SyncClientOptions(httpx_client=_supabase_http_client),
+)
+
+def db_retry(fn, *args, retries: int = 2, delay: float = 0.3, **kwargs):
+    """
+    Call fn(*args, **kwargs), retrying on the "reused a connection the
+    server already dropped" failure mode (httpx.RemoteProtocolError, plus
+    the ConnectError/ReadError variants that show up the same way). A fresh
+    connection is opened on the retry, so this resolves the vast majority
+    of these transient 500s. Wrap request-facing entrypoints that chain
+    several supabase calls with this rather than every individual .execute().
+    """
+    import time
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout) as e:
+            last_exc = e
+            logger.warning("db_retry: attempt %d/%d failed for %s: %s", attempt + 1, retries + 1, getattr(fn, "__name__", fn), e)
+            if attempt < retries:
+                time.sleep(delay * (attempt + 1))
+                continue
+    raise last_exc
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 # ---------------------------------------------------------------------------
@@ -1682,11 +1735,11 @@ def create_goal(goal: GoalCreate):
 
 @app.get("/goals")
 def get_goals():
-    return build_goal_summary()
+    return db_retry(build_goal_summary)
 
 @app.get("/goals/summary")
 def goals_summary():
-    return build_goal_summary()
+    return db_retry(build_goal_summary)
 
 def build_category_health(summary: list[dict]) -> list[dict]:
     by_cat: dict[str, dict] = {}
@@ -2821,7 +2874,7 @@ def get_achievements():
 
 @app.get("/analytics/predictive")
 def get_predictive():
-    return predictive_analytics()
+    return db_retry(predictive_analytics)
 
 # ---------------------------------------------------------------------------
 # Proactive AI coaching
@@ -2833,9 +2886,9 @@ def proactive_coaching():
     Detects stagnation, missed goals, streak risks, declining consistency,
     and returns a brief AI-generated proactive nudge + structured alerts.
     """
-    analytics = predictive_analytics()
+    analytics = db_retry(predictive_analytics)
     all_light  = fetch_all_entries_light()
-    goal_data  = build_goal_summary()
+    goal_data  = db_retry(build_goal_summary)
 
     # Only call the LLM if something needs attention
     alerts = []
@@ -2897,7 +2950,7 @@ Do not list all the alerts. Pick the most important one and speak to it."""
 
 @app.post("/daily-quest")
 def daily_quest():
-    summary = build_goal_summary()
+    summary = db_retry(build_goal_summary)
     pending_lines = []
     for g in summary:
         pending = [t["title"] for t in g["tasks"] if not t["is_completed"]]
@@ -3393,7 +3446,7 @@ def chat(msg: ChatMessage):
 
 @app.get("/insights")
 def get_insights():
-    all_light = fetch_all_entries_light()
+    all_light = db_retry(fetch_all_entries_light)
     if len(all_light) < 3:
         return {"insights": [{"type": "info", "title": "Getting Started",
             "message": "Keep journaling. More entries needed before patterns emerge.",
@@ -3509,19 +3562,29 @@ def build_ai_insight_context():
 
 @app.get("/ai-insight")
 def ai_insight():
-    stats = build_ai_insight_context()
+    stats = db_retry(build_ai_insight_context)
     if not stats:
         return {"insight": "Keep journaling. I need a little more data before I can spot meaningful patterns."}
+
+    # streak_at_risk / stagnating already drive the separate Coach Alert
+    # banner (/coaching/proactive) elsewhere on the Journal page. Don't hand
+    # them to this prompt at all — if the model can't see the data, it can't
+    # repeat it, which is more reliable than just asking it not to.
+    stats_for_prompt = {k: v for k, v in stats.items() if k not in ("streak_at_risk", "stagnating")}
+
     prompt = f"""You are LiAInne reviewing a user's journal analytics.
 
-Stats: {stats}
+Stats: {stats_for_prompt}
 
 Write:
 1. One observation (what you notice)
 2. One recommendation (what to do about it)
 
-Rules: Max 80 words. Personal and thoughtful. No statistics listing. No slopes. 
-If there's a risk (streak_at_risk or stagnating=True), address it first.
+Rules: Max 80 words. Personal and thoughtful. No statistics listing. No slopes.
+Do NOT mention habit streaks at risk, stagnation, or "keep momentum" warnings —
+those are already covered by a separate Coach Alert elsewhere on this page,
+and repeating them here is redundant. Draw your observation from mood/energy/
+focus trends, best day, or XP/level progress instead.
 If level >= 5, acknowledge their progress warmly."""
 
     response = groq_client.chat.completions.create(
@@ -4047,10 +4110,10 @@ def get_action_engine():
     Detects stagnation, burnout risk, broken streaks, skill bottlenecks, goal failure.
     Returns problem + evidence + recommended action + suggested quest/habit/node.
     """
-    analytics  = predictive_analytics()
-    all_light  = fetch_all_entries_light()
-    goal_data  = build_goal_summary()
-    streaks    = _compute_streaks_raw()
+    analytics  = db_retry(predictive_analytics)
+    all_light  = db_retry(fetch_all_entries_light)
+    goal_data  = db_retry(build_goal_summary)
+    streaks    = db_retry(_compute_streaks_raw)
     cat_health = build_category_health(goal_data)
 
     problems = []
@@ -4168,7 +4231,7 @@ def get_bottleneck():
     Analyzes mood, energy, focus trends + habits + goals to identify the
     primary bottleneck and generate an AI recovery plan.
     """
-    all_light = fetch_all_entries_light()
+    all_light = db_retry(fetch_all_entries_light)
     if len(all_light) < 3:
         return {
             "bottleneck": None,
@@ -4396,6 +4459,34 @@ def _expire_stale_daily_quests():
     except Exception:
         pass
 
+def _expire_stale_recovery_quests():
+    """
+    Recovery quests are a same-day nudge ("this category's streak is at
+    risk today") — by the next day the underlying at-risk state has already
+    moved on (streak broke, or got saved by some other quest), so a recovery
+    card left over from yesterday is just stale clutter, not still-relevant
+    info. Same treatment as _expire_stale_daily_quests: delete rather than
+    carry forward. _gen_habit_recovery_quests will regenerate a fresh one
+    for today if the category is still actually at risk.
+    """
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        rows = (
+            supabase.table("board_quests")
+            .select("id, created_at")
+            .eq("section", "recovery")
+            .eq("is_completed", False)
+            .execute()
+            .data
+        )
+        for r in rows:
+            created_date = (r.get("created_at") or "")[:10]
+            if created_date and created_date < today:
+                supabase.table("board_quest_tasks").delete().eq("quest_id", r["id"]).execute()
+                supabase.table("board_quests").delete().eq("id", r["id"]).execute()
+    except Exception:
+        pass
+
 def _source_exists(source_type: str, source_id: str) -> bool:
     """Check if a quest from this source already exists (deduplication)."""
     if not source_id:
@@ -4595,37 +4686,61 @@ def _gen_goal_quests() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _gen_habit_recovery_quests() -> list[dict]:
-    """For habits with broken/at-risk streaks, generate recovery quests."""
+    """
+    For habits with broken/at-risk streaks, generate recovery quests.
+
+    Grouped by CATEGORY, not by habit name. _habit_quest_dates() (the thing
+    that decides whether a habit is "done today") matches on category alone
+    — so if three habits share a category (the common case: any habit not
+    linked to a skill node defaults to "Personal Growth"), completing ONE
+    quest in that category already resolves the streak for all three of
+    them. Generating a separate card per habit name in that situation was
+    misleading — three cards that all do the exact same thing when any one
+    of them is completed. One card per at-risk category, listing which
+    habits it covers, matches how the mechanic actually works.
+    """
     today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     generated = []
     try:
         profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+
+        at_risk_by_category: dict[str, list[str]] = defaultdict(list)
         for p in profiles:
-            name  = p["name"]
-            dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+            category = p.get("skill_tree") or p.get("domain") or "Personal Growth"
+            dates    = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
             if yesterday in dates and today not in dates:
-                src_id = f"habit:{name}:{today}"
-                if _source_exists("habit", src_id):
-                    continue
-                row = _insert_board_quest({
-                    "title":        f"Do a '{name}'-category quest today",
-                    "description":  f"'{name}' relies on {p.get('skill_tree') or p.get('domain') or 'this'} quests — its streak is at risk without one today.",
-                    "difficulty":   "Easy",
-                    "section":      "recovery",
-                    "source_type":  "habit",
-                    "source_id":    src_id,
-                    "category":     p.get("skill_tree") or p.get("domain") or "Personal Growth",
-                    "xp_reward":    30,
-                    "is_completed": False,
-                    "due_date":     today,
-                    "created_at":   datetime.now(timezone.utc).isoformat(),
-                })
-                if row:
-                    generated.append(row)
+                at_risk_by_category[category].append(p["name"])
+
+        for category, names in at_risk_by_category.items():
+            src_id = f"habit_category:{category}:{today}"
+            if _source_exists("habit", src_id):
+                continue
+            names_list = ", ".join(f"'{n}'" for n in names)
+            desc = (
+                f"{names_list} {'rely' if len(names) > 1 else 'relies'} on a {category} quest today — "
+                f"{'their streaks are' if len(names) > 1 else 'its streak is'} at risk without one. "
+                f"Completing this (or any {category} quest) covers {'all of them' if len(names) > 1 else 'it'}."
+            )
+            row = _insert_board_quest({
+                "title":        f"Keep your {category} streak alive today",
+                "description":  desc,
+                "difficulty":   "Easy",
+                "section":      "recovery",
+                "source_type":  "habit",
+                "source_id":    src_id,
+                "category":     category,
+                "xp_reward":    30,
+                "is_completed": False,
+                "due_date":     today,
+                "created_at":   datetime.now(timezone.utc).isoformat(),
+            })
+            if row:
+                generated.append(row)
     except Exception as e:
         logger.exception("_gen_habit_recovery_quests failed: %s", e)
     return generated
+
 
 # ---------------------------------------------------------------------------
 # Auto-generation: AI Journal Quests
@@ -4817,6 +4932,10 @@ def _run_board_generation_if_due(force: bool = False):
     except Exception as e:
         logger.exception("_expire_stale_daily_quests failed: %s", e)
     try:
+        _expire_stale_recovery_quests()
+    except Exception as e:
+        logger.exception("_expire_stale_recovery_quests failed: %s", e)
+    try:
         for cat in SKILL_TREES:
             _gen_skill_chain(cat)
     except Exception as e:
@@ -4841,9 +4960,9 @@ def get_board_quests():
     use POST /board/generate/* endpoints (or the "Generate Quests" button,
     which forces a run) if you need it to happen immediately.
     """
-    _run_board_generation_if_due()
+    db_retry(_run_board_generation_if_due)
 
-    all_quests = _get_board_quests()
+    all_quests = db_retry(_get_board_quests)
     enriched   = [_build_quest_card(q) for q in all_quests]
 
     # Separate top-level from children
@@ -5227,7 +5346,262 @@ def generate_boss_board_quest(boss_id: int):
     row = _gen_boss_quest(boss.data[0])
     return {"generated": 1 if row else 0, "quest": row}
 
+
 # ---------------------------------------------------------------------------
 # Serve static files
 # ---------------------------------------------------------------------------
+
+DEMO_TAG = "demo"
+ 
+def _iso_days_ago(n: int, hour: int = 9) -> str:
+    dt = (datetime.now(timezone.utc) - timedelta(days=n)).replace(hour=hour, minute=0, second=0, microsecond=0)
+    return dt.isoformat()
+ 
+def _date_days_ago(n: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=n)).strftime("%Y-%m-%d")
+ 
+ 
+@app.post("/dev/seed-demo-data")
+def seed_demo_data():
+    """
+    Populate the app with ~3 weeks of realistic demo history in one call.
+    Safe to call on a fresh/near-empty instance. Journal entries aren't
+    dedup-tagged (they're meant to read as real history), so re-running will
+    add a second batch of them — everything else (quests, habit, boss,
+    achievements, VP) upserts/dedupes on its demo: source id.
+    """
+    created = defaultdict(int)
+ 
+    # ---- 1. Journal entries: 16 days, mood dips mid-week then recovers ----
+    mood_curve   = [3,3,2,2,3,2,2,3,4,3,4,4,5,4,5,5]
+    energy_curve = [3,3,2,3,3,2,3,3,4,3,4,4,4,4,5,4]
+    focus_curve  = [3,2,2,3,3,3,3,3,4,4,4,3,4,5,4,5]
+    types_cycle  = ["morning", "night", "free"]
+    titles = {
+        "morning": ["Focus on the client demo", "Clear the inbox first", "Get a workout in before work",
+                    "Push through the Python module", "Prep for the review", "Rest and reset",
+                    "One deep work block today"],
+        "night":   ["Rough start, better finish", "Proud of finishing that module", "Low energy day, went easy",
+                    "Good focus session tonight", "Steady day, nothing dramatic", "Great momentum today",
+                    "Wrapped up the boss battle"],
+        "free":    ["Random thoughts", "Grateful for small wins", "Frustrated with the plateau",
+                    "Feeling the streak build", "Excited about the skill unlock"],
+    }
+    for i in range(16):
+        days_ago = 16 - i  # oldest first, ends today
+        etype = types_cycle[i % 3]
+        title = titles[etype][i % len(titles[etype])]
+        content = f"[Demo entry] {title}. Mood {mood_curve[i]}/5 today."
+        combined = f"Title: {title}. Content: {content}. Mood: {mood_curve[i]}/5."
+        row = {
+            "title": title, "content": content,
+            "mood": mood_curve[i], "energy": energy_curve[i], "focus": focus_curve[i],
+            "entry_type": etype,
+            "embedding": generate_embedding(combined),
+            "created_at": _iso_days_ago(days_ago, hour=8 if etype == "morning" else 21),
+            "tags": ["demo"],
+        }
+        try:
+            r = supabase.table("journal_entries").insert(row).execute()
+            if r.data:
+                created["journal_entries"] += 1
+        except Exception as e:
+            logger.exception("seed journal entry failed: %s", e)
+ 
+    # ---- 2. Habit: 12-day streak, evolution pending ----
+    habit_name = "Morning Meditation"
+    demo_stages = [
+        {"stage": 1, "title": "First Sit",       "description": "2 minutes, just breathing.",          "duration_minutes": 2},
+        {"stage": 2, "title": "Settling In",     "description": "5 minutes, guided.",                   "duration_minutes": 5},
+        {"stage": 3, "title": "Steady Practice", "description": "10 minutes, unguided.",                "duration_minutes": 10},
+        {"stage": 4, "title": "Deepening",       "description": "15 minutes + journaling after.",       "duration_minutes": 15},
+        {"stage": 5, "title": "Daily Anchor",    "description": "20 minutes, non-negotiable.",          "duration_minutes": 20},
+    ]
+    try:
+        supabase.table("habit_profiles").delete().eq("name", habit_name).execute()
+        supabase.table("habit_profiles").insert({
+            "name": habit_name,
+            "skill_node_id": "pg_awareness",
+            "skill_tree": "Personal Growth",
+            "domain": "Personal Growth",
+            "evolution_stage": 1,
+            "evolution_stages": demo_stages,
+            "pending_evolution": True,  # crossed the 7-completion threshold — ready to evolve
+            "base_xp": 14,
+        }).execute()
+        created["habit_profiles"] += 1
+    except Exception as e:
+        logger.exception("seed habit profile failed: %s", e)
+ 
+    # 12 consecutive days of a completed "Personal Growth" quest = a 12-day
+    # streak (habit streaks are derived from completed board_quests sharing
+    # the habit's category — see _habit_quest_dates in main.py)
+    for i in range(12):
+        days_ago = 11 - i  # oldest first, ending today
+        date_str = _date_days_ago(days_ago)
+        src_id = f"demo:habit_day:{date_str}"
+        row = {
+            "title": "Sit for meditation",
+            "description": "Demo-seeded daily completion driving the habit streak.",
+            "difficulty": "Easy", "section": "completed",
+            "source_type": "manual", "source_id": src_id,
+            "category": "Personal Growth", "xp_reward": 14,
+            "is_completed": True,
+            "completed_at": date_str + "T08:30:00+00:00",
+            "created_at":   date_str + "T07:00:00+00:00",
+        }
+        try:
+            existing = supabase.table("board_quests").select("id").eq("source_id", src_id).execute()
+            if not existing.data:
+                r = supabase.table("board_quests").insert(row).execute()
+                if r.data:
+                    q = r.data[0]
+                    ledger_add("board_quest", str(q["id"]), "Personal Growth", 14)
+                    vp_add("board_quest", str(q["id"]), 1, note="Demo: meditation streak")
+                    created["board_quests"] += 1
+        except Exception as e:
+            logger.exception("seed habit-day quest failed: %s", e)
+ 
+    # ---- 3. Two skill nodes mid-progress ----
+    def _seed_mid_progress_node(category: str, completed_node: str, in_progress_node: str, done_fraction: float):
+        try:
+            existing = supabase.table("skill_progress").select("node_id").eq("node_id", completed_node).execute()
+            if not existing.data:
+                supabase.table("skill_progress").upsert({
+                    "node_id": completed_node, "category": category,
+                    "completed_at": _iso_days_ago(18),
+                }).execute()
+                node = next(n for n in SKILL_TREES[category]["nodes"] if n["id"] == completed_node)
+                ledger_add("skill_node", completed_node, category, node.get("xp_reward", 100))
+                created["skill_nodes_completed"] += 1
+        except Exception as e:
+            logger.exception("seed completed node failed: %s", e)
+ 
+        node = next(n for n in SKILL_TREES[category]["nodes"] if n["id"] == in_progress_node)
+        goal_title = f"Learn {node['name']} [skill_node:{in_progress_node}]"
+        try:
+            existing_goal = supabase.table("goals").select("id").eq("title", goal_title).execute()
+            if existing_goal.data:
+                return
+            g = supabase.table("goals").insert({
+                "title": goal_title, "category": category,
+                "created_at": _iso_days_ago(10), "is_completed": False,
+            }).execute().data[0]
+            tasks  = node.get("tasks", [])
+            n_done = round(len(tasks) * done_fraction)
+            for idx, t in enumerate(tasks):
+                supabase.table("goal_tasks").insert({
+                    "goal_id": g["id"], "title": t,
+                    "is_completed": idx < n_done,
+                    "created_at": _iso_days_ago(10 - idx),
+                }).execute()
+                if idx < n_done:
+                    ledger_add("task", f"demo:{g['id']}:{idx}", category, XP_PER_TASK)
+            created["skill_goals_in_progress"] += 1
+        except Exception as e:
+            logger.exception("seed in-progress node failed: %s", e)
+ 
+    _seed_mid_progress_node("Study",   "cs_fundamentals", "cs_python",    done_fraction=0.55)
+    _seed_mid_progress_node("Fitness", "fit_consistency", "fit_strength", done_fraction=0.40)
+ 
+    # ---- 4. A defeated weekly boss ----
+    now = datetime.now(timezone.utc)
+    year, week, _ = now.isocalendar()
+    week_key = f"{year}-W{week:02d}"
+    try:
+        existing_boss = supabase.table("weekly_bosses").select("*").eq("week_key", week_key).eq("domain", "Health").execute()
+        if existing_boss.data:
+            boss = existing_boss.data[0]
+        else:
+            boss = supabase.table("weekly_bosses").insert({
+                "week_key": week_key,
+                "name": "The Consistency Gauntlet",
+                "description": "Three strength sessions and a 5K, back to back, no excuses.",
+                "domain": "Health",
+                "requirements": _json.dumps([
+                    {"label": "Complete 3 strength sessions", "target": 3, "type": "count"},
+                    {"label": "Run 5km without stopping",     "target": 1, "type": "count"},
+                ]),
+                "xp_reward": 200,
+                "deadline": (now + timedelta(days=(6 - now.weekday()))).strftime("%Y-%m-%d"),
+            }).execute().data[0]
+            created["weekly_bosses"] += 1
+        already_done = supabase.table("boss_completions").select("id").eq("boss_id", boss["id"]).execute()
+        if not already_done.data:
+            supabase.table("boss_completions").insert({
+                "boss_id": boss["id"], "xp_earned": boss["xp_reward"],
+                "completed_at": _iso_days_ago(2),
+            }).execute()
+            ledger_add("boss", str(boss["id"]), "Fitness", boss["xp_reward"])
+            created["boss_completions"] += 1
+    except Exception as e:
+        logger.exception("seed boss failed: %s", e)
+ 
+    # ---- 5. Achievements ----
+    demo_achievements = [
+        {"name": "First Step",   "xp_bonus": 50},
+        {"name": "Week Warrior", "xp_bonus": 100},
+        {"name": "First Unlock", "xp_bonus": 100},
+    ]
+    for i, ach in enumerate(demo_achievements):
+        try:
+            exists = supabase.table("achievements").select("id").eq("name", ach["name"]).execute()
+            if exists.data:
+                continue
+            supabase.table("achievements").insert({
+                "user_key": "default", "name": ach["name"], "xp_bonus": ach["xp_bonus"],
+                "earned_at": _iso_days_ago(14 - i * 3),
+            }).execute()
+            ledger_add("achievement", f"demo:{ach['name']}", "Personal Growth", ach["xp_bonus"])
+            created["achievements"] += 1
+        except Exception as e:
+            logger.exception("seed achievement failed: %s", e)
+ 
+    # ---- 6. VP balance ----
+    try:
+        existing_vp = supabase.table("vp_ledger").select("id").eq("source_id", "demo:starter_balance").execute()
+        if not existing_vp.data:
+            vp_add("demo", "demo:starter_balance", 850, note="Demo: accumulated from earlier quest completions")
+            created["vp_ledger"] += 1
+    except Exception as e:
+        logger.exception("seed vp balance failed: %s", e)
+ 
+    return {"status": "seeded", "created": dict(created)}
+ 
+ 
+@app.post("/dev/clear-demo-data")
+def clear_demo_data():
+    """
+    Removes everything tagged as demo data. Journal entries aren't
+    source-tagged (they're meant to read as real history) — delete those
+    manually from the Entries page if you want a fully blank slate.
+    """
+    removed = defaultdict(int)
+    try:
+        rows = supabase.table("board_quests").select("id").like("source_id", "demo:%").execute().data
+        for r in rows:
+            supabase.table("board_quest_tasks").delete().eq("quest_id", r["id"]).execute()
+        supabase.table("board_quests").delete().like("source_id", "demo:%").execute()
+        removed["board_quests"] = len(rows)
+    except Exception:
+        pass
+    try:
+        supabase.table("xp_ledger").delete().like("source_id", "demo:%").execute()
+    except Exception:
+        pass
+    try:
+        supabase.table("vp_ledger").delete().eq("source_id", "demo:starter_balance").execute()
+    except Exception:
+        pass
+    try:
+        supabase.table("habit_profiles").delete().eq("name", "Morning Meditation").execute()
+        removed["habit_profiles"] = 1
+    except Exception:
+        pass
+    for name in ["First Step", "Week Warrior", "First Unlock"]:
+        try:
+            supabase.table("achievements").delete().eq("name", name).execute()
+        except Exception:
+            pass
+    return {"status": "cleared", "removed": dict(removed)}
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

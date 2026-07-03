@@ -2430,3 +2430,23 @@ switchEntryTab("morning");
 loadProactiveCoaching();
 
 }); // end DOMContentLoaded
+
+// ---------------------------------------------------------------------------
+// How This Works — dismissible overlay
+// ---------------------------------------------------------------------------
+window.openHowItWorks = function() {
+    const el = document.getElementById("how-it-works-overlay");
+    if (el) el.style.display = "flex";
+};
+window.closeHowItWorks = function() {
+    const el = document.getElementById("how-it-works-overlay");
+    if (el) el.style.display = "none";
+    const dontShow = document.getElementById("hiw-dont-show");
+    if (dontShow && dontShow.checked) {
+        localStorage.setItem("liainne-hiw-dismissed", "1");
+    }
+};
+// Auto-show once for first-time visitors, never forced after that.
+if (!localStorage.getItem("liainne-hiw-dismissed")) {
+    setTimeout(() => window.openHowItWorks(), 600);
+}
