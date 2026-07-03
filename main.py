@@ -882,6 +882,22 @@ def _get_or_create_profile(name: str, skill_node_id: str = "", skill_tree: str =
 
 # ── Recovery Tokens ───────────────────────────────────────────────────────
 
+def _recovery_tokens_from_dates(dates_asc: list[str]) -> int:
+    """
+    How many recovery tokens a habit has earned to date, from its full
+    quest-derived history (ascending dates).
+
+    This was called by _count_tokens but never defined — every call fell
+    through to the bare `except Exception` in _count_tokens, so `earned`
+    silently stayed 0 and no habit could ever accumulate tokens, no matter
+    how consistent it was.
+
+    Design: 1 token per 7 completions. Passive and predictable — consistency
+    itself earns the "insurance" you spend on skip/freeze/boss_reduce/etc,
+    with no separate token-earning event to track.
+    """
+    return len(dates_asc) // 7
+
 def _count_tokens(habit_name: str) -> dict:
     """Count earned vs used tokens for a habit, based on its quest-derived log dates."""
     try:
@@ -4976,6 +4992,114 @@ def unlink_task_habit(task_id: int):
     }).eq("id", task_id).execute()
     return {"status": "unlinked", "task_id": task_id}
 
+def _sync_skill_progress_from_board_quest(q: dict) -> Optional[dict]:
+    """
+    When a board quest that was generated from a skill node (source_type ==
+    "skill", source_id == "skill:{node_id}") is completed, this marks the
+    underlying skill node complete in skill_progress too.
+
+    Without this, completing a "Master: X" quest from the Quest Board (the
+    primary UI) never touched skill_progress, so the Skills page kept
+    showing the node as locked/incomplete forever even though its board
+    quest said "Completed". XP is NOT re-awarded here — the board quest's
+    own XP reward already covers it (they were set equal at generation
+    time in _gen_skill_chain) — this just syncs the completion state.
+    """
+    if q.get("source_type") != "skill":
+        return None
+    source_id = q.get("source_id") or ""
+    if not source_id.startswith("skill:"):
+        return None
+    node_id  = source_id[len("skill:"):]
+    category = q.get("category", "Personal Growth")
+
+    try:
+        already = (
+            supabase.table("skill_progress")
+            .select("node_id").eq("node_id", node_id).eq("category", category).execute()
+        )
+        if already.data:
+            return None  # already completed via the Goals/mastery-check path
+
+        supabase.table("skill_progress").upsert({
+            "node_id":      node_id,
+            "category":     category,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+
+        updated_tree = resolve_tree(category)
+        node = next((n for n in updated_tree["nodes"] if n["id"] == node_id), None)
+        newly_unlocked = [
+            n["name"] for n in updated_tree["nodes"]
+            if n["unlocked"] and not n["completed"] and n["id"] != node_id
+        ] if node else []
+
+        return {
+            "node_id":        node_id,
+            "node_name":      node["name"] if node else node_id,
+            "category":       category,
+            "newly_unlocked": newly_unlocked,
+        }
+    except Exception as e:
+        logger.exception("_sync_skill_progress_from_board_quest failed for %s: %s", source_id, e)
+        return None
+
+def _check_and_apply_synergies() -> list[str]:
+    """
+    Detects same-day synergy combos (per SYNERGY_RULES) among habits whose
+    quest-derived activity includes today, and records any newly-triggered
+    synergy into habit_synergies so it surfaces on the Habits page and in
+    _build_habit_snapshot's active_synergies.
+
+    A rule fires when 2+ of its distinct keywords match the names of
+    habits done today (e.g. a "journal"-named habit AND a "meditation"-named
+    habit both logged today triggers Mental Clarity).
+
+    Idempotent: won't re-insert a synergy that's already active (expires_at
+    still in the future), so this is safe to call on every quest completion.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+    except Exception:
+        return []
+
+    done_today_names = []
+    for p in profiles:
+        dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+        if today in dates:
+            done_today_names.append(p["name"].lower())
+
+    if len(done_today_names) < 2:
+        return []
+
+    triggered = []
+    for rule in SYNERGY_RULES:
+        matched_keywords = {
+            kw for kw in rule["keywords"]
+            if any(kw in name for name in done_today_names)
+        }
+        if len(matched_keywords) < 2:
+            continue
+        try:
+            existing = (
+                supabase.table("habit_synergies")
+                .select("id").eq("name", rule["name"]).gte("expires_at", today).execute()
+            )
+            if existing.data:
+                continue  # this synergy is already active — don't duplicate it
+            expires = (datetime.now(timezone.utc) + timedelta(days=rule["days"])).strftime("%Y-%m-%d")
+            supabase.table("habit_synergies").insert({
+                "name":        rule["name"],
+                "bonus_desc":  rule["bonus"],
+                "expires_at":  expires,
+                "created_at":  datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            triggered.append(rule["name"])
+        except Exception as e:
+            logger.exception("synergy insert failed for %s: %s", rule["key"], e)
+    return triggered
+
 def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
     """
     Centralized board-quest completion: awards XP, unlocks children, checks achievements.
@@ -4999,6 +5123,12 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
 
     ledger_add("board_quest", str(quest_id), cat, xp)
     vp_add("board_quest", str(quest_id), 1, note=f"Quest completed: {q.get('title', '')}")
+
+    # Sync skill_progress BEFORE achievements so skill_node_1 / skill_node_5
+    # achievements can trigger off this same completion.
+    skill_completion     = _sync_skill_progress_from_board_quest(q)
+    synergies_triggered  = _check_and_apply_synergies()
+
     new_achievements = award_achievements()
 
     children_unlocked = 0
@@ -5013,12 +5143,14 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
         pass
 
     return {
-        "status":            "completed",
-        "xp_earned":         xp,
-        "vp_earned":         1,
-        "category":          cat,
-        "new_achievements":  new_achievements,
-        "children_unlocked": children_unlocked,
+        "status":              "completed",
+        "xp_earned":           xp,
+        "vp_earned":           1,
+        "category":            cat,
+        "new_achievements":    new_achievements,
+        "children_unlocked":   children_unlocked,
+        "skill_completion":    skill_completion,
+        "synergies_triggered": synergies_triggered,
     }
 
 def _mark_board_task_completed(task: dict, auto: bool = False) -> dict:

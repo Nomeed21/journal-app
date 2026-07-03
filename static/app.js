@@ -1711,6 +1711,14 @@ window.completeQuestBoard = async function(questId, btn) {
         if (data.new_achievements) showAchievementToast(data.new_achievements);
         if (data.children_unlocked > 0)
             _toast(`🔓 ${data.children_unlocked} new quest${data.children_unlocked > 1 ? 's' : ''} unlocked!`, "#2e7d32", 3500);
+        if (data.skill_completion) {
+            _toast(`🌳 Skill node <strong>${data.skill_completion.node_name}</strong> mastered!`, "#2e7d32", 4000);
+            if (data.skill_completion.newly_unlocked?.length)
+                setTimeout(() => _toast(`🔓 Unlocked: ${data.skill_completion.newly_unlocked.join(", ")}`, "#2e7d32", 4000), 400);
+        }
+        if (data.synergies_triggered?.length)
+            data.synergies_triggered.forEach((s, i) =>
+                setTimeout(() => _toast(`⚗️ Synergy activated: <strong>${s}</strong>`, "#7c3aed", 3500), i * 500));
         loadQuestBoard();
         loadXPHUD();
     } catch (_) {
@@ -1741,6 +1749,15 @@ window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCa
             if (data.quest_completion.vp_earned) _toast(`💰 +${data.quest_completion.vp_earned} VP earned`, "#d6a73a", 2800);
             if (data.quest_completion.new_achievements) showAchievementToast(data.quest_completion.new_achievements);
             _toast("⚔️ Quest auto-completed!", "#2e7d32", 3000);
+            if (data.quest_completion.skill_completion) {
+                const sc = data.quest_completion.skill_completion;
+                setTimeout(() => _toast(`🌳 Skill node <strong>${sc.node_name}</strong> mastered!`, "#2e7d32", 4000), 400);
+                if (sc.newly_unlocked?.length)
+                    setTimeout(() => _toast(`🔓 Unlocked: ${sc.newly_unlocked.join(", ")}`, "#2e7d32", 4000), 900);
+            }
+            if (data.quest_completion.synergies_triggered?.length)
+                data.quest_completion.synergies_triggered.forEach((s, i) =>
+                    setTimeout(() => _toast(`⚗️ Synergy activated: <strong>${s}</strong>`, "#7c3aed", 3500), 1300 + i * 500));
         }
 
         // If all tasks done, suggest completing quest
