@@ -10,7 +10,7 @@ from collections import defaultdict
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
@@ -105,6 +105,38 @@ LOCAL_TZ_OFFSET_HOURS = 8
 def local_hour_now() -> int:
     """Current hour (0-23) in the app's configured local timezone."""
     return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)).hour
+
+def local_date_today() -> str:
+    """
+    Current date (YYYY-MM-DD) in the app's configured local timezone.
+    Use this (not datetime.now(timezone.utc).strftime(...)) for "today"
+    boundaries the user actually experiences as a calendar day — entry
+    duplicate-checks and daily-plan lookups. Journaling at, say, 1am local
+    time is still "today" to the user even though it's already the next day
+    in UTC; the old UTC-only check meant a morning entry written before
+    ~8am local (UTC+8) could get silently bucketed as belonging to the
+    *previous* local day's "already done" check, or vice versa near
+    midnight, producing an incorrect "already exists" and skipping
+    everything downstream of entry creation (XP, quest generation).
+    Streak/quest date-bucketing elsewhere (calc_streak, _habit_quest_dates,
+    predictive_analytics) intentionally stays in UTC — that's a much wider
+    blast radius already keyed off stored UTC dates, and isn't the bug
+    being fixed here.
+    """
+    return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)).strftime("%Y-%m-%d")
+
+def local_day_bounds_utc(days_offset: int = 0) -> tuple[str, str]:
+    """
+    Return (start_utc_iso, end_utc_iso) marking a local calendar day's
+    boundaries, expressed in UTC — for filtering created_at (stored in UTC)
+    by the local day the user actually means. days_offset=0 is today,
+    -1 is yesterday, etc.
+    """
+    local_now      = datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=days_offset)
+    start_utc      = local_midnight - timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
+    end_utc        = start_utc + timedelta(days=1)
+    return start_utc.isoformat(), end_utc.isoformat()
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -245,6 +277,7 @@ def ledger_add(source_type: str, source_id: str, category: str, xp: int):
             },
             on_conflict="source_type,source_id"
         ).execute()
+        _invalidate_total_xp_cache()
     except Exception as e:
         logger.exception("ledger_add failed (%s/%s, %s, %s xp): %s", source_type, source_id, category, xp, e)
 
@@ -270,12 +303,34 @@ def _fallback_category_xp(category: str) -> int:
     tasks = supabase.table("goal_tasks").select("is_completed").in_("goal_id", ids).execute()
     return sum(XP_PER_TASK for t in tasks.data if t["is_completed"])
 
+_TOTAL_XP_CACHE_TTL = 3  # seconds
+_total_xp_cache: dict = {"value": None, "at": None}
+
+def _invalidate_total_xp_cache():
+    _total_xp_cache["value"] = None
+    _total_xp_cache["at"] = None
+
 def get_total_xp() -> int:
+    """
+    Cached for a few seconds — this scans the entire xp_ledger table, and
+    it's called on nearly every page load (HUD, achievements, skills,
+    ai-insight, monthly review...). A single request can easily trigger it
+    3-4 times; the cache turns that into one table scan instead of several.
+    Invalidated immediately by ledger_add so a fresh XP total is never more
+    than one write away, regardless of the TTL.
+    """
+    now = datetime.now(timezone.utc)
+    cached_at = _total_xp_cache["at"]
+    if _total_xp_cache["value"] is not None and cached_at and (now - cached_at).total_seconds() < _TOTAL_XP_CACHE_TTL:
+        return _total_xp_cache["value"]
     try:
         result = supabase.table("xp_ledger").select("xp").execute()
-        return sum(row["xp"] for row in result.data)
+        total = sum(row["xp"] for row in result.data)
     except Exception:
-        return 0
+        total = 0
+    _total_xp_cache["value"] = total
+    _total_xp_cache["at"] = now
+    return total
 
 def xp_to_level(xp: int) -> dict:
     level = xp // XP_PER_LEVEL + 1
@@ -556,7 +611,11 @@ def build_progression_path(category: str) -> dict:
 
 @app.post("/plans")
 def create_plan(plan: PlanCreate):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Local day, to match the same boundary entries now use — otherwise a
+    # plan saved with a morning entry could land on a different "day" than
+    # the entry itself near local midnight, and the night checklist
+    # (/plans/today) would fail to find it.
+    today = local_date_today()
     supabase.table("daily_plans").upsert(
         {
             "plan_date": today,
@@ -569,7 +628,7 @@ def create_plan(plan: PlanCreate):
 
 @app.get("/plans/today")
 def get_today_plan():
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_date_today()
     result = supabase.table("daily_plans").select("*").eq("plan_date", today).execute()
     if not result.data:
         return {"plan": None}
@@ -579,7 +638,7 @@ def get_today_plan():
 
 @app.put("/plans/today/reflect")
 def reflect_on_plan(data: dict):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_date_today()
     tasks = _json.dumps(data.get("tasks", []))
     supabase.table("daily_plans").update(
         {"tasks": tasks, "reflection_note": data.get("reflection_note", "")}
@@ -593,28 +652,68 @@ def reflect_on_plan(data: dict):
 def generate_embedding(text: str) -> list[float]:
     return embedding_model.encode(text).tolist()
 
+def _backfill_entry_embedding(entry_id: int, combined_text: str):
+    """
+    Computes and writes an entry's embedding after the response has already
+    gone out. SentenceTransformer.encode() is CPU-bound model inference and
+    used to run inline on every /entries POST/PUT, meaning save latency
+    included a full embedding computation before the user saw "saved".
+    Semantic search (build_semantic_matches_block) just won't surface a
+    brand-new entry for the brief window before this finishes — a fine
+    trade in a single-user app.
+    """
+    try:
+        embedding = generate_embedding(combined_text)
+        supabase.table("journal_entries").update({"embedding": embedding}).eq("id", entry_id).execute()
+    except Exception as e:
+        logger.exception("embedding backfill failed for entry %s: %s", entry_id, e)
+
+def _insert_entry_fast(data: dict, combined: str):
+    """
+    Inserts a journal entry without waiting on embedding generation.
+    Tries an embedding-less insert first; if the table rejects a null
+    embedding (e.g. a NOT NULL constraint), falls back to the old
+    synchronous embed-then-insert behavior — so this is safe without
+    needing to know the column's nullability up front.
+    Returns (row, used_fast_path).
+    """
+    try:
+        result = supabase.table("journal_entries").insert({**data, "embedding": None}).execute()
+        return result.data[0], True
+    except Exception:
+        result = supabase.table("journal_entries").insert({**data, "embedding": generate_embedding(combined)}).execute()
+        return result.data[0], False
+
 @app.get("/entries/today-status")
 def today_entry_status():
-    """Return which entry types have already been written today."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Return which entry types have already been written today (local day)."""
+    start_utc, end_utc = local_day_bounds_utc()
     result = (
         supabase.table("journal_entries")
         .select("entry_type")
-        .gte("created_at", today + "T00:00:00+00:00")
+        .gte("created_at", start_utc)
+        .lt("created_at", end_utc)
         .execute()
     )
     done = {row["entry_type"] for row in result.data}
     return {"done": list(done), "morning": "morning" in done, "night": "night" in done, "free": "free" in done}
 
 @app.post("/entries")
-def create_entry(entry: EntryCreate):
-    # Enforce one entry per type per day (skip check when editing)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
+    # Enforce one entry per type per local day (skip check when editing).
+    # FIX: this used to bucket on the UTC calendar day, so a morning entry
+    # written before ~8am local time (UTC+8) could be misjudged as
+    # belonging to yesterday's "already exists" check (or the reverse near
+    # midnight) — which either wrongly blocked a legitimate new entry or
+    # wrongly let a duplicate through, and either way could short-circuit
+    # entry creation before quest generation ever ran.
+    start_utc, end_utc = local_day_bounds_utc()
     existing = (
         supabase.table("journal_entries")
         .select("id")
         .eq("entry_type", entry.entry_type)
-        .gte("created_at", today + "T00:00:00+00:00")
+        .gte("created_at", start_utc)
+        .lt("created_at", end_utc)
         .execute()
     )
     if existing.data:
@@ -632,21 +731,22 @@ def create_entry(entry: EntryCreate):
         "mood": entry.mood,
         "energy": entry.energy, "focus": entry.focus,
         "entry_type": entry.entry_type,
-        "embedding": generate_embedding(combined),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tags": entry.tags,
     }
-    result = supabase.table("journal_entries").insert(data).execute()
+    saved_row, used_fast_path = _insert_entry_fast(data, combined)
+    entry_id = saved_row["id"]
+    if used_fast_path:
+        background_tasks.add_task(_backfill_entry_embedding, entry_id, combined)
 
     # Grant XP for journaling (into Personal Growth)
-    entry_id = result.data[0]["id"]
     xp_map = {"morning": 15, "night": 20, "free": 10}
     ledger_add("journal_entry", str(entry_id), "Personal Growth", xp_map.get(entry.entry_type, 10))
 
     # Check achievements after every entry
     new_achievements = award_achievements()
 
-    return {"status": "created", "entry": result.data[0], "new_achievements": new_achievements}
+    return {"status": "created", "entry": saved_row, "new_achievements": new_achievements}
 
 @app.get("/entries")
 def get_entries(tag: Optional[str] = None, keyword: Optional[str] = None,
@@ -709,22 +809,26 @@ def get_entry(entry_id: int):
     return result.data
 
 @app.put("/entries/{entry_id}")
-def update_entry(entry_id: int, entry: EntryCreate):
+def update_entry(entry_id: int, entry: EntryCreate, background_tasks: BackgroundTasks):
     combined = (
         f"Title: {entry.title}. Content: {entry.content}. "
         f"Mood: {entry.mood}/5. Energy: {entry.energy}/5. "
         f"Focus: {entry.focus}/5."
     )
+    # Embedding is refreshed in the background rather than inline — same
+    # reasoning as create_entry: don't make the user wait on model
+    # inference to see "saved". The existing embedding stays in place
+    # (search stays usable) until the new one lands a moment later.
     data = {
         "title": entry.title, "content": entry.content,
         "mood": entry.mood,
         "energy": entry.energy, "focus": entry.focus,
         "entry_type": entry.entry_type, "tags": entry.tags,
-        "embedding": generate_embedding(combined),
     }
     result = supabase.table("journal_entries").update(data).eq("id", entry_id).execute()
     if not result.data:
         raise HTTPException(404, "Entry not found")
+    background_tasks.add_task(_backfill_entry_embedding, entry_id, combined)
     return {"status": "updated", "entry": result.data[0]}
 
 @app.delete("/entries/{entry_id}")
@@ -834,29 +938,69 @@ def _node_name(skill_tree: str, node_id: str) -> str:
             return n["name"]
     return node_id
 
+# ---------------------------------------------------------------------------
+# Habit-quest-date cache
+#
+# _habit_quest_dates() used to run one Supabase query per call. It's called
+# once per habit profile (streaks, life balance, recovery-quest generation,
+# synergies, action-engine triggers, chat context) AND once per skill node
+# (mastery scoring, in resolve_tree — every node in every tree, every time
+# skills are loaded). A page with 6 habits and 30 skill nodes was firing
+# 30+ near-identical queries that differ only in which category they filter
+# on — all pulling from the same underlying table.
+#
+# This fetches the whole (category -> sorted dates) map once and reuses it
+# for a few seconds. Single-user app, so staleness risk is minimal, and it's
+# invalidated immediately on quest completion so "done today" flips right
+# away instead of waiting out the TTL.
+# ---------------------------------------------------------------------------
+_HABIT_DATES_CACHE_TTL = 5  # seconds
+_habit_dates_cache: dict = {"data": None, "at": None}
+
+def _invalidate_habit_dates_cache():
+    _habit_dates_cache["data"] = None
+    _habit_dates_cache["at"] = None
+
+def _all_completed_quest_dates_by_category() -> dict[str, list[str]]:
+    now = datetime.now(timezone.utc)
+    cached_at = _habit_dates_cache["at"]
+    if _habit_dates_cache["data"] is not None and cached_at and (now - cached_at).total_seconds() < _HABIT_DATES_CACHE_TTL:
+        return _habit_dates_cache["data"]
+    try:
+        rows = (
+            supabase.table("board_quests")
+            .select("category, completed_at")
+            .eq("is_completed", True)
+            .execute()
+            .data
+        )
+        by_cat: dict[str, set] = defaultdict(set)
+        for r in rows:
+            if r.get("completed_at"):
+                by_cat[r.get("category") or ""].add(r["completed_at"][:10])
+        result = {cat: sorted(dates, reverse=True) for cat, dates in by_cat.items()}
+    except Exception:
+        result = {}
+    _habit_dates_cache["data"] = result
+    _habit_dates_cache["at"]   = now
+    return result
+
 def _habit_quest_dates(skill_tree: str = "", domain: str = "") -> list[str]:
     """
     Source of truth for "was this habit done today/this day": any completed
     board quest whose category matches the habit's skill tree or domain.
-    Manual habit logging no longer exists — this replaces the old `habits`
-    table lookups everywhere a habit's log dates were needed.
-    Returns dates (YYYY-MM-DD) sorted descending, deduplicated.
+    Backed by the cached batch lookup above instead of a per-call query —
+    see the comment there for why. Returns dates (YYYY-MM-DD) sorted
+    descending, deduplicated.
     """
     cats = {c for c in (skill_tree, domain) if c}
     if not cats:
         return []
-    try:
-        rows = (
-            supabase.table("board_quests")
-            .select("completed_at")
-            .eq("is_completed", True)
-            .in_("category", list(cats))
-            .execute()
-            .data
-        )
-        return sorted({r["completed_at"][:10] for r in rows if r.get("completed_at")}, reverse=True)
-    except Exception:
-        return []
+    by_cat = _all_completed_quest_dates_by_category()
+    combined = set()
+    for c in cats:
+        combined.update(by_cat.get(c, []))
+    return sorted(combined, reverse=True)
 
 def _all_skill_nodes_flat() -> list[dict]:
     """Flat list of {tree, node_id, name, domain} for the habit-creation picker."""
@@ -4419,7 +4563,7 @@ class QuestBoardComplete(BaseModel):
 
 XP_BY_DIFFICULTY = {"Easy": 25, "Normal": 50, "Hard": 100, "Elite": 200, "Boss": 300}
 SECTION_ORDER     = ["recommended", "daily", "weekly", "skill", "recovery", "boss", "completed"]
-DAILY_QUEST_LIMIT = 2  # only 2 "daily" quests may be active at once
+DAILY_QUEST_LIMIT = 5  # only 5 "daily" quests may be active at once
 
 def _daily_quest_count() -> int:
     """Active (incomplete) quests currently sitting in the 'daily' section."""
@@ -4534,13 +4678,31 @@ def _get_board_quests() -> list[dict]:
         return []
 
 def _fetch_board_tasks(quest_id: int) -> list[dict]:
+    """Single-quest task fetch — for call sites that only need one quest."""
     try:
         return supabase.table("board_quest_tasks").select("*").eq("quest_id", quest_id).order("created_at").execute().data
     except Exception:
         return []
 
-def _build_quest_card(q: dict) -> dict:
-    tasks    = _fetch_board_tasks(q["id"])
+def _fetch_all_board_tasks_by_quest() -> dict:
+    """
+    All board_quest_tasks in a single round trip, grouped by quest_id.
+    Rendering the board used to call _fetch_board_tasks() once per quest —
+    N quests meant N+1 Supabase calls just to load task lists. This brings
+    a full board load down to 2 queries total (quests + tasks), regardless
+    of how many quests are on it.
+    """
+    try:
+        rows = supabase.table("board_quest_tasks").select("*").order("created_at").execute().data
+    except Exception:
+        return {}
+    by_quest: dict = defaultdict(list)
+    for t in rows:
+        by_quest[t["quest_id"]].append(t)
+    return by_quest
+
+def _build_quest_card(q: dict, tasks_by_quest: Optional[dict] = None) -> dict:
+    tasks    = tasks_by_quest.get(q["id"], []) if tasks_by_quest is not None else _fetch_board_tasks(q["id"])
     done_cnt = sum(1 for t in tasks if t.get("is_completed"))
     total    = len(tasks)
     progress = round(done_cnt / total * 100) if total else 0
@@ -4821,6 +4983,56 @@ Return [] if no clear quests emerge. No markdown, pure JSON only."""
         logger.exception("_gen_journal_quests failed: %s", e)
         return []
 
+def _extract_journal_quest_candidates(entry_content: str, entry_mood: int) -> list[dict]:
+    """
+    Ask Groq to extract candidate quests from a journal entry. Read-only —
+    unlike _gen_journal_quests, this never touches the DB. Backs the
+    preview/confirm flow: the user sees these candidates (with a plain-
+    language "reason" for each) and picks which ones actually become
+    quests, instead of the AI silently deciding on their behalf and the
+    result showing up as a small toast the user can easily miss.
+    """
+    goal_data  = build_goal_summary()
+    categories = list({g["category"] for g in goal_data}) or list(SKILL_TREES.keys())
+    prompt = f"""You extract actionable quests from a personal journal entry for an RPG growth app.
+
+Journal entry (mood: {entry_mood}/5):
+"{entry_content[:600]}"
+
+Active categories: {', '.join(categories[:8])}
+
+Return 1-3 quests as JSON array. Only include quests if the entry clearly suggests actionable intentions.
+
+[
+  {{
+    "title": "specific action under 10 words",
+    "description": "one sentence",
+    "reason": "one short sentence — what in the entry inspired this",
+    "difficulty": "Easy|Normal|Hard",
+    "category": "one from the categories list",
+    "xp_reward": 25-100,
+    "time_minutes": 10-60,
+    "section": "daily|weekly",
+    "suggested_tasks": ["task1","task2"]
+  }}
+]
+
+Return [] if no clear quests emerge. No markdown, pure JSON only."""
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6, max_tokens=400,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
+        quests_raw = _json.loads(raw.strip())
+        return quests_raw if isinstance(quests_raw, list) else []
+    except Exception as e:
+        logger.exception("_extract_journal_quest_candidates failed: %s", e)
+        return []
+
 # ---------------------------------------------------------------------------
 # Auto-generation: Boss Quests (after boss is created)
 # ---------------------------------------------------------------------------
@@ -4962,8 +5174,9 @@ def get_board_quests():
     """
     db_retry(_run_board_generation_if_due)
 
-    all_quests = db_retry(_get_board_quests)
-    enriched   = [_build_quest_card(q) for q in all_quests]
+    all_quests     = db_retry(_get_board_quests)
+    tasks_by_quest = db_retry(_fetch_all_board_tasks_by_quest)
+    enriched       = [_build_quest_card(q, tasks_by_quest) for q in all_quests]
 
     # Separate top-level from children
     top_level = [q for q in enriched if not q.get("parent_quest_id")]
@@ -5239,6 +5452,7 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "section":      "completed",
     }).eq("id", quest_id).execute()
+    _invalidate_habit_dates_cache()
 
     ledger_add("board_quest", str(quest_id), cat, xp)
     vp_add("board_quest", str(quest_id), 1, note=f"Quest completed: {q.get('title', '')}")
@@ -5326,6 +5540,68 @@ def generate_journal_board_quests(data: dict):
     entry_id = data.get("entry_id", 0)
     generated = _gen_journal_quests(content, mood, entry_id)
     return {"generated": len(generated), "quests": generated}
+
+@app.post("/board/generate/journal/preview")
+def preview_journal_quests(data: dict):
+    """
+    Extracts candidate quests from a journal entry WITHOUT creating them.
+    The frontend shows these to the user (with each candidate's "reason")
+    so they can pick which ones, if any, actually get added to the Quest
+    Board — replacing the old behavior of auto-creating 1-3 quests in the
+    background with no review step.
+    """
+    content = data.get("content", "")
+    mood    = data.get("mood", 3)
+    return {"candidates": _extract_journal_quest_candidates(content, mood)}
+
+@app.post("/board/generate/journal/confirm")
+def confirm_journal_quests(data: dict):
+    """
+    Creates board quests from user-approved candidates (as returned by
+    /board/generate/journal/preview). Each quest is deduped by
+    entry + index + title, so re-confirming the same selection twice
+    (e.g. a double-click) is a safe no-op rather than a duplicate quest.
+    """
+    entry_id = data.get("entry_id", 0)
+    quests   = data.get("quests", []) or []
+    created  = []
+    for i, q in enumerate(quests[:5]):
+        title = (q.get("title") or "").strip()
+        if not title:
+            continue
+        src_id = f"journal_entry:{entry_id}:{i}:{title[:40]}"
+        if _source_exists("journal", src_id):
+            continue
+        section = q.get("section", "daily")
+        if section == "daily" and _daily_quest_count() >= DAILY_QUEST_LIMIT:
+            section = "weekly"
+        tasks = q.get("suggested_tasks", []) or []
+        row = _insert_board_quest({
+            "title":           title,
+            "description":     q.get("description") or q.get("reason", ""),
+            "difficulty":      q.get("difficulty", "Normal"),
+            "section":         section,
+            "source_type":     "journal",
+            "source_id":       src_id,
+            "category":        q.get("category", "Personal Growth"),
+            "xp_reward":       q.get("xp_reward", 50),
+            "is_completed":    False,
+            "suggested_tasks": _json.dumps(tasks),
+            "created_at":      datetime.now(timezone.utc).isoformat(),
+        })
+        if row:
+            for task_title in tasks[:5]:
+                try:
+                    supabase.table("board_quest_tasks").insert({
+                        "quest_id":    row["id"],
+                        "title":       task_title,
+                        "is_completed": False,
+                        "created_at":  datetime.now(timezone.utc).isoformat(),
+                    }).execute()
+                except Exception:
+                    pass
+            created.append(row)
+    return {"created": len(created), "quests": created}
 
 # Trigger full quest generation (skills + habits + goals), bypassing the throttle —
 # this backs the "Generate Quests" button, which is an explicit request to run now.

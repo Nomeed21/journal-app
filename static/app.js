@@ -240,12 +240,19 @@ entryForm.addEventListener("submit", async (e) => {
     let tomorrowPriorityText = "";
 
     if (currentEntryType === "morning") {
-        const tasks = [gv("morning-task-1"), gv("morning-task-2"), gv("morning-task-3")]
-            .map(s => s.trim()).filter(Boolean)
-            .map((title, i) => ({ id: `t${i}`, title, completed: false }));
+        const taskTitles = [gv("morning-task-1"), gv("morning-task-2"), gv("morning-task-3")]
+            .map(s => s.trim()).filter(Boolean);
+        const tasks = taskTitles.map((title, i) => ({ id: `t${i}`, title, completed: false }));
         entryData = {
             title:         gv("morning-main-goal").trim() || "Morning Entry",
+            // FIX: taskTitles used to be missing from `content` entirely, so a
+            // morning entry that only filled in Top 3 Tasks (the most common
+            // case) sent an empty/near-empty `content` to
+            // /board/generate/journal, and the AI extractor correctly returns
+            // [] when there's nothing actionable to read — no quests, no bug
+            // report, just silent no-op. Including the tasks here fixes that.
             content:       [gv("morning-main-goal"),
+                            taskTitles.length ? `Top tasks: ${taskTitles.join(", ")}` : "",
                             gv("morning-obstacles") ? `Obstacles: ${gv("morning-obstacles")}` : "",
                             gv("morning-counterattack") ? `Plan: ${gv("morning-counterattack")}` : ""]
                            .filter(Boolean).join("\n"),
@@ -335,17 +342,11 @@ entryForm.addEventListener("submit", async (e) => {
         if (data.triggered && data.action) showActionBanner(data);
     }).catch(() => {});
 
-    // Auto-generate board quests from this entry (non-blocking)
+    // Suggest board quests from this entry — the user reviews and picks which
+    // ones (if any) actually get added, instead of the AI silently deciding
+    // and the result showing up as an easy-to-miss toast.
     if (!editingId && saved.entry) {
-        const entryId = saved.entry.id;
-        fetch("/board/generate/journal", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: entryData.content, mood: entryData.mood, entry_id: entryId }),
-        }).then(r => r.json()).then(data => {
-            if (data.generated > 0) {
-                _toast(`✦ ${data.generated} quest${data.generated > 1 ? 's' : ''} added to your Quest Board from this entry!`, "var(--accent-deep)", 3500);
-            }
-        }).catch(() => {});
+        handleJournalQuestPreview(saved.entry.id, entryData.content, entryData.mood);
     }
 
     // Night entry: turn tomorrow's stated priority into a quest due tomorrow
@@ -410,9 +411,27 @@ function showActionBanner(data) {
 }
 
 // ---------------------------------------------------------------------------
-// Quest suggestions from journal
+// Quest suggestions from journal — preview then confirm
+// The AI proposes candidate quests from what you just wrote; nothing is
+// created until you pick one (or Add All). Each candidate shows the
+// "reason" — the specific thing in your entry that inspired it — so it's
+// clear why it's being suggested instead of quests just appearing.
 // ---------------------------------------------------------------------------
-function showQuestSuggestions(quests) {
+let journalQuestCandidates = [];
+
+async function handleJournalQuestPreview(entryId, content, mood) {
+    try {
+        const res  = await fetch("/board/generate/journal/preview", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content, mood }),
+        });
+        const data = await res.json();
+        journalQuestCandidates = data.candidates || [];
+        if (journalQuestCandidates.length) showJournalQuestSuggestions(entryId);
+    } catch (_) {}
+}
+
+function showJournalQuestSuggestions(entryId) {
     let panel = document.getElementById("quest-suggestions");
     if (!panel) {
         panel = document.createElement("div");
@@ -423,43 +442,64 @@ function showQuestSuggestions(quests) {
     }
     panel.innerHTML = `
         <div class="qs-header">
-            <span class="qs-label">✦ Quests from your entry</span>
-            <button class="action-banner-close" onclick="this.closest('.quest-suggestions').remove()">✕</button>
+            <span class="qs-label">✦ Quests suggested from your entry</span>
+            <div style="display:flex;gap:.4rem;align-items:center">
+                ${journalQuestCandidates.length > 1 ? `<button class="qs-add-btn" onclick="addAllJournalQuests(${entryId}, this)">+ Add All</button>` : ""}
+                <button class="action-banner-close" onclick="this.closest('.quest-suggestions').remove()">✕</button>
+            </div>
         </div>
-        ${quests.map((q, i) => `
-            <div class="qs-item">
-                <div class="qs-title">${q.title}</div>
-                <div class="qs-meta"><span class="dq-chip">${q.category}</span>
-                    <span class="dq-chip">${q.difficulty}</span>
-                    <span class="dq-chip">⏱ ${q.time_minutes}m</span>
-                    <span style="font-size:.8rem;color:var(--ink-soft)">${q.reason}</span></div>
-                <button class="qs-add-btn" onclick="addQuestFromSuggestion('${q.title.replace(/'/g,"\\'")}', '${q.category}', this)">
-                    + Add Quest</button>
+        ${journalQuestCandidates.map((q, i) => `
+            <div class="qs-item" id="qs-item-${i}">
+                <div class="qs-title">${_escHtml(q.title || "")}</div>
+                <div class="qs-meta">
+                    <span class="dq-chip">${_escHtml(q.category || "General")}</span>
+                    <span class="dq-chip">${_escHtml(q.difficulty || "Normal")}</span>
+                    <span class="dq-chip">⏱ ${q.time_minutes || 20}m</span>
+                    <span class="dq-chip">+${q.xp_reward || 50} XP</span>
+                </div>
+                ${q.reason ? `<div style="font-size:.8rem;color:var(--ink-soft);margin:.35rem 0 .5rem">${_escHtml(q.reason)}</div>` : ""}
+                <button class="qs-add-btn" onclick="addJournalQuest(${i}, ${entryId}, this)">+ Add Quest</button>
             </div>`).join("")}`;
     panel.classList.add("show");
 }
 
-window.addQuestFromSuggestion = async function(title, category, difficulty, btn) {
-    btn.textContent = "Adding...";
+window.addJournalQuest = async function(idx, entryId, btn) {
+    const q = journalQuestCandidates[idx];
+    if (!q) return;
+    btn.textContent = "Adding…";
     btn.disabled    = true;
     try {
-        const goals = await (await fetch("/goals")).json();
-        let goal    = goals.find(g => g.category === category);
-        if (!goal) {
-            const res = await fetch("/goals", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ title: category + " Goals", category }),
-            });
-            goal = (await res.json()).goal;
-        }
-        await fetch("/goals/" + goal.id + "/quests", {
+        const res  = await fetch("/board/generate/journal/confirm", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title, difficulty: difficulty || "Normal", milestone_id: null }),
+            body: JSON.stringify({ entry_id: entryId, quests: [q] }),
         });
-        btn.textContent = "✓ Added";
+        const data = await res.json();
+        if (data.created > 0) {
+            btn.textContent = "✓ Added to Board";
+            _toast(`⚔️ "${q.title}" added to your Quest Board!`, "var(--accent-deep)", 2500);
+        } else {
+            btn.textContent = "Already added";
+        }
     } catch (_) {
-        btn.textContent = "Failed - retry";
+        btn.textContent = "Failed — retry";
         btn.disabled    = false;
+    }
+};
+
+window.addAllJournalQuests = async function(entryId, btn) {
+    if (!journalQuestCandidates.length) return;
+    if (btn) { btn.textContent = "Adding…"; btn.disabled = true; }
+    try {
+        const res  = await fetch("/board/generate/journal/confirm", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ entry_id: entryId, quests: journalQuestCandidates }),
+        });
+        const data = await res.json();
+        _toast(`⚔️ ${data.created} quest${data.created !== 1 ? 's' : ''} added to your Quest Board!`, "var(--accent-deep)", 3000);
+        document.getElementById("quest-suggestions")?.remove();
+    } catch (_) {
+        _toast("Could not add quests. Try adding them individually.", "#ef5350");
+        if (btn) { btn.textContent = "+ Add All"; btn.disabled = false; }
     }
 };
 
