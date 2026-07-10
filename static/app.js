@@ -35,19 +35,61 @@ function showPage(pageId) {
     if (page) page.classList.add("active");
     const nav  = document.querySelector(`.nav-item[data-page="${pageId}"]`);
     if (nav)   nav.classList.add("active");
-    if (pageId === "entries")  loadEntries();
-    if (pageId === "quests")   { loadQuestBoard(); }
-    if (pageId === "skills")   loadSkills();
-    if (pageId === "habits")   loadStreaks();
-    if (pageId === "insights") { loadCharts(); loadInsights(); }
-    if (pageId === "review")   { renderReviewCalendar(); }
-    if (pageId === "journal")  { loadProactiveCoaching(); loadTodayStatus(); }
-    if (pageId === "domains")  loadDomains();
+    loadPageIfStale(pageId);
+    // Chart.js sizes a canvas based on its visible dimensions at creation
+    // time. If the Insights tab's charts were created (or last resized)
+    // while the page was hidden (display:none → 0x0), they render broken
+    // until the window is manually resized. Resizing on every visit is
+    // cheap and guarantees they always fit the now-visible canvas.
+    if (pageId === "insights") {
+        if (trendsChartInstance)      trendsChartInstance.resize();
+        if (correlationChartInstance) correlationChartInstance.resize();
+    }
 }
 
 navItems.forEach(item =>
     item.addEventListener("click", e => { e.preventDefault(); showPage(item.dataset.page); })
 );
+
+// ---------------------------------------------------------------------------
+// Page data preloading
+// Every tab's data used to only load the first time you clicked into it,
+// so each tab switch showed a loading spinner on its first visit. Instead,
+// all tabs are warmed up right after boot (see preloadAllPages below), and
+// a short throttle keeps repeated tab switches from re-fetching data that
+// was just loaded a moment ago.
+// ---------------------------------------------------------------------------
+const PAGE_LOADERS = {
+    journal:  () => { loadProactiveCoaching(); loadTodayStatus(); },
+    entries:  () => loadEntries(),
+    quests:   () => loadQuestBoard(),
+    skills:   () => loadSkills(),
+    habits:   () => loadStreaks(),
+    insights: () => { loadCharts(); loadInsights(); },
+    review:   () => renderReviewCalendar(),
+    domains:  () => loadDomains(),
+};
+const _lastPageLoad = {};
+const PAGE_LOAD_THROTTLE_MS = 4000;
+
+function loadPageIfStale(pageId, force = false) {
+    const fn = PAGE_LOADERS[pageId];
+    if (!fn) return;
+    const now  = Date.now();
+    const last = _lastPageLoad[pageId] || 0;
+    if (!force && now - last < PAGE_LOAD_THROTTLE_MS) return;
+    _lastPageLoad[pageId] = now;
+    fn();
+}
+
+// Warm up every tab's data in the background right after boot. Charts are
+// deliberately excluded here (and loaded normally on first real visit
+// instead) since Chart.js can't size a canvas correctly while its page is
+// still hidden -- everything else is plain HTML and safe to preload.
+function preloadAllPages() {
+    ["entries", "quests", "skills", "habits", "domains", "review"].forEach(p => loadPageIfStale(p, true));
+    loadInsights();
+}
 
 // ---------------------------------------------------------------------------
 // XP / Level HUD (shown in sidebar)
@@ -238,10 +280,12 @@ entryForm.addEventListener("submit", async (e) => {
 
     let entryData;
     let tomorrowPriorityText = "";
+    let morningTaskTitles = [];
 
     if (currentEntryType === "morning") {
         const taskTitles = [gv("morning-task-1"), gv("morning-task-2"), gv("morning-task-3")]
             .map(s => s.trim()).filter(Boolean);
+        morningTaskTitles = taskTitles;
         const tasks = taskTitles.map((title, i) => ({ id: `t${i}`, title, completed: false }));
         entryData = {
             title:         gv("morning-main-goal").trim() || "Morning Entry",
@@ -342,10 +386,14 @@ entryForm.addEventListener("submit", async (e) => {
         if (data.triggered && data.action) showActionBanner(data);
     }).catch(() => {});
 
-    // Suggest board quests from this entry — the user reviews and picks which
-    // ones (if any) actually get added, instead of the AI silently deciding
-    // and the result showing up as an easy-to-miss toast.
-    if (!editingId && saved.entry) {
+    // Morning entry: the Top 3 Tasks are already explicit, named actions --
+    // no need to ask the AI to guess quests from them or make the user
+    // confirm anything. They're turned straight into quests on the board.
+    // Other entry types keep going through the AI preview/confirm flow
+    // below, since their content is free-form and needs interpretation.
+    if (!editingId && saved.entry && currentEntryType === "morning" && morningTaskTitles.length) {
+        autoCreateMorningTaskQuests(saved.entry.id, morningTaskTitles);
+    } else if (!editingId && saved.entry) {
         handleJournalQuestPreview(saved.entry.id, entryData.content, entryData.mood);
     }
 
@@ -418,6 +466,39 @@ function showActionBanner(data) {
 // clear why it's being suggested instead of quests just appearing.
 // ---------------------------------------------------------------------------
 let journalQuestCandidates = [];
+
+// ---------------------------------------------------------------------------
+// Morning "Top 3 Tasks" -> Quests, automatically
+// These are already explicit, user-typed action items, so they skip the
+// AI-extraction/preview step entirely and go straight onto the Quest Board.
+// Reuses the journal-confirm endpoint purely for its dedup-by-source-id
+// behavior (keyed on entry id + task index + title), not for its AI step.
+// ---------------------------------------------------------------------------
+async function autoCreateMorningTaskQuests(entryId, taskTitles) {
+    if (!taskTitles || !taskTitles.length) return;
+    const quests = taskTitles.map(title => ({
+        title,
+        description: "From this morning's Top 3 Tasks.",
+        difficulty: "Normal",
+        category: "Personal Growth",
+        xp_reward: 40,
+        section: "daily",
+        suggested_tasks: [],
+    }));
+    try {
+        const res  = await fetch("/board/generate/journal/confirm", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ entry_id: entryId, quests }),
+        });
+        const data = await res.json();
+        if (data.created > 0) {
+            _toast(`⚔️ ${data.created} task${data.created !== 1 ? 's' : ''} from today's plan added to your Quest Board!`, "var(--accent-deep)", 3200);
+            loadPageIfStale("quests", true);
+        }
+    } catch (_) {
+        _toast("Could not add today's tasks to the Quest Board.", "#ef5350");
+    }
+}
 
 async function handleJournalQuestPreview(entryId, content, mood) {
     try {
@@ -644,9 +725,15 @@ async function loadStreaks() {
     _loadHabitAIInsight();
 }
 
+let skillNodesLoaded = false;
 async function _loadSkillNodes() {
+    // Skill nodes are static (defined server-side in SKILL_TREES) -- once
+    // loaded there's no need to re-fetch them every time the Habits page
+    // is visited or refreshed.
+    if (skillNodesLoaded && allSkillNodes.length) return;
     try {
         allSkillNodes = await (await fetch("/habits/skill-nodes")).json();
+        skillNodesLoaded = true;
     } catch (_) { allSkillNodes = []; }
 }
 
@@ -1199,6 +1286,9 @@ window.deleteHabit = async function(name) {
 };
 
 // ── AI Insights ───────────────────────────────────────────────
+let _lastHabitAIInsightAt = 0;
+const HABIT_AI_INSIGHT_THROTTLE_MS = 60000; // AI calls are slow/costly -- no need to re-ask more than once a minute
+
 async function _loadHabitAIInsight() {
     const el   = document.getElementById("habit-ai-insight");
     const card = document.getElementById("habit-ai-insight-card");
@@ -1208,6 +1298,10 @@ async function _loadHabitAIInsight() {
     const entries = Object.keys(currentHabits);
     if (entries.length < 1) { card.style.display = "none"; return; }
     card.style.display = "";
+
+    const now = Date.now();
+    if (el.textContent && now - _lastHabitAIInsightAt < HABIT_AI_INSIGHT_THROTTLE_MS) return;
+    _lastHabitAIInsightAt = now;
 
     try {
         const data = await (await fetch("/habits/ai-insights")).json();
@@ -1309,13 +1403,25 @@ chatForm.addEventListener("submit", async (e) => {
 // ---------------------------------------------------------------------------
 // Charts
 // ---------------------------------------------------------------------------
+// Chart.js instances are kept here so loadCharts() can destroy the old ones
+// before creating new ones. Without this, every visit to Insights created a
+// brand-new Chart bound to the same <canvas> on top of the previous one --
+// a memory leak that also made the page progressively slower (and could
+// throw "Canvas is already in use" errors) the more times you switched
+// back to the tab.
+let trendsChartInstance      = null;
+let correlationChartInstance = null;
+
 async function loadCharts() {
     const [trendsRes, corrRes] = await Promise.all([
         fetch("/entries/trends?days=30"), fetch("/entries/correlations"),
     ]);
     const trends = await trendsRes.json(), correlations = await corrRes.json();
 
-    new Chart(document.getElementById("trends-chart").getContext("2d"), {
+    if (trendsChartInstance)      trendsChartInstance.destroy();
+    if (correlationChartInstance) correlationChartInstance.destroy();
+
+    trendsChartInstance = new Chart(document.getElementById("trends-chart").getContext("2d"), {
         type: "line",
         data: {
             labels: trends.map(t => t.date),
@@ -1331,7 +1437,7 @@ async function loadCharts() {
         },
     });
 
-    new Chart(document.getElementById("correlation-chart").getContext("2d"), {
+    correlationChartInstance = new Chart(document.getElementById("correlation-chart").getContext("2d"), {
         type: "bar",
         data: {
             labels: correlations.map(c => c.day),
@@ -2468,6 +2574,11 @@ loadXPHUD();
 loadTodayStatus();
 switchEntryTab("morning");
 loadProactiveCoaching();
+
+// Warm up every other tab's data in the background so the first click on
+// any nav item is instant instead of showing a loading spinner. Delayed
+// slightly so it never competes with the initial Journal page render above.
+setTimeout(preloadAllPages, 150);
 
 }); // end DOMContentLoaded
 
