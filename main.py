@@ -190,6 +190,14 @@ class PlanCreate(BaseModel):
     main_goal: str = ""
     tasks: list[dict] = []
 
+class PieSlice(BaseModel):
+    label: str
+    hours: float
+    color: str = ""
+
+class PiePlanSave(BaseModel):
+    slices: list[PieSlice] = []
+
 class MasteryCheckSubmit(BaseModel):
     response: str
 
@@ -644,6 +652,41 @@ def reflect_on_plan(data: dict):
         {"tasks": tasks, "reflection_note": data.get("reflection_note", "")}
     ).eq("plan_date", today).execute()
     return {"status": "updated"}
+
+# ---------------------------------------------------------------------------
+# Daily Pie Chart Planner — a simple "how do I want to spend today" breakdown,
+# shown on the Entries page. One row per local day, keyed the same way as
+# daily_plans (plan_date), so it resets naturally each day without needing
+# its own expiry logic.
+# ---------------------------------------------------------------------------
+
+@app.get("/pie-plan/today")
+def get_pie_plan_today():
+    today = local_date_today()
+    result = supabase.table("daily_pie_plans").select("*").eq("plan_date", today).execute()
+    if not result.data:
+        return {"date": today, "slices": []}
+    row = result.data[0]
+    slices = row["slices"]
+    if isinstance(slices, str):
+        try:
+            slices = _json.loads(slices)
+        except Exception:
+            slices = []
+    return {"date": today, "slices": slices or []}
+
+@app.put("/pie-plan/today")
+def save_pie_plan_today(plan: PiePlanSave):
+    today = local_date_today()
+    supabase.table("daily_pie_plans").upsert(
+        {
+            "plan_date": today,
+            "slices":    _json.dumps([s.dict() for s in plan.slices]),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="plan_date",
+    ).execute()
+    return {"status": "saved"}
 
 # ---------------------------------------------------------------------------
 # Entry CRUD
@@ -4545,6 +4588,7 @@ class QuestBoardCreate(BaseModel):
     goal_id: Optional[int] = None
     milestone_id: Optional[int] = None
     suggested_tasks: list[str] = []
+    is_repeating: bool = False      # daily quest that resets instead of expiring/retiring
 
 class QuestBoardUpdate(BaseModel):
     title: Optional[str] = None
@@ -4553,6 +4597,7 @@ class QuestBoardUpdate(BaseModel):
     section: Optional[str] = None
     xp_reward: Optional[int] = None
     due_date: Optional[str] = None
+    is_repeating: Optional[bool] = None
 
 class QuestBoardComplete(BaseModel):
     quest_id: int
@@ -4584,24 +4629,57 @@ def _expire_stale_daily_quests():
     """
     A 'daily' quest that wasn't completed by the end of the day it was created
     is deleted rather than carried over — it doesn't get a second day.
+    Quests marked is_repeating are exempt: they're meant to persist
+    indefinitely, and _reset_repeating_daily_quests() (not this function)
+    is what brings them back to an uncompleted state each day.
     """
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         rows = (
             supabase.table("board_quests")
-            .select("id, created_at")
+            .select("id, created_at, is_repeating")
             .eq("section", "daily")
             .eq("is_completed", False)
             .execute()
             .data
         )
         for r in rows:
+            if r.get("is_repeating"):
+                continue
             created_date = (r.get("created_at") or "")[:10]
             if created_date and created_date < today:
                 supabase.table("board_quest_tasks").delete().eq("quest_id", r["id"]).execute()
                 supabase.table("board_quests").delete().eq("id", r["id"]).execute()
     except Exception:
         pass
+
+def _reset_repeating_daily_quests():
+    """
+    Repeating daily quests don't expire like normal daily quests — instead,
+    once the local calendar day rolls over past their last_completed_date,
+    they're flipped back to is_completed=False (and their tasks uncompleted)
+    so they're available to do again. Keyed on local day, matching the same
+    "today" boundary used elsewhere (local_date_today) rather than raw UTC.
+    """
+    try:
+        today = local_date_today()
+        rows = (
+            supabase.table("board_quests")
+            .select("id, last_completed_date")
+            .eq("section", "daily")
+            .eq("is_repeating", True)
+            .eq("is_completed", True)
+            .execute()
+            .data
+        )
+        for r in rows:
+            if (r.get("last_completed_date") or "") < today:
+                supabase.table("board_quests").update({"is_completed": False}).eq("id", r["id"]).execute()
+                supabase.table("board_quest_tasks").update(
+                    {"is_completed": False, "auto_completed": False}
+                ).eq("quest_id", r["id"]).execute()
+    except Exception as e:
+        logger.exception("_reset_repeating_daily_quests failed: %s", e)
 
 def _expire_stale_recovery_quests():
     """
@@ -5144,6 +5222,10 @@ def _run_board_generation_if_due(force: bool = False):
     except Exception as e:
         logger.exception("_expire_stale_daily_quests failed: %s", e)
     try:
+        _reset_repeating_daily_quests()
+    except Exception as e:
+        logger.exception("_reset_repeating_daily_quests failed: %s", e)
+    try:
         _expire_stale_recovery_quests()
     except Exception as e:
         logger.exception("_expire_stale_recovery_quests failed: %s", e)
@@ -5191,7 +5273,10 @@ def get_board_quests():
         if q["id"] in rec_ids:
             continue
         sec = q.get("section", "daily")
-        if q.get("is_completed"):
+        # A repeating daily quest completed "today" stays visible in its
+        # normal section (shown as done-for-today) rather than being
+        # permanently retired to Completed like a one-off quest.
+        if q.get("is_completed") and not q.get("is_repeating"):
             sec = "completed"
         if sec in sections:
             sections[sec].append(q)
@@ -5238,6 +5323,7 @@ def create_board_quest(q: QuestBoardCreate):
         "milestone_id":    q.milestone_id,
         "is_completed":    False,
         "due_date":        q.due_date,
+        "is_repeating":    q.is_repeating,
         "suggested_tasks": _json.dumps(q.suggested_tasks),
         "created_at":      datetime.now(timezone.utc).isoformat(),
     })
@@ -5436,26 +5522,49 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
     """
     Centralized board-quest completion: awards XP, unlocks children, checks achievements.
     Reused by the manual /complete endpoint AND by habit-driven auto-completion.
-    Idempotent — returns None if already completed.
+
+    Repeating daily quests (is_repeating=True) are handled differently: instead of
+    moving to "completed" permanently, they stay in "daily" and are just marked done
+    for TODAY (tracked via last_completed_date, local day). _reset_repeating_daily_quests()
+    flips them back to available the next local day. XP is idempotent per calendar day
+    (ledger source id includes the date), so completing the same repeating quest twice
+    in one day is a safe no-op, same as the non-repeating idempotency guarantee.
     """
     quest = supabase.table("board_quests").select("*").eq("id", quest_id).execute()
     if not quest.data:
         return None
     q = quest.data[0]
-    if q.get("is_completed"):
+    today = local_date_today()
+    is_repeating = bool(q.get("is_repeating"))
+
+    if is_repeating:
+        if q.get("is_completed") and (q.get("last_completed_date") or "") == today:
+            return None  # already completed today
+    elif q.get("is_completed"):
         return None
+
     xp  = q.get("xp_reward", 50)
     cat = q.get("category", "Personal Growth")
 
-    supabase.table("board_quests").update({
+    update_data = {
         "is_completed": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "section":      "completed",
-    }).eq("id", quest_id).execute()
+    }
+    if is_repeating:
+        update_data["last_completed_date"] = today
+        # section deliberately NOT changed — stays "daily" so it keeps showing
+        # up there (as "done today") instead of being retired to Completed.
+    else:
+        update_data["section"] = "completed"
+
+    supabase.table("board_quests").update(update_data).eq("id", quest_id).execute()
     _invalidate_habit_dates_cache()
 
-    ledger_add("board_quest", str(quest_id), cat, xp)
-    vp_add("board_quest", str(quest_id), 1, note=f"Quest completed: {q.get('title', '')}")
+    # Repeating quests key their ledger entry by day so XP is granted once per
+    # day rather than once ever (ledger_add's upsert is keyed on source_id).
+    ledger_source_id = f"{quest_id}:{today}" if is_repeating else str(quest_id)
+    ledger_add("board_quest", ledger_source_id, cat, xp)
+    vp_add("board_quest", ledger_source_id, 1, note=f"Quest completed: {q.get('title', '')}")
 
     # Sync skill_progress BEFORE achievements so skill_node_1 / skill_node_5
     # achievements can trigger off this same completion.
@@ -5465,15 +5574,18 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
     new_achievements = award_achievements()
 
     children_unlocked = 0
-    try:
-        children = supabase.table("board_quests").select("id").eq("parent_quest_id", quest_id).execute().data
-        for child in children:
-            supabase.table("board_quests").update(
-                {"unlocked_at": datetime.now(timezone.utc).isoformat()}
-            ).eq("id", child["id"]).execute()
-        children_unlocked = len(children)
-    except Exception:
-        pass
+    if not is_repeating:
+        # Repeating quests are meant to run forever and aren't part of a
+        # progression chain, so there's no "unlock children" step for them.
+        try:
+            children = supabase.table("board_quests").select("id").eq("parent_quest_id", quest_id).execute().data
+            for child in children:
+                supabase.table("board_quests").update(
+                    {"unlocked_at": datetime.now(timezone.utc).isoformat()}
+                ).eq("id", child["id"]).execute()
+            children_unlocked = len(children)
+        except Exception:
+            pass
 
     return {
         "status":              "completed",
@@ -5484,6 +5596,7 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
         "children_unlocked":   children_unlocked,
         "skill_completion":    skill_completion,
         "synergies_triggered": synergies_triggered,
+        "is_repeating":        is_repeating,
     }
 
 def _mark_board_task_completed(task: dict, auto: bool = False) -> dict:

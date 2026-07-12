@@ -61,7 +61,7 @@ navItems.forEach(item =>
 // ---------------------------------------------------------------------------
 const PAGE_LOADERS = {
     journal:  () => { loadProactiveCoaching(); loadTodayStatus(); },
-    entries:  () => loadEntries(),
+    entries:  () => { loadEntries(); loadPiePlan(); },
     quests:   () => loadQuestBoard(),
     skills:   () => loadSkills(),
     habits:   () => loadStreaks(),
@@ -702,6 +702,109 @@ document.getElementById("clear-btn").addEventListener("click", () => {
     document.getElementById("filter-tag").value     = "";
     loadEntries();
 });
+
+// ---------------------------------------------------------------------------
+// Daily Pie Chart Planner (Entries page)
+// A lightweight "how do I want to spend today" breakdown. One row per local
+// day server-side (see /pie-plan/today), so it naturally resets each day
+// without needing its own expiry sweep.
+// ---------------------------------------------------------------------------
+let piePlanSlices        = [];
+let piePlanChartInstance = null;
+
+const PIE_PLAN_COLORS = ["#d98aa0","#82b366","#6c8ebf","#d6a73a","#9c70c4","#e57373","#4db6ac","#f7a94b"];
+
+async function loadPiePlan() {
+    try {
+        const data = await (await fetch("/pie-plan/today")).json();
+        piePlanSlices = data.slices || [];
+    } catch (_) {
+        piePlanSlices = [];
+    }
+    renderPiePlan();
+}
+
+function renderPiePlan() {
+    const totalEl = document.getElementById("pie-planner-total");
+    const listEl  = document.getElementById("pie-planner-list");
+    const emptyEl = document.getElementById("pie-planner-empty");
+    const canvas  = document.getElementById("pie-planner-chart");
+    if (!listEl || !canvas) return;
+
+    const total = piePlanSlices.reduce((sum, s) => sum + (parseFloat(s.hours) || 0), 0);
+    if (totalEl) {
+        const totalLabel = Number.isInteger(total) ? total : Math.round(total * 100) / 100;
+        totalEl.textContent = `${totalLabel}h / 24h`;
+        totalEl.classList.toggle("pie-planner-total--over", total > 24);
+    }
+
+    listEl.innerHTML = piePlanSlices.map((s, i) => `
+        <div class="pie-planner-item">
+            <span class="pie-planner-swatch" style="background:${s.color || PIE_PLAN_COLORS[i % PIE_PLAN_COLORS.length]}"></span>
+            <span class="pie-planner-item-label" title="${_escHtml(s.label)}">${_escHtml(s.label)}</span>
+            <span class="pie-planner-item-hours">${s.hours}h</span>
+            <button type="button" class="pie-planner-del" onclick="removePieSlice(${i})" title="Remove">✕</button>
+        </div>`).join("");
+
+    if (emptyEl) emptyEl.style.display = piePlanSlices.length ? "none" : "flex";
+
+    if (piePlanChartInstance) { piePlanChartInstance.destroy(); piePlanChartInstance = null; }
+    if (!piePlanSlices.length) return;
+
+    piePlanChartInstance = new Chart(canvas.getContext("2d"), {
+        type: "pie",
+        data: {
+            labels: piePlanSlices.map(s => s.label),
+            datasets: [{
+                data: piePlanSlices.map(s => parseFloat(s.hours) || 0),
+                backgroundColor: piePlanSlices.map((s, i) => s.color || PIE_PLAN_COLORS[i % PIE_PLAN_COLORS.length]),
+                borderColor: "var(--paper-soft)",
+                borderWidth: 2,
+            }],
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: { callbacks: { label: (ctx) => ` ${ctx.label}: ${ctx.parsed}h` } },
+            },
+        },
+    });
+}
+
+async function savePiePlan() {
+    try {
+        await fetch("/pie-plan/today", {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ slices: piePlanSlices }),
+        });
+    } catch (_) {}
+}
+
+window.removePieSlice = function(idx) {
+    piePlanSlices.splice(idx, 1);
+    renderPiePlan();
+    savePiePlan();
+};
+
+const piePlannerForm = document.getElementById("pie-planner-form");
+if (piePlannerForm) {
+    piePlannerForm.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const labelEl = document.getElementById("pp-label");
+        const hoursEl = document.getElementById("pp-hours");
+        const colorEl = document.getElementById("pp-color");
+        const label = labelEl.value.trim();
+        const hours = parseFloat(hoursEl.value);
+        if (!label || !hours || hours <= 0) return;
+        piePlanSlices.push({ label, hours, color: colorEl.value });
+        labelEl.value = "";
+        hoursEl.value = "";
+        renderPiePlan();
+        savePiePlan();
+        labelEl.focus();
+    });
+}
 
 
 // ============================================================
@@ -1811,14 +1914,14 @@ function buildQuestCard(q, sectionKey) {
     // Footer actions
     const footHtml = isCompleted
         ? `<div class="qb-card-foot">
-               <div class="qb-completed-badge">✅ Completed +${xp} XP</div>
+               <div class="qb-completed-badge">✅ ${q.is_repeating ? `Done today +${xp} XP — resets tomorrow` : `Completed +${xp} XP`}</div>
                <button class="qb-del-btn" onclick="deleteQuestBoard(${q.id}, event)">🗑</button>
            </div>`
         : `<div class="qb-card-foot">
                <button class="qb-complete-btn" onclick="completeQuestBoard(${q.id}, this)">
                    ⚔️ Complete +${xp} XP
                </button>
-               <button class="qb-edit-btn" onclick="openQuestEditModal(${q.id}, '${_escAttr(q.title)}', '${_escAttr(q.description||'')}', '${diff}', '${q.section||sectionKey}', ${xp})">✏️</button>
+               <button class="qb-edit-btn" onclick="openQuestEditModal(${q.id}, '${_escAttr(q.title)}', '${_escAttr(q.description||'')}', '${diff}', '${q.section||sectionKey}', ${xp}, ${!!q.is_repeating})">✏️</button>
                <button class="qb-del-btn" onclick="deleteQuestBoard(${q.id}, event)">🗑</button>
            </div>`;
 
@@ -1836,6 +1939,7 @@ function buildQuestCard(q, sectionKey) {
             <span class="qb-chip qb-chip--xp">+${xp} XP</span>
             ${dueChip}
             <span class="qb-chip qb-chip--source">${SOURCE_ICONS[sourceType] || "◎"} ${sourceType}</span>
+            ${q.is_repeating ? '<span class="qb-chip qb-chip--repeat">🔁 Repeats Daily</span>' : ''}
             ${isCompleted ? '<span class="qb-chip qb-chip--done">✓ Done</span>' : ''}
         </div>
         ${progHtml}
@@ -1954,6 +2058,7 @@ window.createManualQuest = async function() {
     const due      = document.getElementById("qbc-due")?.value            || null;
     const tasksRaw = document.getElementById("qbc-tasks")?.value.trim()   || "";
     const tasks    = tasksRaw ? tasksRaw.split("\n").map(t => t.trim()).filter(Boolean) : [];
+    const repeat   = document.getElementById("qbc-repeat")?.checked        || false;
     const xpMap    = { Easy: 25, Normal: 50, Hard: 100, Elite: 200 };
 
     const res = await fetch("/board/quests", {
@@ -1962,6 +2067,7 @@ window.createManualQuest = async function() {
             title, description: desc, section, difficulty: diff,
             category, xp_reward: xpMap[diff] || 50,
             due_date: due || null, suggested_tasks: tasks, source_type: "manual",
+            is_repeating: repeat,
         }),
     });
     if (!res.ok) {
@@ -1974,19 +2080,23 @@ window.createManualQuest = async function() {
         const el = document.getElementById(id);
         if (el) el.value = "";
     });
+    const repeatEl = document.getElementById("qbc-repeat");
+    if (repeatEl) repeatEl.checked = false;
     document.getElementById("qb-create-panel").style.display = "none";
     loadQuestBoard();
     _toast("✦ Quest created!", "var(--accent-deep)", 2000);
 };
 
 // ── Edit modal ────────────────────────────────────────────────
-window.openQuestEditModal = function(id, title, desc, diff, section, xp) {
+window.openQuestEditModal = function(id, title, desc, diff, section, xp, isRepeating) {
     document.getElementById("qem-id").value            = id;
     document.getElementById("qem-title-input").value   = title;
     document.getElementById("qem-desc").value          = desc;
     document.getElementById("qem-diff").value          = diff;
     document.getElementById("qem-section").value       = section;
     document.getElementById("qem-xp").value            = xp;
+    const repeatEl = document.getElementById("qem-repeat");
+    if (repeatEl) repeatEl.checked = !!isRepeating;
     document.getElementById("quest-edit-modal").style.display = "flex";
 };
 
@@ -1994,11 +2104,12 @@ window.saveQuestEdit = async function() {
     const id = document.getElementById("qem-id").value;
     if (!id) return;
     const update = {
-        title:      document.getElementById("qem-title-input").value.trim(),
-        description:document.getElementById("qem-desc").value.trim(),
-        difficulty: document.getElementById("qem-diff").value,
-        section:    document.getElementById("qem-section").value,
-        xp_reward:  parseInt(document.getElementById("qem-xp").value) || 50,
+        title:       document.getElementById("qem-title-input").value.trim(),
+        description: document.getElementById("qem-desc").value.trim(),
+        difficulty:  document.getElementById("qem-diff").value,
+        section:     document.getElementById("qem-section").value,
+        xp_reward:   parseInt(document.getElementById("qem-xp").value) || 50,
+        is_repeating: document.getElementById("qem-repeat")?.checked || false,
     };
     await fetch(`/board/quests/${id}`, {
         method: "PUT", headers: { "Content-Type": "application/json" },
@@ -2581,6 +2692,37 @@ loadProactiveCoaching();
 setTimeout(preloadAllPages, 150);
 
 }); // end DOMContentLoaded
+
+// ---------------------------------------------------------------------------
+// Chat popup toggle — the chat panel is a floating popup (Messenger-bubble
+// pattern) rather than an always-visible sidebar. Defined at top level
+// (outside DOMContentLoaded), same as openHowItWorks/closeHowItWorks below,
+// since it's invoked directly from inline onclick="" attributes in the HTML
+// and must be available on `window` as soon as the script loads.
+// ---------------------------------------------------------------------------
+window.toggleChatPanel = function(force) {
+    const panel = document.getElementById("chat-panel");
+    const fab   = document.getElementById("chat-fab");
+    const icon  = document.getElementById("chat-fab-icon");
+    if (!panel) return;
+    const shouldOpen = typeof force === "boolean" ? force : !panel.classList.contains("chat-panel--open");
+    panel.classList.toggle("chat-panel--open", shouldOpen);
+    if (fab)  fab.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    if (icon) icon.textContent = shouldOpen ? "✕" : "💬";
+    if (shouldOpen) {
+        setTimeout(() => document.getElementById("chat-input")?.focus(), 150);
+    }
+};
+
+// Close the popup when clicking outside it (but not the FAB itself, which
+// has its own toggle handler and would otherwise immediately re-open it).
+document.addEventListener("click", (e) => {
+    const panel = document.getElementById("chat-panel");
+    const fab   = document.getElementById("chat-fab");
+    if (!panel || !panel.classList.contains("chat-panel--open")) return;
+    if (panel.contains(e.target) || (fab && fab.contains(e.target))) return;
+    window.toggleChatPanel(false);
+});
 
 // ---------------------------------------------------------------------------
 // How This Works — dismissible overlay

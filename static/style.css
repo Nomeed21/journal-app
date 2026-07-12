@@ -1111,23 +1111,90 @@ body {
     margin-top: 0.2rem;
 }
 
-/* ── Chat panel ───────────────────────────── */
+/* ── Chat panel — floating popup (toggled via FAB) ───── */
 .chat-panel {
-    width: 280px;
+    position: fixed;
+    right: 1.5rem;
+    bottom: 5.75rem;
+    width: 320px;
+    height: min(520px, 70vh);
     flex-shrink: 0;
     background: var(--paper);
-    border-left: 1px solid var(--line-strong);
+    border: 1px solid var(--line-strong);
+    border-radius: 18px;
+    box-shadow: 0 16px 44px rgba(0,0,0,.2);
     display: flex;
     flex-direction: column;
+    z-index: 1200;
+    opacity: 0;
+    transform: translateY(14px) scale(.97);
+    pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease;
+    overflow: hidden;
+}
+
+.chat-panel.chat-panel--open {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
 }
 
 .chat-panel-header {
-    padding: 1.25rem 1.25rem 1rem;
+    padding: 1rem 1rem 0.85rem 1.25rem;
     border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .5rem;
+}
+
+.chat-panel-header-text {
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
 }
+
+.chat-panel-close {
+    background: none;
+    border: 1px solid var(--line-strong);
+    color: var(--ink-soft);
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: .78rem;
+    padding: 0;
+    cursor: pointer;
+    box-shadow: none;
+    flex-shrink: 0;
+    transition: background .15s, color .15s, transform .1s;
+}
+.chat-panel-close:hover { background: var(--accent-soft); color: var(--accent-deep); transform: none; box-shadow: none; }
+
+/* ── Floating chat toggle button ──────────────────────── */
+.chat-fab {
+    position: fixed;
+    right: 1.5rem;
+    bottom: 1.5rem;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 1.35rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 8px 22px var(--shadow);
+    z-index: 1201;
+    transition: background .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+.chat-fab:hover { background: var(--accent-deep); transform: translateY(-2px) scale(1.05); box-shadow: 0 10px 26px var(--shadow); }
+.chat-fab:active { transform: translateY(0) scale(.97); }
 
 .chat-panel-title {
     font-family: var(--font-display);
@@ -1704,7 +1771,14 @@ body {
     .nav-label, .brand-name, .sidebar-version { display: none; }
     .sidebar-brand { padding: 0 0 1rem; justify-content: center; }
     .nav-item { justify-content: center; padding: 0.6rem; }
-    .chat-panel { display: none; }
+    .chat-panel {
+        right: .75rem;
+        left: .75rem;
+        width: auto;
+        bottom: 5rem;
+        height: min(60vh, 460px);
+    }
+    .chat-fab { right: 1rem; bottom: 1rem; }
     .main-content { padding: 1.25rem; }
     .charts-grid { grid-template-columns: 1fr; }
     .two-col { grid-template-columns: 1fr; }
@@ -4701,6 +4775,31 @@ body {
 .qb-chip--done        { background: #e8f5e9; color: #2e7d32; border-color: #a5d6a7; }
 .qb-chip--due-urgent  { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
 .qb-chip--due         { background: var(--paper-soft); color: var(--ink-faint); border-color: var(--line); }
+.qb-chip--repeat      { background: #ede7f6; color: #4527a0; border-color: #c4b5fd; }
+
+.qbc-repeat-label {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .85rem;
+    font-weight: 500;
+    color: var(--ink-soft);
+    text-transform: none;
+    letter-spacing: normal;
+    cursor: pointer;
+}
+.qbc-repeat-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    margin: 0;
+    flex-shrink: 0;
+    border: none;
+    background: none;
+    box-shadow: none;
+    padding: 0;
+}
 
 /* ── Progress Bar ─────────────────────────────────────────── */
 .qb-card-progress {
@@ -5023,9 +5122,189 @@ body {
     .qb-complete-btn { min-width: 100%; }
     .qbc-row { grid-template-columns: 1fr 1fr; }
 }
-/* ============================================
-   Theme Toggle
-   ============================================ */
+/* ============================================================
+   Daily Pie Chart Planner (Entries page)
+   ============================================================ */
+
+.pie-planner-card {
+    background: var(--paper-soft);
+    border: 1.5px solid var(--line-strong);
+    border-radius: 16px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.pie-planner-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+}
+
+.pie-planner-label {
+    font-size: .75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--accent-deep);
+}
+
+.pie-planner-total {
+    font-size: .78rem;
+    font-weight: 700;
+    color: var(--ink-soft);
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: .2rem .7rem;
+}
+
+.pie-planner-total--over {
+    color: #c62828;
+    background: #ffebee;
+    border-color: #ef9a9a;
+}
+
+.pie-planner-body {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 1.5rem;
+    align-items: start;
+}
+
+.pie-planner-chart-wrap {
+    position: relative;
+    width: 220px;
+    height: 220px;
+    flex-shrink: 0;
+}
+
+.pie-planner-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 1.5rem;
+    font-size: .82rem;
+    color: var(--ink-faint);
+    font-style: italic;
+    line-height: 1.5;
+}
+
+.pie-planner-list-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+    min-width: 0;
+}
+
+.pie-planner-list {
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+    max-height: 168px;
+    overflow-y: auto;
+}
+
+.pie-planner-item {
+    display: flex;
+    align-items: center;
+    gap: .55rem;
+    padding: .4rem .6rem;
+    border-radius: 8px;
+    background: var(--paper);
+    border: 1px solid var(--line);
+    font-size: .88rem;
+}
+
+.pie-planner-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.pie-planner-item-label {
+    flex: 1;
+    color: var(--ink);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pie-planner-item-hours {
+    font-weight: 700;
+    color: var(--accent-deep);
+    font-size: .8rem;
+    flex-shrink: 0;
+}
+
+.pie-planner-del {
+    background: none;
+    border: none;
+    color: var(--ink-faint);
+    font-size: .78rem;
+    padding: .1rem .3rem;
+    cursor: pointer;
+    box-shadow: none;
+    flex-shrink: 0;
+    transition: color .12s;
+}
+.pie-planner-del:hover { color: #c62828; background: none; transform: none; box-shadow: none; }
+
+.pie-planner-add-row {
+    display: flex;
+    gap: .4rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.pie-planner-add-row input[type="text"] {
+    flex: 2;
+    min-width: 120px;
+    margin: 0;
+    font-size: .88rem;
+    padding: .5rem .75rem;
+}
+
+.pie-planner-add-row input[type="number"] {
+    width: 70px;
+    flex-shrink: 0;
+    margin: 0;
+    background: var(--paper-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: .5rem .6rem;
+    font-family: var(--font-body);
+    font-size: .88rem;
+    color: var(--ink);
+    outline: none;
+}
+
+.pie-planner-add-row input[type="color"] {
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+    padding: 2px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    background: var(--paper);
+    cursor: pointer;
+}
+
+.pie-planner-add-row button {
+    padding: .5rem 1rem;
+    font-size: .85rem;
+    flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+    .pie-planner-body { grid-template-columns: 1fr; }
+    .pie-planner-chart-wrap { width: 100%; max-width: 220px; margin: 0 auto; }
+}
 
 .theme-toggle {
     display: flex;

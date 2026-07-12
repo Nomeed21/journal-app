@@ -116,7 +116,29 @@
 
             <!-- Proactive coaching alert (hidden until needed) -->
             <div id="proactive-coaching" class="proactive-coaching" style="display:none"></div>
-
+            <!-- Daily Pie Chart Planner -->
+            <div class="pie-planner-card" id="pie-planner-card">
+                <div class="pie-planner-header">
+                    <span class="pie-planner-label">📊 Today's Plan</span>
+                    <span class="pie-planner-total" id="pie-planner-total">0h / 24h</span>
+                </div>
+                <div class="pie-planner-body">
+                    <div class="pie-planner-chart-wrap">
+                        <canvas id="pie-planner-chart"></canvas>
+                        <div class="pie-planner-empty" id="pie-planner-empty">Add a block below to plan your day.</div>
+                    </div>
+                    <div class="pie-planner-list-wrap">
+                        <div class="pie-planner-list" id="pie-planner-list"></div>
+                        <form id="pie-planner-form" class="pie-planner-add-row">
+                            <input type="text" id="pp-label" placeholder="Block (e.g. Deep Work)" maxlength="40" required>
+                            <input type="number" id="pp-hours" placeholder="Hrs" min="0.25" max="24" step="0.25" required>
+                            <input type="color" id="pp-color" value="#d98aa0" title="Slice color">
+                            <button type="submit">+ Add</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            
             <div class="entry-tabs">
                 <button class="entry-tab active" data-type="morning">🌅 Morning</button>
                 <button class="entry-tab"         data-type="night">🌙 Night</button>
@@ -232,6 +254,7 @@
         <!-- PAGE: Entries -->
         <section class="page" id="page-entries">
             <div class="page-header"><h1>Entries</h1><p class="page-sub">Your past reflections</p></div>
+
             <div class="filters">
                 <input type="text" id="filter-keyword" placeholder="Search by keyword...">
                 <input type="text" id="filter-tag"     placeholder="Filter by tag...">
@@ -311,6 +334,12 @@
                         <label class="qbc-label">Suggested Tasks (one per line)</label>
                         <textarea id="qbc-tasks" placeholder="Task 1&#10;Task 2&#10;Task 3" rows="3" class="qbc-textarea"></textarea>
                     </div>
+                    <div class="qbc-field" style="margin-top:.25rem">
+                        <label class="qbc-repeat-label">
+                            <input type="checkbox" id="qbc-repeat">
+                            🔁 Repeat daily — resets automatically instead of expiring
+                        </label>
+                    </div>
                     <div class="qbc-actions">
                         <button onclick="createManualQuest()" class="qbc-submit">Create Quest</button>
                         <button onclick="toggleQuestCreatePanel()" class="btn-ghost btn-sm">Cancel</button>
@@ -366,6 +395,12 @@
                             <label class="qbc-label">XP Reward</label>
                             <input type="number" id="qem-xp" class="qbc-select" min="10" max="500">
                         </div>
+                    </div>
+                    <div class="qbc-field" style="margin-bottom:1rem">
+                        <label class="qbc-repeat-label">
+                            <input type="checkbox" id="qem-repeat">
+                            🔁 Repeat daily — resets automatically instead of expiring
+                        </label>
                     </div>
                     <div style="display:flex;gap:.6rem;justify-content:flex-end">
                         <button class="btn-ghost" onclick="document.getElementById('quest-edit-modal').style.display='none'">Cancel</button>
@@ -450,11 +485,14 @@
 
     </main>
 
-    <!-- ── Chat sidebar ────────────────────────── -->
-    <aside class="chat-panel">
+    <!-- ── Chat popup (toggled via floating button) ────── -->
+    <aside class="chat-panel" id="chat-panel">
         <div class="chat-panel-header">
-            <span class="chat-panel-title">✦ LiAInne</span>
-            <span class="chat-panel-sub">Your AI coach</span>
+            <div class="chat-panel-header-text">
+                <span class="chat-panel-title">✦ LiAInne</span>
+                <span class="chat-panel-sub">Your AI coach</span>
+            </div>
+            <button type="button" class="chat-panel-close" onclick="toggleChatPanel(false)" title="Close">✕</button>
         </div>
         <div id="chat-messages" class="chat-messages"></div>
         <form id="chat-form" class="chat-input-row">
@@ -462,6 +500,11 @@
             <button type="submit">↑</button>
         </form>
     </aside>
+
+    <!-- Floating chat toggle button -->
+    <button type="button" id="chat-fab" class="chat-fab" onclick="toggleChatPanel()" title="Chat with LiAInne" aria-expanded="false">
+        <span id="chat-fab-icon">💬</span>
+    </button>
     <!-- How This Works overlay -->
     <div id="how-it-works-overlay" class="hiw-overlay" style="display:none" onclick="if(event.target===this)closeHowItWorks()">
         <div class="hiw-box">
