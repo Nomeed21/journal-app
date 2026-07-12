@@ -1,0 +1,484 @@
+-- Run in Supabase SQL editor before deploying the updated main.py
+-- (in addition to migration_habit_quest_mastery.sql from the previous change)
+
+CREATE TABLE IF NOT EXISTS vp_ledger (
+    id           bigserial PRIMARY KEY,
+    source_type  text NOT NULL,
+    source_id    text NOT NULL,
+    amount       integer NOT NULL,
+    note         text,
+    created_at   timestamptz DEFAULT now(),
+    UNIQUE (source_type, source_id)
+);
+
+CREATE TABLE IF NOT EXISTS vp_rewards (
+    id           bigserial PRIMARY KEY,
+    title        text NOT NULL,
+    cost         integer NOT NULL DEFAULT 1000,
+    created_at   timestamptz DEFAULT now()
+);
+
+
+
+
+-- Run in Supabase SQL editor before deploying the updated main.py
+
+ALTER TABLE board_quest_tasks
+  ADD COLUMN IF NOT EXISTS linked_habit_name text,
+  ADD COLUMN IF NOT EXISTS required_logs integer DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS current_logs integer DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS auto_completed boolean DEFAULT false;
+
+
+  -- ============================================================
+-- Quest Board V2 — Database Migration
+-- Run this in your Supabase SQL Editor
+-- ============================================================
+
+-- Main quest board table
+CREATE TABLE IF NOT EXISTS public.board_quests (
+    id                BIGSERIAL PRIMARY KEY,
+    title             TEXT NOT NULL,
+    description       TEXT DEFAULT '',
+    difficulty        TEXT DEFAULT 'Normal',
+    section           TEXT DEFAULT 'daily',      -- recommended | daily | weekly | skill | recovery | boss | completed
+    source_type       TEXT DEFAULT 'manual',     -- manual | skill | goal | milestone | habit | journal | boss
+    source_id         TEXT DEFAULT '',           -- dedup key (e.g. "skill:cs_python", "habit:Running:2024-01-15")
+    category          TEXT DEFAULT 'Personal Growth',
+    xp_reward         INTEGER DEFAULT 50,
+    is_completed      BOOLEAN DEFAULT FALSE,
+    completed_at      TIMESTAMPTZ,
+    due_date          DATE,
+    parent_quest_id   BIGINT REFERENCES public.board_quests(id) ON DELETE SET NULL,
+    goal_id           BIGINT REFERENCES public.goals(id) ON DELETE SET NULL,
+    milestone_id      BIGINT REFERENCES public.goal_milestones(id) ON DELETE SET NULL,
+    suggested_tasks   TEXT DEFAULT '[]',         -- JSON array of task title strings
+    unlocked_at       TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Tasks belonging to board quests
+CREATE TABLE IF NOT EXISTS public.board_quest_tasks (
+    id            BIGSERIAL PRIMARY KEY,
+    quest_id      BIGINT NOT NULL REFERENCES public.board_quests(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL,
+    is_completed  BOOLEAN DEFAULT FALSE,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_board_quests_section
+    ON public.board_quests(section);
+
+CREATE INDEX IF NOT EXISTS idx_board_quests_source
+    ON public.board_quests(source_type, source_id);
+
+CREATE INDEX IF NOT EXISTS idx_board_quests_completed
+    ON public.board_quests(is_completed);
+
+CREATE INDEX IF NOT EXISTS idx_board_quests_parent
+    ON public.board_quests(parent_quest_id);
+
+CREATE INDEX IF NOT EXISTS idx_board_quest_tasks_quest
+    ON public.board_quest_tasks(quest_id);
+
+-- Unique constraint to prevent duplicate quests from the same source
+-- (source_id is '' for manual quests so we only enforce when it's non-empty)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_board_quests_source_dedup
+    ON public.board_quests(source_type, source_id)
+    WHERE source_id != '';
+
+-- Enable Row Level Security (optional — remove if you don't use RLS)
+-- ALTER TABLE public.board_quests ENABLE ROW LEVEL SECURITY;
+-- ALTER TABLE public.board_quest_tasks ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
+-- LiAInne Habits V2 Migration
+-- Habits become the core gameplay loop
+-- Run in Supabase SQL editor
+-- ============================================================
+
+-- 1. Habit Profiles — identity layer (separate from completion log)
+CREATE TABLE IF NOT EXISTS habit_profiles (
+    id                  BIGSERIAL PRIMARY KEY,
+    name                TEXT NOT NULL UNIQUE,
+    skill_node_id       TEXT NOT NULL DEFAULT '',   -- e.g. 'cs_python', 'fit_strength'
+    skill_tree          TEXT NOT NULL DEFAULT '',   -- e.g. 'Study', 'Fitness'
+    domain              TEXT NOT NULL DEFAULT '',   -- e.g. 'Computer Science', 'Health'
+    evolution_stage     INT  NOT NULL DEFAULT 1,
+    evolution_stages    JSONB NOT NULL DEFAULT '[]', -- AI-generated stage ladder
+    pending_evolution   BOOL NOT NULL DEFAULT FALSE,
+    base_xp             INT  NOT NULL DEFAULT 10,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. Habit Recovery Tokens V2 — typed tokens
+CREATE TABLE IF NOT EXISTS habit_recovery_tokens_v2 (
+    id              BIGSERIAL PRIMARY KEY,
+    habit_name      TEXT NOT NULL,
+    token_type      TEXT NOT NULL DEFAULT 'restore',
+    -- restore | skip | freeze | reroll | bonus_xp | boss_reduce | quest_recover
+    meta            JSONB DEFAULT '{}',
+    used_at         TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. Habit Synergy Log — track active/earned synergies
+CREATE TABLE IF NOT EXISTS habit_synergies (
+    id              BIGSERIAL PRIMARY KEY,
+    synergy_key     TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    bonus_desc      TEXT NOT NULL,
+    habits_involved TEXT[] NOT NULL,
+    earned_at       DATE NOT NULL DEFAULT CURRENT_DATE,
+    expires_at      DATE NOT NULL
+);
+
+-- 4. Add columns to habits log for richer per-completion data
+ALTER TABLE habits ADD COLUMN IF NOT EXISTS xp_earned     INT  DEFAULT 10;
+ALTER TABLE habits ADD COLUMN IF NOT EXISTS xp_modifiers  JSONB DEFAULT '[]';
+ALTER TABLE habits ADD COLUMN IF NOT EXISTS is_recovered  BOOL DEFAULT FALSE;
+
+-- 5. RLS for new tables
+ALTER TABLE habit_profiles         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE habit_recovery_tokens_v2 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE habit_synergies        ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='habit_profiles' AND policyname='srvc_habit_profiles') THEN
+        EXECUTE 'CREATE POLICY srvc_habit_profiles ON habit_profiles FOR ALL TO service_role USING (true) WITH CHECK (true)';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='habit_recovery_tokens_v2' AND policyname='srvc_hrt_v2') THEN
+        EXECUTE 'CREATE POLICY srvc_hrt_v2 ON habit_recovery_tokens_v2 FOR ALL TO service_role USING (true) WITH CHECK (true)';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename='habit_synergies' AND policyname='srvc_habit_syn') THEN
+        EXECUTE 'CREATE POLICY srvc_habit_syn ON habit_synergies FOR ALL TO service_role USING (true) WITH CHECK (true)';
+    END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_habit_profiles_name      ON habit_profiles(name);
+CREATE INDEX IF NOT EXISTS idx_habit_synergies_date     ON habit_synergies(earned_at);
+CREATE INDEX IF NOT EXISTS idx_hrt_v2_habit             ON habit_recovery_tokens_v2(habit_name);
+
+
+-- ============================================================
+-- LiAInne Goals V2 Migration
+-- Goal → Milestone → Quest → Task (4-tier hierarchy)
+-- Run this in Supabase SQL editor
+-- ============================================================
+
+-- 1. Create the quests table
+CREATE TABLE IF NOT EXISTS quests (
+    id              BIGSERIAL PRIMARY KEY,
+    goal_id         BIGINT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    milestone_id    BIGINT REFERENCES goal_milestones(id) ON DELETE SET NULL,
+    title           TEXT NOT NULL,
+    description     TEXT DEFAULT '',
+    difficulty      TEXT DEFAULT 'Normal',
+    is_completed    BOOL DEFAULT FALSE,
+    tags            JSONB DEFAULT '[]',
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. Add quest_id to goal_tasks
+ALTER TABLE goal_tasks
+    ADD COLUMN IF NOT EXISTS quest_id BIGINT REFERENCES quests(id) ON DELETE CASCADE;
+
+-- 3. Indexes
+CREATE INDEX IF NOT EXISTS idx_quests_goal_id      ON quests(goal_id);
+CREATE INDEX IF NOT EXISTS idx_quests_milestone_id ON quests(milestone_id);
+CREATE INDEX IF NOT EXISTS idx_goal_tasks_quest_id ON goal_tasks(quest_id);
+
+-- 4. RLS
+ALTER TABLE quests ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE tablename = 'quests' AND policyname = 'service_role_all_quests'
+    ) THEN
+        EXECUTE 'CREATE POLICY service_role_all_quests ON quests FOR ALL TO service_role USING (true) WITH CHECK (true)';
+    END IF;
+END
+$$;
+
+
+-- ============================================================
+-- LiAInne v2 Migration — Domains, Boss Battles
+-- Run in Supabase SQL Editor
+-- ============================================================
+
+-- Weekly Boss Battles
+CREATE TABLE IF NOT EXISTS weekly_bosses (
+    id           SERIAL PRIMARY KEY,
+    week_key     TEXT NOT NULL UNIQUE,   -- e.g. "2026-W26"
+    name         TEXT NOT NULL,
+    description  TEXT,
+    domain       TEXT NOT NULL,
+    requirements JSONB DEFAULT '[]',     -- [{label, target, type}]
+    xp_reward    INT  DEFAULT 200,
+    deadline     DATE NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Boss completions
+CREATE TABLE IF NOT EXISTS boss_completions (
+    id         SERIAL PRIMARY KEY,
+    boss_id    INT REFERENCES weekly_bosses(id) ON DELETE CASCADE,
+    completed_at TIMESTAMPTZ DEFAULT NOW(),
+    xp_earned  INT DEFAULT 0
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_weekly_bosses_week ON weekly_bosses(week_key);
+CREATE INDEX IF NOT EXISTS idx_boss_completions_boss ON boss_completions(boss_id);
+
+-- XP Ledger
+CREATE TABLE IF NOT EXISTS xp_ledger (
+    id bigint generated always as identity primary key,
+    source_type text not null,
+    source_id text not null,
+    category text not null,
+    xp integer not null,
+    earned_at timestamptz default now(),
+    unique(source_type, source_id)
+);
+
+-- Achievements
+CREATE TABLE IF NOT EXISTS achievements (
+    id bigint generated always as identity primary key,
+    user_key text default 'default',
+    name text not null,
+    xp_bonus integer default 0,
+    earned_at timestamptz default now()
+);
+
+-- Skill Progress
+CREATE TABLE IF NOT EXISTS skill_progress (
+    id bigint generated always as identity primary key,
+    node_id text not null,
+    category text not null,
+    completed_at timestamptz default now(),
+    unique(node_id)
+);
+
+-- Skill Mastery Checks
+CREATE TABLE IF NOT EXISTS skill_mastery_checks (
+    id bigint generated always as identity primary key,
+    node_id text not null,
+    category text not null,
+    check_type text,
+    prompt text,
+    response text,
+    passed boolean default false,
+    score integer default 0,
+    created_at timestamptz default now()
+);
+
+-- Goals
+CREATE TABLE IF NOT EXISTS goals (
+    id bigint generated always as identity primary key,
+    title text not null,
+    category text not null,
+    is_completed boolean default false,
+    tags text[] default '{}',
+    created_at timestamptz default now()
+);
+
+-- Goal Tasks
+CREATE TABLE IF NOT EXISTS goal_tasks (
+    id bigint generated always as identity primary key,
+    goal_id bigint references goals(id) on delete cascade,
+    title text not null,
+    is_completed boolean default false,
+    created_at timestamptz default now()
+);
+
+-- Goal Milestones
+CREATE TABLE IF NOT EXISTS goal_milestones (
+    id bigint generated always as identity primary key,
+    goal_id bigint references goals(id) on delete cascade,
+    title text not null,
+    target_date text,
+    is_completed boolean default false,
+    created_at timestamptz default now()
+);
+
+-- Goal Dependencies
+CREATE TABLE IF NOT EXISTS goal_dependencies (
+    id bigint generated always as identity primary key,
+    goal_id bigint references goals(id) on delete cascade,
+    depends_on_goal_id bigint references goals(id) on delete cascade
+);
+
+-- Journal Entries
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id bigint generated always as identity primary key,
+    title text not null,
+    content text default '',
+    mood integer default 3,
+    goal_progress integer default 0,
+    energy integer default 3,
+    focus integer default 3,
+    entry_type text default 'free',
+    tags text[] default '{}',
+    embedding vector(384),
+    created_at timestamptz default now()
+);
+
+-- Habits
+CREATE TABLE IF NOT EXISTS habits (
+    id bigint generated always as identity primary key,
+    name text not null,
+    completed_at text not null,
+    created_at timestamptz default now()
+);
+
+-- Reload schema cache
+NOTIFY pgrst, 'reload schema';
+
+
+-- Create daily_plans table if it doesn't exist
+CREATE TABLE IF NOT EXISTS daily_plans (
+    id bigint generated always as identity primary key,
+    date text unique not null,
+    main_goal text default '',
+    tasks text default '[]',
+    reflection_note text default '',
+    created_at timestamptz default now()
+);
+
+
+create table if not exists daily_plans (
+  id             bigserial primary key,
+  plan_date      date unique not null,
+  main_goal      text,
+  tasks          jsonb default '[]',
+  reflection_note text,
+  reflection_at  timestamptz,
+  created_at     timestamptz default now()
+);
+
+
+-- Run in Supabase SQL editor
+
+alter table journal_entries
+    add column if not exists entry_type text not null default 'free',
+    add column if not exists energy     int  not null default 3,
+    add column if not exists focus      int  not null default 3;
+
+-- Optional: constrain valid types
+alter table journal_entries
+    add constraint entry_type_check
+    check (entry_type in ('morning', 'night', 'free'));
+
+
+
+
+    -- Run this in the Supabase SQL editor
+
+create table if not exists skill_progress (
+    id          bigint generated always as identity primary key,
+    node_id     text        not null,
+    category    text        not null,
+    completed_at timestamptz not null default now(),
+    unique (node_id, category)   -- one row per node, prevent duplicates
+);
+
+-- Index for the lookup pattern used by get_completed_node_ids()
+create index if not exists skill_progress_category_idx
+    on skill_progress (category);
+
+
+
+    create table goal_tasks (
+    id bigint generated always as identity primary key,
+    goal_id bigint references goals(id) on delete cascade,
+    title text not null,
+    is_completed boolean default false,
+    created_at timestamptz default now()
+);
+
+
+
+create table goals (
+    id bigint generated always as identity primary key,
+    title text not null,
+    category text not null,
+    is_completed boolean default false,
+    created_at timestamptz default now()
+);
+
+
+
+create table monthly_reviews (
+    id bigint generated always as identity primary key,
+    month_key text not null unique,
+    review text not null,
+    created_at timestamptz default now()
+);
+
+
+alter table journal_entries
+add column tags text[] default '{}';
+
+
+
+create table habits (
+  id bigint primary key generated always as identity,
+  name text not null,
+  completed_at date not null,
+  created_at timestamptz default now()
+);
+
+
+
+create or replace function match_entries(
+  query_embedding extensions.vector(384),
+  match_threshold float,
+  match_count int
+)
+returns table (
+  id bigint,
+  title text,
+  content text,
+  mood int,
+  goal_progress int,
+  created_at timestamptz,
+  similarity float
+)
+language plpgsql
+as $$
+begin
+  return query
+  select
+    journal_entries.id,
+    journal_entries.title,
+    journal_entries.content,
+    journal_entries.mood,
+    journal_entries.goal_progress,
+    journal_entries.created_at,
+    1 - (journal_entries.embedding <=> query_embedding) as similarity
+  from journal_entries
+  where 1 - (journal_entries.embedding <=> query_embedding) > match_threshold
+  order by journal_entries.embedding <=> query_embedding
+  limit match_count;
+end;
+$$;
+
+
+
+create table journal_entries (
+  id bigint generated always as identity primary key,
+  title text,
+  content text,
+  mood int,
+  goal_progress int,
+  embedding extensions.vector(384),
+  created_at timestamptz default now()
+);
+
+
