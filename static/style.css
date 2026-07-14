@@ -1049,17 +1049,6 @@ body {
     transition: background 0.15s, color 0.15s;
 }
 
-.nav-item.nav-item--locked { display: none; }
-
-.nav-item.nav-item--fresh-unlock {
-    animation: navUnlockPop .5s ease;
-}
-@keyframes navUnlockPop {
-    0%   { transform: scale(.85); opacity: 0; }
-    60%  { transform: scale(1.08); opacity: 1; }
-    100% { transform: scale(1); }
-}
-
 .nav-item:hover {
     background: var(--accent-soft);
     color: var(--accent-deep);
@@ -1072,6 +1061,17 @@ body {
 
 .nav-icon { font-size: 1rem; }
 .nav-label { font-size: 0.88rem; }
+
+.nav-item.nav-item--locked { display: none; }
+
+.nav-item.nav-item--fresh-unlock {
+    animation: navUnlockPop .5s ease;
+}
+@keyframes navUnlockPop {
+    0%   { transform: scale(.85); opacity: 0; }
+    60%  { transform: scale(1.08); opacity: 1; }
+    100% { transform: scale(1); }
+}
 
 .sidebar-footer {
     padding: 1rem 1.25rem 0;
@@ -2091,6 +2091,55 @@ body {
 .proactive-alerts { display: flex; flex-wrap: wrap; gap: .35rem; }
 .proactive-chip { font-size: .72rem; background: #fff8e1; color: #e65100; border: 1px solid #ffe082; border-radius: 999px; padding: .2rem .6rem; font-weight: 600; }
 
+/* ============================================================
+   First-run onboarding — single sequential next-step card
+   ============================================================ */
+.onboarding-card {
+    background: linear-gradient(135deg, var(--accent-soft) 0%, #fce4ec 100%);
+    border: 1.5px solid var(--line-strong);
+    border-left: 4px solid var(--accent);
+    border-radius: 16px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.onb-step {
+    font-size: .7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    color: var(--accent-deep);
+    margin-bottom: .4rem;
+}
+
+.onb-title {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: .4rem;
+}
+
+.onb-body {
+    font-size: .88rem;
+    color: var(--ink-soft);
+    line-height: 1.6;
+    margin-bottom: .9rem;
+}
+
+.onb-cta {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: .6rem 1.25rem;
+    font-size: .88rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 8px var(--shadow);
+    transition: background .15s, transform .15s;
+}
+.onb-cta:hover { background: var(--accent-deep); transform: translateY(-1px); }
 
 /* ============================================
    Achievement toast + XP flash

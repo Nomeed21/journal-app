@@ -44,7 +44,7 @@ const UNLOCK_RULES = {
     review:   (p) => p.entries >= 7,
 };
 
-let progressState = { entries: 0, questsCompleted: 0, habits: 0 };
+let progressState = { entries: 0, questsCompleted: 0, questsPending: 0, habits: 0 };
 
 function _getUnlockedSet() {
     try { return new Set(JSON.parse(localStorage.getItem("liainne-unlocked-tabs") || "[]")); }
@@ -76,6 +76,69 @@ function updateNavUnlocks() {
     });
 
     _saveUnlockedSet(nowUnlocked);
+    renderOnboardingCard();
+}
+
+// ---------------------------------------------------------------------------
+// First-run onboarding — one focused step at a time instead of the full
+// dashboard (Boss Battles, VP Shop, Domains...) all showing up empty on
+// day one. Each step's completion is what reveals the next system.
+// ---------------------------------------------------------------------------
+function _onboardingComplete() {
+    return localStorage.getItem("liainne-onboarding-complete") === "1";
+}
+
+function renderOnboardingCard() {
+    const hasEntry          = progressState.entries >= 1;
+    const hasCompletedQuest = progressState.questsCompleted >= 1;
+
+    if (hasEntry && hasCompletedQuest) {
+        const wasIncomplete = !_onboardingComplete();
+        localStorage.setItem("liainne-onboarding-complete", "1");
+        document.getElementById("onboarding-card")?.remove();
+        // Now that they have real data, the concept overview is actually
+        // useful — show it once, the moment onboarding finishes.
+        if (wasIncomplete && !localStorage.getItem("liainne-hiw-dismissed")) {
+            setTimeout(() => window.openHowItWorks(), 500);
+        }
+        return;
+    }
+
+    let el = document.getElementById("onboarding-card");
+    if (!el) {
+        el = document.createElement("div");
+        el.id = "onboarding-card";
+        el.className = "onboarding-card";
+        const header = document.querySelector("#page-journal .page-header");
+        if (!header) return;
+        header.parentNode.insertBefore(el, header.nextSibling);
+    }
+
+    if (!hasEntry) {
+        el.innerHTML = `
+            <div class="onb-step">Step 1 of 2</div>
+            <div class="onb-title">Write your first journal entry</div>
+            <div class="onb-body">LiAInne turns what you write into quests, habits, and skill
+                progress automatically. Start with today's Morning entry below — your main goal
+                and top 3 tasks is enough.</div>
+            <button class="onb-cta" onclick="document.getElementById('entry-form').scrollIntoView({behavior:'smooth'})">Start writing ↓</button>`;
+        return;
+    }
+
+    const noQuestsYet = progressState.questsPending === 0 && progressState.questsCompleted === 0;
+    el.innerHTML = noQuestsYet
+        ? `
+            <div class="onb-step">Step 2 of 2</div>
+            <div class="onb-title">Generate your first quest</div>
+            <div class="onb-body">Your Quest Board turns Skills, Goals, Habits, and journal entries
+                into concrete quests. Generate your first batch to get moving.</div>
+            <button class="onb-cta" onclick="showPage('quests'); setTimeout(triggerQuestGeneration, 300)">Generate quests →</button>`
+        : `
+            <div class="onb-step">Step 2 of 2</div>
+            <div class="onb-title">Complete your first quest</div>
+            <div class="onb-body">Nice — you've got quests waiting on your board. Complete one to
+                unlock XP, Habits, Skill Trees, and Domains.</div>
+            <button class="onb-cta" onclick="showPage('quests')">Go to Quest Board →</button>`;
 }
 
 function showPage(pageId) {
@@ -682,11 +745,13 @@ async function loadEntries(filters = {}) {
     if (filters.tag)     params.append("tag",     filters.tag);
     if (filters.keyword) params.append("keyword", filters.keyword);
     const entries = await (await fetch(`/entries?${params}`)).json();
-    if (!filters.tag && !filters.keyword) {          // don't let a filtered/empty
-    progressState.entries = entries.length;       // view re-lock Insights/Review
-    updateNavUnlocks();
-}
-entriesDiv.innerHTML = entries.map(e => {
+    if (!filters.tag && !filters.keyword) {
+        // Only count the unfiltered/full list — a filtered or search view
+        // shouldn't be able to re-lock tabs that were already unlocked.
+        progressState.entries = entries.length;
+        updateNavUnlocks();
+    }
+    entriesDiv.innerHTML = entries.map(e => {
         const type  = e.entry_type || "free";
         const badge = TYPE_BADGE[type] || type;
         return `<div class="entry-card">
@@ -1832,7 +1897,9 @@ async function loadQuestBoard() {
         if (pendEl) pendEl.textContent = data.pending ?? "—";
         if (totEl)  totEl.textContent  = data.total   ?? "—";
         progressState.questsCompleted = Math.max(0, (data.total ?? 0) - (data.pending ?? 0));
+        progressState.questsPending   = data.pending ?? 0;
         updateNavUnlocks();
+
         const sections = data.sections || {};
         const order    = ["recommended", "daily", "weekly", "skill", "recovery", "boss", "completed"];
         let html       = "";
@@ -2737,6 +2804,8 @@ window.redeemReward = async function(id, btn) {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+updateNavUnlocks();      // hide not-yet-relevant tabs immediately
+renderOnboardingCard();  // show step 1 immediately for brand-new users
 loadAIInsight();
 loadXPHUD();
 loadTodayStatus();
@@ -2796,8 +2865,11 @@ window.closeHowItWorks = function() {
         localStorage.setItem("liainne-hiw-dismissed", "1");
     }
 };
-// Auto-show once for first-time visitors, never forced after that.
-if (!localStorage.getItem("liainne-hiw-dismissed")) {
-    setTimeout(preloadAllPages, 150);
+// Auto-show once for first-time visitors, never forced after that — but
+// only once onboarding (first entry + first completed quest) is done. For
+// a brand-new user, the onboarding card's single next-step CTA replaces
+// this; for a returning/seeded user, progressState resolves true on the
+// first load and this fires immediately, same as before.
+if (_onboardingComplete() && !localStorage.getItem("liainne-hiw-dismissed")) {
     setTimeout(() => window.openHowItWorks(), 600);
 }
