@@ -1049,6 +1049,17 @@ body {
     transition: background 0.15s, color 0.15s;
 }
 
+.nav-item.nav-item--locked { display: none; }
+
+.nav-item.nav-item--fresh-unlock {
+    animation: navUnlockPop .5s ease;
+}
+@keyframes navUnlockPop {
+    0%   { transform: scale(.85); opacity: 0; }
+    60%  { transform: scale(1.08); opacity: 1; }
+    100% { transform: scale(1); }
+}
+
 .nav-item:hover {
     background: var(--accent-soft);
     color: var(--accent-deep);
@@ -2079,6 +2090,7 @@ body {
 .proactive-nudge { font-size: .93rem; color: var(--ink); margin-bottom: .6rem; line-height: 1.6; }
 .proactive-alerts { display: flex; flex-wrap: wrap; gap: .35rem; }
 .proactive-chip { font-size: .72rem; background: #fff8e1; color: #e65100; border: 1px solid #ffe082; border-radius: 999px; padding: .2rem .6rem; font-weight: 600; }
+
 
 /* ============================================
    Achievement toast + XP flash

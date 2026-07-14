@@ -28,6 +28,56 @@ applyTheme(localStorage.getItem("liainne-theme") || "ballerina");
 const pages    = document.querySelectorAll(".page");
 const navItems = document.querySelectorAll(".nav-item");
 
+// ---------------------------------------------------------------------------
+// Progressive nav unlocking — new users see only Journal + Quests until
+// they've done enough for the other tabs to be meaningful, instead of 8
+// nav items (Domains, Insights, Review...) all showing empty states at once.
+// ---------------------------------------------------------------------------
+const ALWAYS_UNLOCKED = ["journal", "quests"];
+
+const UNLOCK_RULES = {
+    entries:  (p) => p.entries >= 1,
+    skills:   (p) => p.questsCompleted >= 1,
+    habits:   (p) => p.questsCompleted >= 1,
+    domains:  (p) => p.questsCompleted >= 1 || p.habits >= 1,
+    insights: (p) => p.entries >= 3,
+    review:   (p) => p.entries >= 7,
+};
+
+let progressState = { entries: 0, questsCompleted: 0, habits: 0 };
+
+function _getUnlockedSet() {
+    try { return new Set(JSON.parse(localStorage.getItem("liainne-unlocked-tabs") || "[]")); }
+    catch (_) { return new Set(); }
+}
+function _saveUnlockedSet(set) {
+    localStorage.setItem("liainne-unlocked-tabs", JSON.stringify([...set]));
+}
+
+function updateNavUnlocks() {
+    const previously = _getUnlockedSet();
+    const nowUnlocked = new Set(previously);
+
+    navItems.forEach(item => {
+        const page = item.dataset.page;
+        const rule = UNLOCK_RULES[page];
+        const unlocked = ALWAYS_UNLOCKED.includes(page) || !rule || rule(progressState);
+
+        if (!unlocked) { item.classList.add("nav-item--locked"); return; }
+        item.classList.remove("nav-item--locked");
+
+        if (!ALWAYS_UNLOCKED.includes(page) && !previously.has(page)) {
+            nowUnlocked.add(page);
+            item.classList.add("nav-item--fresh-unlock");
+            setTimeout(() => item.classList.remove("nav-item--fresh-unlock"), 600);
+            const label = item.querySelector(".nav-label")?.textContent || page;
+            _toast(`✦ ${label} unlocked!`, "var(--accent-deep)", 3200);
+        }
+    });
+
+    _saveUnlockedSet(nowUnlocked);
+}
+
 function showPage(pageId) {
     pages.forEach(p => p.classList.remove("active"));
     navItems.forEach(n => n.classList.remove("active"));
@@ -632,7 +682,11 @@ async function loadEntries(filters = {}) {
     if (filters.tag)     params.append("tag",     filters.tag);
     if (filters.keyword) params.append("keyword", filters.keyword);
     const entries = await (await fetch(`/entries?${params}`)).json();
-    entriesDiv.innerHTML = entries.map(e => {
+    if (!filters.tag && !filters.keyword) {          // don't let a filtered/empty
+    progressState.entries = entries.length;       // view re-lock Insights/Review
+    updateNavUnlocks();
+}
+entriesDiv.innerHTML = entries.map(e => {
         const type  = e.entry_type || "free";
         const badge = TYPE_BADGE[type] || type;
         return `<div class="entry-card">
@@ -846,6 +900,8 @@ async function _loadHabitsData() {
         if (!res.ok) return;
         const data = await res.json();
         currentHabits = data.streaks || {};
+        progressState.habits = Object.keys(currentHabits).length;
+        updateNavUnlocks();
         _renderDomainBalance(data.balance || []);
     } catch (_) {}
 }
@@ -1775,7 +1831,8 @@ async function loadQuestBoard() {
         const totEl  = document.getElementById("qb-total");
         if (pendEl) pendEl.textContent = data.pending ?? "—";
         if (totEl)  totEl.textContent  = data.total   ?? "—";
-
+        progressState.questsCompleted = Math.max(0, (data.total ?? 0) - (data.pending ?? 0));
+        updateNavUnlocks();
         const sections = data.sections || {};
         const order    = ["recommended", "daily", "weekly", "skill", "recovery", "boss", "completed"];
         let html       = "";
@@ -2741,5 +2798,6 @@ window.closeHowItWorks = function() {
 };
 // Auto-show once for first-time visitors, never forced after that.
 if (!localStorage.getItem("liainne-hiw-dismissed")) {
+    setTimeout(preloadAllPages, 150);
     setTimeout(() => window.openHowItWorks(), 600);
 }
