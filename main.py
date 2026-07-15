@@ -91,8 +91,12 @@ groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 # Constants
 # ---------------------------------------------------------------------------
 
-XP_PER_TASK      = 50
-XP_PER_LEVEL     = 500
+XP_PER_TASK        = 50
+# Level used to be flat: xp // 500. Now each level costs more than the last
+# (see xp_to_level below) so Level 20/30 feel like real milestones instead
+# of "just more of the same grind."
+XP_LEVEL_BASE      = 500   # XP required for Level 1 -> 2
+XP_LEVEL_INCREMENT = 60    # each subsequent level costs this much more XP than the previous one
 RECENT_DAYS      = 14
 MAX_WEEKLY_ROWS  = 26
 
@@ -272,22 +276,30 @@ def avg(lst, key=None):
 # XP Ledger — single source of truth for XP
 # ---------------------------------------------------------------------------
 
-def ledger_add(source_type: str, source_id: str, category: str, xp: int):
-    """Append an XP event. Idempotent via source_type+source_id upsert."""
+def ledger_add(source_type: str, source_id: str, category: str, xp: int) -> int:
+    """Append an XP event. Idempotent via source_type+source_id upsert.
+    Applies the player's current passive XP bonus (see PASSIVE_XP_BONUS_LEVELS,
+    unlocks at Level 10+) and returns the actual XP written, since callers that
+    echo the amount back to the user should show the boosted number, not the
+    nominal pre-bonus one."""
     try:
+        level      = xp_to_level(get_total_xp())["level"]
+        boosted_xp = round(xp * passive_xp_multiplier(level))
         supabase.table("xp_ledger").upsert(
             {
                 "source_type": source_type,
                 "source_id":   str(source_id),
                 "category":    category,
-                "xp":          xp,
+                "xp":          boosted_xp,
                 "earned_at":   datetime.now(timezone.utc).isoformat(),
             },
             on_conflict="source_type,source_id"
         ).execute()
         _invalidate_total_xp_cache()
+        return boosted_xp
     except Exception as e:
         logger.exception("ledger_add failed (%s/%s, %s, %s xp): %s", source_type, source_id, category, xp, e)
+        return xp
 
 def get_category_xp(category: str) -> int:
     """Total XP for a category from the ledger."""
@@ -340,10 +352,146 @@ def get_total_xp() -> int:
     _total_xp_cache["at"] = now
     return total
 
+def _xp_required_for_level(level: int) -> int:
+    """XP needed to advance FROM `level` TO `level+1`. Ramps up so later
+    levels take meaningfully longer to reach than early ones (e.g. Level 20
+    costs roughly 2x as much cumulative XP as it would on the old flat
+    curve, Level 30 roughly 2.7x)."""
+    return XP_LEVEL_BASE + max(0, level - 1) * XP_LEVEL_INCREMENT
+
 def xp_to_level(xp: int) -> dict:
-    level = xp // XP_PER_LEVEL + 1
-    progress = xp % XP_PER_LEVEL
-    return {"level": level, "xp": xp, "xp_in_level": progress, "xp_to_next": XP_PER_LEVEL - progress}
+    level, remaining = 1, xp
+    while remaining >= _xp_required_for_level(level):
+        remaining -= _xp_required_for_level(level)
+        level += 1
+    needed = _xp_required_for_level(level)
+    return {
+        "level":        level,
+        "xp":           xp,
+        "xp_in_level":  remaining,
+        "xp_to_next":   needed - remaining,
+        "xp_for_level": needed,   # denominator for progress bars (used to always be 500)
+    }
+
+# ---------------------------------------------------------------------------
+# Level Progression — long-term meaning behind the number
+# Level used to just gate one "Veteran" achievement at 10 and otherwise do
+# nothing. Now it gates real content across five systems, all keyed off the
+# player's OVERALL level (get_total_xp -> xp_to_level), never a per-domain
+# or per-skill level. Level 10 is deliberately the flagship milestone —
+# it's where a domain, a boss tier, the first passive bonus, a legendary
+# achievement, and a coaching-tone shift all land at once.
+# ---------------------------------------------------------------------------
+
+# Which domain unlocks at which level. "Personal Growth", "Health" and
+# "Computer Science" are the starter set (unlocked from Level 1); the rest
+# stagger in as the player levels up. Purely data — retune freely without
+# touching any logic below.
+DOMAIN_UNLOCK_LEVELS = {
+    "Personal Growth":  1,
+    "Health":           1,
+    "Computer Science": 1,
+    "Finance":          5,
+    "Creativity":       10,
+    "Relationships":    15,
+    "Music":            20,
+}
+
+def is_domain_unlocked(domain_name: str, level: int) -> bool:
+    return level >= DOMAIN_UNLOCK_LEVELS.get(domain_name, 1)
+
+# Boss battle difficulty tier by level — also controls the XP reward range
+# fed into the AI generation prompt (previously a flat 100-400 regardless
+# of level, so a Level 30 player's bosses were exactly as easy as a
+# brand-new player's).
+BOSS_TIER_LEVELS = {
+    1:  ("Novice",    (100, 200)),
+    5:  ("Adept",     (150, 275)),
+    10: ("Elite",     (225, 350)),
+    20: ("Legendary", (300, 450)),
+}
+
+def boss_tier_for_level(level: int) -> tuple:
+    tier, reward_range = BOSS_TIER_LEVELS[1]
+    for threshold in sorted(BOSS_TIER_LEVELS):
+        if level >= threshold:
+            tier, reward_range = BOSS_TIER_LEVELS[threshold]
+    return tier, reward_range
+
+# Passive XP bonus — a standing multiplier applied to every XP grant once
+# unlocked (ledger_add applies this automatically; nothing else needs to
+# know it exists). Deliberately starts at 10, not earlier — part of what
+# makes Level 10 a real turning point rather than "Level 9 but +1".
+PASSIVE_XP_BONUS_LEVELS = {
+    10: 0.08,
+    20: 0.15,
+    30: 0.22,
+}
+
+def passive_xp_multiplier(level: int) -> float:
+    mult = 1.0
+    for threshold in sorted(PASSIVE_XP_BONUS_LEVELS):
+        if level >= threshold:
+            mult = 1.0 + PASSIVE_XP_BONUS_LEVELS[threshold]
+    return mult
+
+# AI coach tone — injected into the system prompt so the coach's voice
+# actually shifts as the player progresses, instead of staying static
+# forever regardless of how much history/trust has built up.
+def ai_tone_directive(level: int) -> str:
+    if level >= 20:
+        return ("COACHING STYLE — Legendary tier (Level 20+): This user has serious, proven "
+                 "momentum. Treat them as capable of ambitious asks. Be more blunt, skip "
+                 "reassurance and basic explanations, and focus on strategic, long-horizon "
+                 "thinking and compounding effects across domains.")
+    if level >= 10:
+        return ("COACHING STYLE — Elite tier (Level 10+): This user has real experience with "
+                 "this system. Reference patterns across weeks or months, not just today. "
+                 "Push them rather than just encourage them; assume fluency with quests, "
+                 "habits, skill trees, and domains.")
+    if level >= 5:
+        return ("COACHING STYLE — Adept tier (Level 5+): This user has some experience with "
+                 "the system already. You can skip explaining basic mechanics.")
+    return ("COACHING STYLE — Novice tier (Level 1-4): This user is new. Keep advice simple, "
+             "concrete, and encouraging. Briefly explain any system feature you reference.")
+
+def level_progression_snapshot(level: int) -> dict:
+    """Everything the frontend needs to render a 'what my level gets me' panel."""
+    tier, (xp_min, xp_max) = boss_tier_for_level(level)
+    unlocked = [d for d in DOMAIN_UNLOCK_LEVELS if is_domain_unlocked(d, level)]
+    locked = sorted(
+        ({"name": d, "unlock_level": lvl} for d, lvl in DOMAIN_UNLOCK_LEVELS.items() if lvl > level),
+        key=lambda x: x["unlock_level"]
+    )
+    upcoming_levels = sorted(set(
+        list(DOMAIN_UNLOCK_LEVELS.values()) + list(BOSS_TIER_LEVELS.keys()) +
+        list(PASSIVE_XP_BONUS_LEVELS.keys()) + [10, 20, 30]
+    ))
+    next_level = next((l for l in upcoming_levels if l > level), None)
+    next_milestone = None
+    if next_level:
+        unlocks = [f"{DOMAIN_DEFINITIONS[d]['icon']} {d} domain"
+                   for d, lvl in DOMAIN_UNLOCK_LEVELS.items() if lvl == next_level]
+        if next_level in BOSS_TIER_LEVELS:
+            unlocks.append(f"{BOSS_TIER_LEVELS[next_level][0]} boss tier")
+        if next_level in PASSIVE_XP_BONUS_LEVELS:
+            unlocks.append(f"+{int(PASSIVE_XP_BONUS_LEVELS[next_level] * 100)}% passive XP")
+        if next_level == 10:
+            unlocks.append("Legendary achievement: Veteran")
+        if next_level == 20:
+            unlocks.append("Legendary achievement: Ascendant")
+        if next_level == 30:
+            unlocks.append("Legendary achievement: Mythic")
+        next_milestone = {"level": next_level, "unlocks": unlocks}
+    return {
+        "level":            level,
+        "xp_multiplier":    passive_xp_multiplier(level),
+        "boss_tier":        tier,
+        "boss_xp_range":    [xp_min, xp_max],
+        "unlocked_domains": unlocked,
+        "locked_domains":   locked,
+        "next_milestone":   next_milestone,
+    }
 
 # ---------------------------------------------------------------------------
 # Virtual Peso (VP) — real-world reward currency
@@ -445,18 +593,27 @@ def redeem_reward(reward_id: int):
 # ---------------------------------------------------------------------------
 
 ACHIEVEMENTS = [
-    {"key": "first_entry",   "name": "First Step",        "xp": 50,  "check": lambda s: s["total_entries"] >= 1},
-    {"key": "streak_7",      "name": "Week Warrior",       "xp": 100, "check": lambda s: s["best_habit_streak"] >= 7},
-    {"key": "streak_30",     "name": "Iron Will",          "xp": 300, "check": lambda s: s["best_habit_streak"] >= 30},
-    {"key": "entries_10",    "name": "Consistent Voice",   "xp": 75,  "check": lambda s: s["total_entries"] >= 10},
-    {"key": "entries_30",    "name": "Dedicated Writer",   "xp": 150, "check": lambda s: s["total_entries"] >= 30},
-    {"key": "quests_5",      "name": "Quest Starter",      "xp": 100, "check": lambda s: s["completed_tasks"] >= 5},
-    {"key": "quests_20",     "name": "Quest Master",       "xp": 250, "check": lambda s: s["completed_tasks"] >= 20},
-    {"key": "mood_up_week",  "name": "Rising Tide",        "xp": 75,  "check": lambda s: s["mood_slope"] > 0.1},
-    {"key": "skill_node_1",  "name": "First Unlock",       "xp": 100, "check": lambda s: s["completed_nodes"] >= 1},
-    {"key": "skill_node_5",  "name": "Skill Builder",      "xp": 200, "check": lambda s: s["completed_nodes"] >= 5},
-    {"key": "level_5",       "name": "Level 5 Reached",    "xp": 200, "check": lambda s: s["level"] >= 5},
-    {"key": "level_10",      "name": "Veteran",            "xp": 500, "check": lambda s: s["level"] >= 10},
+    {"key": "first_entry",   "name": "First Step",        "xp": 50,  "tier": "standard",  "check": lambda s: s["total_entries"] >= 1},
+    {"key": "streak_7",      "name": "Week Warrior",       "xp": 100, "tier": "standard",  "check": lambda s: s["best_habit_streak"] >= 7},
+    {"key": "streak_30",     "name": "Iron Will",          "xp": 300, "tier": "standard",  "check": lambda s: s["best_habit_streak"] >= 30},
+    {"key": "entries_10",    "name": "Consistent Voice",   "xp": 75,  "tier": "standard",  "check": lambda s: s["total_entries"] >= 10},
+    {"key": "entries_30",    "name": "Dedicated Writer",   "xp": 150, "tier": "standard",  "check": lambda s: s["total_entries"] >= 30},
+    {"key": "quests_5",      "name": "Quest Starter",      "xp": 100, "tier": "standard",  "check": lambda s: s["completed_tasks"] >= 5},
+    {"key": "quests_20",     "name": "Quest Master",       "xp": 250, "tier": "standard",  "check": lambda s: s["completed_tasks"] >= 20},
+    {"key": "mood_up_week",  "name": "Rising Tide",        "xp": 75,  "tier": "standard",  "check": lambda s: s["mood_slope"] > 0.1},
+    {"key": "skill_node_1",  "name": "First Unlock",       "xp": 100, "tier": "standard",  "check": lambda s: s["completed_nodes"] >= 1},
+    {"key": "skill_node_5",  "name": "Skill Builder",      "xp": 200, "tier": "standard",  "check": lambda s: s["completed_nodes"] >= 5},
+    {"key": "level_5",       "name": "Level 5 Reached",    "xp": 200, "tier": "standard",  "check": lambda s: s["level"] >= 5},
+    # Level 10 is the flagship milestone (domain unlock + Elite boss tier +
+    # first passive bonus + coaching-tone shift all land here too) — the
+    # achievement that marks it is legendary tier, not standard.
+    {"key": "level_10",      "name": "Veteran",            "xp": 500, "tier": "legendary", "check": lambda s: s["level"] >= 10},
+    {"key": "level_20",      "name": "Ascendant",          "xp": 800, "tier": "legendary", "check": lambda s: s["level"] >= 20},
+    {"key": "level_30",      "name": "Mythic",             "xp": 1200,"tier": "legendary", "check": lambda s: s["level"] >= 30},
+    {"key": "streak_60",     "name": "Unbreakable",        "xp": 600, "tier": "legendary", "check": lambda s: s["best_habit_streak"] >= 60},
+    {"key": "entries_100",   "name": "Chronicle Keeper",   "xp": 700, "tier": "legendary", "check": lambda s: s["total_entries"] >= 100},
+    {"key": "quests_50",     "name": "Grandmaster",        "xp": 900, "tier": "legendary", "check": lambda s: s["completed_tasks"] >= 50},
+    {"key": "skill_node_15", "name": "Tree of Mastery",    "xp": 750, "tier": "legendary", "check": lambda s: s["completed_nodes"] >= 15},
 ]
 
 def build_achievement_snapshot() -> dict:
@@ -490,8 +647,8 @@ def award_achievements():
                     "xp_bonus":  ach["xp"],
                     "earned_at": datetime.now(timezone.utc).isoformat(),
                 }).execute()
-                ledger_add("achievement", ach["key"], "Personal Growth", ach["xp"])
-                newly_earned.append({"name": ach["name"], "xp": ach["xp"]})
+                boosted_xp = ledger_add("achievement", ach["key"], "Personal Growth", ach["xp"])
+                newly_earned.append({"name": ach["name"], "xp": boosted_xp, "tier": ach.get("tier", "standard")})
         return newly_earned
     except Exception as e:
         logger.exception("award_achievements failed: %s", e)
@@ -1902,6 +2059,7 @@ def build_goal_summary() -> list[dict]:
             "level":            level_info["level"],
             "xp_in_level":      level_info["xp_in_level"],
             "xp_to_next":       level_info["xp_to_next"],
+            "xp_for_level":     level_info["xp_for_level"],
             "days_since_created": days_old,
         })
     return summary
@@ -3052,8 +3210,15 @@ def get_achievements():
         "total_xp":  total_xp,
         "vp_balance": get_vp_balance(),
         "level_info": xp_to_level(total_xp),
-        "all_achievements": [{"name": a["name"], "xp": a["xp"]} for a in ACHIEVEMENTS],
+        "all_achievements": [{"name": a["name"], "xp": a["xp"], "tier": a.get("tier", "standard")} for a in ACHIEVEMENTS],
     }
+
+@app.get("/progression/status")
+def get_progression_status():
+    """Powers the 'what my level gets me' panel: current boss tier, passive
+    XP bonus, which domains are unlocked, and what the next milestone is."""
+    level = xp_to_level(get_total_xp())["level"]
+    return level_progression_snapshot(level)
 
 # ---------------------------------------------------------------------------
 # Predictive analytics endpoint
@@ -4000,7 +4165,22 @@ DOMAIN_DEFINITIONS = {
 }
 
 def build_domain(name: str, defn: dict) -> dict:
-    """Build full domain snapshot by aggregating from all sub-systems."""
+    """Build full domain snapshot by aggregating from all sub-systems.
+    Domains unlock progressively by player level (DOMAIN_UNLOCK_LEVELS) —
+    a locked domain skips the full aggregation and returns a lightweight
+    stub so the frontend can render it as a locked card."""
+    player_level = xp_to_level(get_total_xp())["level"]
+    unlock_level = DOMAIN_UNLOCK_LEVELS.get(name, 1)
+    if player_level < unlock_level:
+        return {
+            "name":          name,
+            "icon":          defn["icon"],
+            "color":         defn["color"],
+            "description":   defn["description"],
+            "unlocked":      False,
+            "unlock_level":  unlock_level,
+        }
+
     # XP: sum ledger for all skill_keys + goal_cats
     xp = 0
     all_cats = set(defn["skill_keys"] + defn["goal_cats"])
@@ -4076,10 +4256,13 @@ def build_domain(name: str, defn: dict) -> dict:
         "icon":          defn["icon"],
         "color":         defn["color"],
         "description":   defn["description"],
+        "unlocked":      True,
+        "unlock_level":  unlock_level,
         "xp":            xp,
         "level":         level_info["level"],
         "xp_in_level":   level_info["xp_in_level"],
         "xp_to_next":    level_info["xp_to_next"],
+        "xp_for_level":  level_info["xp_for_level"],
         "progress":      progress,
         "goals":         domain_goals,
         "active_goals":  len([g for g in domain_goals if g["progress"] < 100]),
@@ -4154,6 +4337,10 @@ def generate_weekly_boss():
     streaks    = _compute_streaks_raw()
     analytics  = predictive_analytics()
 
+    player_level      = xp_to_level(get_total_xp())["level"]
+    tier, (xp_min, xp_max) = boss_tier_for_level(player_level)
+    available_domains = [d for d in DOMAIN_DEFINITIONS if is_domain_unlocked(d, player_level)]
+
     active_skill_cats = []
     for cat in SKILL_TREES:
         tree = resolve_tree(cat)
@@ -4168,20 +4355,29 @@ def generate_weekly_boss():
     top_habits = sorted(streaks.items(), key=lambda x: x[1]["current_streak"], reverse=True)[:4]
     habit_context = [{"name": n, "streak": d["current_streak"], "category": d["category"]} for n, d in top_habits]
 
+    difficulty_guidance = {
+        "Novice":    "3 straightforward actions, achievable in one week even on a busy schedule.",
+        "Adept":     "3-4 actions with some real challenge, or a new habit that has to stick.",
+        "Elite":     "4-5 actions, meaningfully harder than routine quests, may need sustained effort across the whole week.",
+        "Legendary": "5-7 actions, a genuine stretch goal that pushes past the player's comfort zone.",
+    }[tier]
+
     prompt = f"""You are LiAInne generating weekly boss battles for a personal growth RPG.
 
 Current week: {week_key}
+Player level: {player_level} (difficulty tier: {tier})
 Active goals: {_json.dumps(pending_goals)}
 Top habits: {_json.dumps(habit_context)}
 Active skill trees: {active_skill_cats}
 Stagnating: {analytics.get('stagnating', False)}
 Streak risks: {analytics.get('streak_at_risk', [])}
 
-Generate exactly 3 boss battles for different life domains from: {list(DOMAIN_DEFINITIONS.keys())}
+Generate exactly 3 boss battles for different life domains from: {available_domains}
+
+Difficulty tier for this week is {tier}: {difficulty_guidance}
 
 Each boss should:
-- Be achievable in one week
-- Require 3-5 specific actions
+- Match the {tier} difficulty tier above
 - Feel epic but realistic
 - Connect to the user's actual active goals/habits
 
@@ -4194,11 +4390,11 @@ Reply ONLY in this JSON (no markdown):
     "requirements": [
       {{"label": "action description", "target": 1, "type": "count"}}
     ],
-    "xp_reward": 150
+    "xp_reward": {(xp_min + xp_max) // 2}
   }}
 ]
 
-Max 3 bosses. Make them distinct domains."""
+Max 3 bosses. Make them distinct domains. xp_reward must be between {xp_min} and {xp_max}."""
 
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -4218,17 +4414,18 @@ Max 3 bosses. Make them distinct domains."""
 
     created = []
     for b in bosses_raw[:3]:
-        domain = b.get("domain", "Personal Growth")
-        if domain not in DOMAIN_DEFINITIONS:
-            domain = "Personal Growth"
+        domain = b.get("domain", available_domains[0] if available_domains else "Personal Growth")
+        if domain not in available_domains:
+            domain = available_domains[0] if available_domains else "Personal Growth"
         result = supabase.table("weekly_bosses").insert({
             "week_key":     week_key,
             "name":         b.get("name", "Weekly Boss"),
             "description":  b.get("description", ""),
             "domain":       domain,
             "requirements": _json.dumps(b.get("requirements", [])),
-            "xp_reward":    min(max(int(b.get("xp_reward", 150)), 100), 400),
+            "xp_reward":    min(max(int(b.get("xp_reward", (xp_min + xp_max) // 2)), xp_min), xp_max),
             "deadline":     deadline,
+            "tier":         tier,
         }).execute()
         if result.data:
             created.append(result.data[0])

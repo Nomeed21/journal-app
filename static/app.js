@@ -39,10 +39,13 @@ const UNLOCK_RULES = {
     entries:  (p) => p.entries >= 1,
     skills:   (p) => p.questsCompleted >= 1,
     habits:   (p) => p.questsCompleted >= 1,
-    domains:  (p) => p.questsCompleted >= 1 || p.habits >= 1,
     insights: (p) => p.entries >= 3,
     review:   (p) => p.entries >= 7,
 };
+
+// Domains is no longer its own tab -- it's a drill-down inside Habits (see
+// switchHabitsView), gated by the same threshold the old "Domains" tab used.
+const DOMAIN_VIEW_UNLOCK_RULE = (p) => p.questsCompleted >= 1 || p.habits >= 1;
 
 let progressState = { entries: 0, questsCompleted: 0, questsPending: 0, habits: 0 };
 
@@ -77,7 +80,39 @@ function updateNavUnlocks() {
 
     _saveUnlockedSet(nowUnlocked);
     renderOnboardingCard();
+    updateDomainViewUnlock();
 }
+
+// ---------------------------------------------------------------------------
+// Domain View unlock (drill-down inside the Habits page)
+// Mirrors the nav-item unlock pattern above, but for the toggle button
+// rather than a whole tab, since Domains now lives inside Habits.
+// ---------------------------------------------------------------------------
+function updateDomainViewUnlock() {
+    const btn = document.getElementById("hvt-domains-btn");
+    if (!btn) return;
+    const unlocked = DOMAIN_VIEW_UNLOCK_RULE(progressState);
+    const wasLocked = btn.classList.contains("hvt-btn--locked");
+
+    btn.classList.toggle("hvt-btn--locked", !unlocked);
+    btn.disabled = !unlocked;
+
+    if (unlocked && wasLocked) {
+        btn.classList.add("nav-item--fresh-unlock");
+        setTimeout(() => btn.classList.remove("nav-item--fresh-unlock"), 600);
+        _toast("✦ Domain View unlocked!", "var(--accent-deep)", 3200);
+    }
+}
+
+// Switches between the "My Habits" (daily/actionable) and "Domain View"
+// (aggregate: bosses, rewards, bottlenecks) sub-views within the Habits page.
+window.switchHabitsView = function(view) {
+    if (view === "domains" && !DOMAIN_VIEW_UNLOCK_RULE(progressState)) return; // still locked
+    document.getElementById("habits-view-streaks").style.display = view === "streaks" ? "" : "none";
+    document.getElementById("habits-view-domains").style.display = view === "domains" ? "" : "none";
+    document.querySelectorAll(".hvt-btn").forEach(b => b.classList.toggle("active", b.dataset.view === view));
+    localStorage.setItem("liainne-habits-subview", view);
+};
 
 // ---------------------------------------------------------------------------
 // First-run onboarding — one focused step at a time instead of the full
@@ -158,6 +193,11 @@ function showPage(pageId) {
         if (trendsChartInstance)      trendsChartInstance.resize();
         if (correlationChartInstance) correlationChartInstance.resize();
     }
+    if (pageId === "habits") {
+        const saved = localStorage.getItem("liainne-habits-subview") || "streaks";
+        const wantsDomains = saved === "domains" && DOMAIN_VIEW_UNLOCK_RULE(progressState);
+        switchHabitsView(wantsDomains ? "domains" : "streaks");
+    }
 }
 
 navItems.forEach(item =>
@@ -177,10 +217,11 @@ const PAGE_LOADERS = {
     entries:  () => { loadEntries(); loadPiePlan(); },
     quests:   () => loadQuestBoard(),
     skills:   () => loadSkills(),
-    habits:   () => loadStreaks(),
+    // Domains used to be its own tab; it's now a drill-down view inside
+    // Habits (see switchHabitsView), so both load together under one key.
+    habits:   () => { loadStreaks(); loadDomains(); },
     insights: () => { loadCharts(); loadInsights(); },
     review:   () => renderReviewCalendar(),
-    domains:  () => loadDomains(),
 };
 const _lastPageLoad = {};
 const PAGE_LOAD_THROTTLE_MS = 4000;
@@ -200,7 +241,7 @@ function loadPageIfStale(pageId, force = false) {
 // instead) since Chart.js can't size a canvas correctly while its page is
 // still hidden -- everything else is plain HTML and safe to preload.
 function preloadAllPages() {
-    ["entries", "quests", "skills", "habits", "domains", "review"].forEach(p => loadPageIfStale(p, true));
+    ["entries", "quests", "skills", "habits", "review"].forEach(p => loadPageIfStale(p, true));
     loadInsights();
 }
 
@@ -221,6 +262,84 @@ async function loadXPHUD() {
             <div class="xp-hud-text">${info.xp_in_level} / 500 XP</div>
             <div class="vp-hud-text">💰 ${data.vp_balance ?? 0} VP</div>`;
     } catch (_) {}
+    loadProgressionStatus();
+}
+
+// ---------------------------------------------------------------------------
+// Level Progression card (Journal page) + level-up celebration
+// Backs GET /progression/status: current boss tier, passive XP multiplier,
+// which domains are unlocked, and what the next milestone brings. Also
+// detects crossing a level threshold (vs the last-seen level in
+// localStorage) and throws up a toast naming what just unlocked, so hitting
+// Level 10/20/30 actually registers as an event instead of a quiet number
+// change in the sidebar.
+// ---------------------------------------------------------------------------
+function _getStoredLevelState() {
+    try { return JSON.parse(localStorage.getItem("liainne-level-state") || "null"); }
+    catch (_) { return null; }
+}
+function _saveStoredLevelState(state) {
+    localStorage.setItem("liainne-level-state", JSON.stringify(state));
+}
+
+function showLevelUpToast(snapshot, prevUnlockedDomains) {
+    const newDomains = (snapshot.unlocked_domains || []).filter(d => !prevUnlockedDomains.includes(d));
+    const toast = document.createElement("div");
+    toast.className = "level-up-toast";
+    toast.innerHTML = `
+        <div class="lut-title">🎉 Level ${snapshot.level}!</div>
+        <div class="lut-sub">${snapshot.boss_tier} boss tier · ×${snapshot.xp_multiplier} passive XP
+            ${newDomains.length ? `<br>🔓 New domain unlocked: <strong>${newDomains.join(", ")}</strong>` : ""}
+        </div>`;
+    document.body.appendChild(toast);
+    setTimeout(() => toast.classList.add("show"), 50);
+    setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 5000);
+}
+
+async function loadProgressionStatus() {
+    const badgeEl = document.getElementById("lp-tier-badge");
+    const bodyEl  = document.getElementById("lp-body");
+    if (!bodyEl) return;
+    try {
+        const data = await (await fetch("/progression/status")).json();
+
+        // Level-up detection: compare against the last snapshot we saw.
+        const prev = _getStoredLevelState();
+        if (prev && data.level > prev.level) {
+            showLevelUpToast(data, prev.unlocked_domains || []);
+        }
+        _saveStoredLevelState({ level: data.level, unlocked_domains: data.unlocked_domains || [] });
+
+        if (badgeEl) badgeEl.textContent = `${data.boss_tier} · Lv ${data.level}`;
+
+        const unlockedPills = (data.unlocked_domains || []).map(d =>
+            `<span class="lp-domain-pill lp-domain-pill--unlocked">✓ ${DOMAIN_ICONS[d] || ""} ${d}</span>`
+        ).join("");
+        const lockedPills = (data.locked_domains || []).map(d =>
+            `<span class="lp-domain-pill lp-domain-pill--locked">🔒 ${DOMAIN_ICONS[d.name] || ""} ${d.name} (Lv ${d.unlock_level})</span>`
+        ).join("");
+
+        const totalDomains = (data.unlocked_domains || []).length + (data.locked_domains || []).length;
+        const milestoneHtml = data.next_milestone
+            ? `<div class="lp-milestone">
+                   Next milestone: <strong>Level ${data.next_milestone.level}</strong>
+                   ${data.next_milestone.unlocks && data.next_milestone.unlocks.length
+                        ? `<div class="lp-milestone-unlocks">${data.next_milestone.unlocks.map(u => `<span class="lp-unlock-chip">${_escHtml(u)}</span>`).join("")}</div>`
+                        : ""}
+               </div>`
+            : `<div class="lp-maxed">⭐ All progression milestones reached</div>`;
+
+        bodyEl.innerHTML = `
+            <div class="lp-stats-row">
+                <div class="lp-stat-chip"><div class="lp-stat-val">×${data.xp_multiplier}</div><div class="lp-stat-key">Passive XP</div></div>
+                <div class="lp-stat-chip"><div class="lp-stat-val">${data.boss_tier}</div><div class="lp-stat-key">Boss Tier</div></div>
+                <div class="lp-stat-chip"><div class="lp-stat-val">${(data.unlocked_domains||[]).length}/${totalDomains}</div><div class="lp-stat-key">Domains</div></div>
+            </div>
+            <div class="lp-domains-row">${unlockedPills}${lockedPills}</div>
+            ${milestoneHtml}`;
+    } catch (_) {
+        bodyEl.innerHTML = `<p class="plan-loading">Could not load progression status.</p>`;
+    }
 }
 
 // ---------------------------------------------------------------------------
