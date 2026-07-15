@@ -2758,6 +2758,88 @@ body {
     margin-top: .35rem;
 }
 
+/* ============================================================
+   Domain Unlock Celebration Modal
+   Same beat as the skill-complete modal (pop-in overlay + big icon +
+   title), but built to list one or more domains at once with each
+   domain's own color -- a level can unlock more than one domain.
+   ============================================================ */
+
+.domain-unlock-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(58,44,48,.55);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    padding: 1rem;
+}
+
+.domain-unlock-box {
+    background: var(--paper);
+    border-radius: 22px;
+    padding: 2.25rem 2rem;
+    max-width: 460px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 24px 60px rgba(0,0,0,.22);
+    animation: skillPop .35s cubic-bezier(.34,1.56,.64,1);
+}
+
+.duk-burst {
+    font-size: 3.2rem;
+    line-height: 1;
+    margin-bottom: .5rem;
+    animation: starSpin 1s ease forwards;
+}
+
+.duk-title {
+    font-family: var(--font-display);
+    font-size: 1.45rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 1.1rem;
+}
+
+.duk-domains {
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+
+.duk-domain-card {
+    display: flex;
+    align-items: center;
+    gap: .85rem;
+    text-align: left;
+    background: color-mix(in srgb, var(--duk-color, var(--accent)) 8%, var(--paper-soft));
+    border: 1.5px solid color-mix(in srgb, var(--duk-color, var(--accent)) 35%, white);
+    border-radius: 14px;
+    padding: .85rem 1.1rem;
+}
+
+.duk-domain-icon {
+    font-size: 1.8rem;
+    flex-shrink: 0;
+}
+
+.duk-domain-body { flex: 1; min-width: 0; }
+
+.duk-domain-name {
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--duk-color, var(--ink));
+}
+
+.duk-domain-desc {
+    font-size: .8rem;
+    color: var(--ink-soft);
+    margin-top: .15rem;
+    line-height: 1.4;
+}
+
 /* Responsive skill nodes */
 @media (max-width: 600px) {
     .skt-nodes { grid-template-columns: 1fr; }

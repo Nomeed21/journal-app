@@ -1817,7 +1817,9 @@ def habit_ai_insights():
         elif sr > 80 and data.get("current_streak", 0) > 7:
             adapt_signals.append(f"'{name}' thriving — consider evolving")
 
-    prompt = f"""You are LiAInne analyzing habit data for a personal growth RPG.
+    prompt = f"""{ai_tone_directive(xp_to_level(get_total_xp())["level"])}
+
+You are LiAInne analyzing habit data for a personal growth RPG.
 
 Habits: {_json.dumps({k: {"streak": v["current_streak"], "total": v["total_logs"], "domain": v.get("domain","?"), "success_rate": v.get("success_rate",0)} for k,v in streaks.items()})}
 Domain balance (14 days): {_json.dumps(balance)}
@@ -3280,7 +3282,9 @@ def proactive_coaching():
     recent7 = all_light[-7:]
     avg_mood_7 = avg([e["mood"] for e in recent7]) if recent7 else None
 
-    prompt = f"""You are LiAInne, a personal coach. 
+    prompt = f"""{ai_tone_directive(xp_to_level(get_total_xp())["level"])}
+
+You are LiAInne, a personal coach. 
 
 Alerts detected for this user:
 {chr(10).join(f'- {a}' for a in alerts)}
@@ -3717,9 +3721,12 @@ SYSTEM_PROMPT_BASE = (
     "respond with care and urgency, and encourage them to contact local emergency services."
 )
 
-def _build_system_prompt(context: str) -> str:
-    """Concatenate base prompt + context without .format() to avoid brace conflicts."""
-    return SYSTEM_PROMPT_BASE + "\n\n" + context
+def _build_system_prompt(context: str, level: int) -> str:
+    """Concatenate base prompt + tone directive + context without .format()
+    to avoid brace conflicts. ai_tone_directive() existed but was never
+    actually called anywhere in the file -- the coach's voice never shifted
+    with level despite the tiers being fully defined."""
+    return SYSTEM_PROMPT_BASE + "\n\n" + ai_tone_directive(level) + "\n\n" + context
 
 def _parse_quest_from_response(response_text: str):
     """Split LLM response into (clean_text, quest_data_or_None)."""
@@ -3785,7 +3792,8 @@ def _create_quest_from_chat(quest_data: dict):
 @app.post("/chat")
 def chat(msg: ChatMessage):
     context = build_coach_context(msg.message)
-    system  = _build_system_prompt(context)
+    level   = xp_to_level(get_total_xp())["level"]
+    system  = _build_system_prompt(context, level)
     history = [
         {"role": t.role, "content": t.content}
         for t in msg.history[-12:]
@@ -3937,7 +3945,9 @@ def ai_insight():
     # repeat it, which is more reliable than just asking it not to.
     stats_for_prompt = {k: v for k, v in stats.items() if k not in ("streak_at_risk", "stagnating")}
 
-    prompt = f"""You are LiAInne reviewing a user's journal analytics.
+    prompt = f"""{ai_tone_directive(stats["level"])}
+
+You are LiAInne reviewing a user's journal analytics.
 
 Stats: {stats_for_prompt}
 

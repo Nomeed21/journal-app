@@ -199,6 +199,12 @@ function showPage(pageId) {
         switchHabitsView(wantsDomains ? "domains" : "streaks");
     }
 }
+// Inline onclick="" attribute handlers run in global scope, not the closure
+// this function is declared in -- without this, every onclick="showPage(...)"
+// (onboarding CTAs, the skill tree's "View Tasks", chat quest cards, the
+// domain-unlock modal below) would throw "showPage is not defined" the
+// moment it was clicked.
+window.showPage = showPage;
 
 navItems.forEach(item =>
     item.addEventListener("click", e => { e.preventDefault(); showPage(item.dataset.page); })
@@ -288,12 +294,66 @@ function showLevelUpToast(snapshot, prevUnlockedDomains) {
     toast.className = "level-up-toast";
     toast.innerHTML = `
         <div class="lut-title">🎉 Level ${snapshot.level}!</div>
-        <div class="lut-sub">${snapshot.boss_tier} boss tier · ×${snapshot.xp_multiplier} passive XP
-            ${newDomains.length ? `<br>🔓 New domain unlocked: <strong>${newDomains.join(", ")}</strong>` : ""}
-        </div>`;
+        <div class="lut-sub">${snapshot.boss_tier} boss tier · ×${snapshot.xp_multiplier} passive XP</div>`;
     document.body.appendChild(toast);
     setTimeout(() => toast.classList.add("show"), 50);
     setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 5000);
+
+    // A new domain unlocking is a bigger deal than a boss-tier bump -- an
+    // entire life area's habits/skills/goals just opened up -- so it gets
+    // its own celebration rather than a footnote in the level-up toast.
+    // Delayed so it doesn't visually collide with the toast above.
+    if (newDomains.length) {
+        setTimeout(() => showDomainUnlockModal(newDomains), 900);
+    }
+}
+
+// Fetches full details (icon, color, description) for each newly-unlocked
+// domain from /domains/{name} rather than duplicating DOMAIN_DEFINITIONS
+// client-side, since the backend is already the source of truth for those.
+async function showDomainUnlockModal(domainNames) {
+    let domains;
+    try {
+        domains = await Promise.all(
+            domainNames.map(name => fetch(`/domains/${encodeURIComponent(name)}`).then(r => r.json()))
+        );
+    } catch (_) {
+        // Fall back to names only if the detail fetch fails -- still worth
+        // celebrating even without icon/color/description.
+        domains = domainNames.map(name => ({ name, icon: "🌐", color: "var(--accent)", description: "" }));
+    }
+
+    let modal = document.getElementById("domain-unlock-modal");
+    if (!modal) {
+        modal = document.createElement("div");
+        modal.id = "domain-unlock-modal";
+        modal.className = "domain-unlock-overlay";
+        document.body.appendChild(modal);
+    }
+    modal.innerHTML = `
+        <div class="domain-unlock-box">
+            <div class="duk-burst">🌐</div>
+            <h2 class="duk-title">${domains.length > 1 ? "New Domains Unlocked!" : "New Domain Unlocked!"}</h2>
+            <div class="duk-domains">
+                ${domains.map(d => `
+                    <div class="duk-domain-card" style="--duk-color:${d.color || 'var(--accent)'}">
+                        <span class="duk-domain-icon">${d.icon || "🌐"}</span>
+                        <div class="duk-domain-body">
+                            <div class="duk-domain-name">${d.name}</div>
+                            ${d.description ? `<div class="duk-domain-desc">${d.description}</div>` : ""}
+                        </div>
+                    </div>`).join("")}
+            </div>
+            <div style="display:flex;gap:.75rem;margin-top:1.25rem;justify-content:center">
+                <button class="skt-btn skt-btn--start" onclick="
+                    document.getElementById('domain-unlock-modal').style.display='none';
+                    showPage('habits'); switchHabitsView('domains');">Explore Domains</button>
+                <button style="background:var(--paper);color:var(--ink-soft);border:1px solid var(--line);padding:.55rem 1rem;border-radius:10px;cursor:pointer"
+                    onclick="document.getElementById('domain-unlock-modal').style.display='none'">
+                    Close</button>
+            </div>
+        </div>`;
+    modal.style.display = "flex";
 }
 
 async function loadProgressionStatus() {
