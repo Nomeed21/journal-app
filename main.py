@@ -2918,6 +2918,18 @@ def get_skill_tree(category: str):
         raise HTTPException(404, "Skill tree not found")
     return tree
 
+@app.get("/progression/status")
+def get_progression_status():
+    """Powers the 'what my level gets me' panel: current boss tier, passive
+    XP bonus, which domains are unlocked, and what the next milestone is.
+    Must be registered BEFORE /progression/{category} below — Starlette
+    matches routes in registration order, and a literal path always needs
+    to come before a variable path it could otherwise be swallowed by
+    (a GET to /progression/status would otherwise match /progression/{category}
+    with category="status", 404, and silently return an empty body)."""
+    level = xp_to_level(get_total_xp())["level"]
+    return level_progression_snapshot(level)
+
 @app.get("/progression/{category}")
 def get_progression(category: str):
     path = build_progression_path(category)
@@ -3204,6 +3216,14 @@ def get_achievements():
         earned = supabase.table("achievements").select("*").order("earned_at", desc=True).execute().data
     except Exception:
         earned = []
+    # The achievements table row itself never stores tier (see award_achievements
+    # insert) — only the in-session "newly_earned" toast payload carried it,
+    # built straight from the ACHIEVEMENTS constant. That left every past
+    # achievement tier-less on reload. Backfill it here the same way, by name,
+    # rather than migrating the table.
+    tier_by_name = {a["name"]: a.get("tier", "standard") for a in ACHIEVEMENTS}
+    for e in earned:
+        e["tier"] = tier_by_name.get(e.get("name"), "standard")
     total_xp = get_total_xp()
     return {
         "earned":    earned,
@@ -3212,13 +3232,6 @@ def get_achievements():
         "level_info": xp_to_level(total_xp),
         "all_achievements": [{"name": a["name"], "xp": a["xp"], "tier": a.get("tier", "standard")} for a in ACHIEVEMENTS],
     }
-
-@app.get("/progression/status")
-def get_progression_status():
-    """Powers the 'what my level gets me' panel: current boss tier, passive
-    XP bonus, which domains are unlocked, and what the next milestone is."""
-    level = xp_to_level(get_total_xp())["level"]
-    return level_progression_snapshot(level)
 
 # ---------------------------------------------------------------------------
 # Predictive analytics endpoint

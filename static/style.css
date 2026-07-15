@@ -2317,6 +2317,73 @@ body {
 .achievement-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; background: var(--ink); color: #fff; padding: .75rem 1.25rem; border-radius: 12px; font-size: .9rem; box-shadow: 0 8px 24px rgba(0,0,0,.18); opacity: 0; transform: translateY(12px); transition: opacity .3s, transform .3s; z-index: 9999; max-width: 320px; }
 .achievement-toast.show { opacity: 1; transform: translateY(0); }
 .achievement-toast--unlock { background: #2e7d32; }
+
+/* ── Legendary achievement toast — deliberately distinct from the standard
+   trophy toast: a dark prestige gradient with an animated gold sheen,
+   larger, and stays up longer. Purple/gold rather than the warm-gold used
+   elsewhere for VP/rewards, so it reads as its own tier, not "more VP". */
+.achievement-toast--legendary {
+    background: linear-gradient(135deg, #1a1025 0%, #2d1b4e 55%, #1a1025 100%);
+    border: 1.5px solid #c9a84c;
+    padding: 1rem 1.5rem;
+    max-width: 360px;
+    box-shadow: 0 12px 36px rgba(0,0,0,.4), 0 0 0 1px rgba(201,168,76,.15) inset;
+    position: relative;
+    overflow: hidden;
+}
+.achievement-toast--legendary::before {
+    content: "";
+    position: absolute;
+    top: 0; left: -60%;
+    width: 40%; height: 100%;
+    background: linear-gradient(115deg, transparent, rgba(255,223,128,.35), transparent);
+    animation: legendarySheen 2.2s ease-in-out infinite;
+}
+@keyframes legendarySheen {
+    0%   { left: -60%; }
+    100% { left: 130%; }
+}
+.at-legendary-label {
+    font-size: .68rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .16em;
+    color: #e8c766;
+    margin-bottom: .3rem;
+    position: relative;
+}
+.at-legendary-name {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: .3rem;
+    position: relative;
+}
+.at-legendary-xp {
+    font-size: .82rem;
+    font-weight: 700;
+    color: #e8c766;
+    position: relative;
+}
+
+/* ── Legendary achievement badge (Skills page achievements grid) ────── */
+.achievement-badge--legendary {
+    background: linear-gradient(135deg, #1a1025 0%, #2d1b4e 100%) !important;
+    border: 1.5px solid #c9a84c !important;
+    position: relative;
+    overflow: hidden;
+}
+.achievement-badge--legendary strong { color: #fff !important; }
+.achievement-badge--legendary small { color: #b8a3d9 !important; }
+.ab-legendary-crown {
+    position: absolute;
+    top: .4rem;
+    right: .5rem;
+    font-size: .95rem;
+    filter: drop-shadow(0 1px 2px rgba(0,0,0,.4));
+}
+
 .xp-flash { position: fixed; bottom: 4rem; right: 1.5rem; background: var(--accent); color: #fff; padding: .45rem 1rem; border-radius: 999px; font-size: .85rem; font-weight: 700; box-shadow: 0 4px 12px var(--shadow); opacity: 0; transform: translateY(8px); transition: opacity .25s, transform .25s; z-index: 9998; pointer-events: none; }
 .xp-flash.show { opacity: 1; transform: translateY(0); }
 

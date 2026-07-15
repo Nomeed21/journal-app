@@ -347,15 +347,27 @@ async function loadProgressionStatus() {
 // ---------------------------------------------------------------------------
 function showAchievementToast(achievements) {
     if (!achievements || achievements.length === 0) return;
-    achievements.forEach((ach, i) => {
+    // Legendary toasts stay on screen longer (they're rarer and worth the
+    // extra beat), so stagger with a running cumulative delay rather than a
+    // flat i*600 — otherwise a legendary + standard unlocked in the same
+    // action would have the standard one appear and vanish mid-legendary.
+    let cumulativeDelay = 0;
+    achievements.forEach((ach) => {
+        const isLegendary = ach.tier === "legendary";
+        const showAt = cumulativeDelay;
+        cumulativeDelay += isLegendary ? 2200 : 900;
         setTimeout(() => {
             const toast = document.createElement("div");
-            toast.className = "achievement-toast";
-            toast.innerHTML = `🏆 <strong>${ach.name}</strong> unlocked! +${ach.xp} XP`;
+            toast.className = isLegendary ? "achievement-toast achievement-toast--legendary" : "achievement-toast";
+            toast.innerHTML = isLegendary
+                ? `<div class="at-legendary-label">👑 Legendary Achievement</div>
+                   <div class="at-legendary-name">${ach.name}</div>
+                   <div class="at-legendary-xp">+${ach.xp} XP</div>`
+                : `🏆 <strong>${ach.name}</strong> unlocked! +${ach.xp} XP`;
             document.body.appendChild(toast);
             setTimeout(() => toast.classList.add("show"), 50);
-            setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, 3500);
-        }, i * 600);
+            setTimeout(() => { toast.classList.remove("show"); setTimeout(() => toast.remove(), 400); }, isLegendary ? 5500 : 3500);
+        }, showAt);
     });
     loadXPHUD();
 }
@@ -2433,18 +2445,25 @@ async function loadSkills() {
         });
     });
 
-    // Achievements
+    // Achievements — legendary tier sorts first and gets a distinct
+    // gold/prestige card instead of blending in with standard badges.
     const earned = achData.earned || [];
     if (earned.length) {
+        const sorted = [...earned].sort((a, b) =>
+            (b.tier === "legendary" ? 1 : 0) - (a.tier === "legendary" ? 1 : 0));
         const achEl = document.createElement("div");
         achEl.className = "achievements-section";
         achEl.innerHTML = `
             <h3 style="font-family:var(--font-display);margin-bottom:.75rem">🏆 Achievements</h3>
             <div class="achievements-grid">
-                ${earned.map(a => `<div class="achievement-badge">
-                    <strong>${a.name}</strong>
-                    <small>${a.earned_at.slice(0,10)}</small>
-                </div>`).join("")}
+                ${sorted.map(a => {
+                    const isLegendary = a.tier === "legendary";
+                    return `<div class="achievement-badge ${isLegendary ? 'achievement-badge--legendary' : ''}">
+                        ${isLegendary ? '<span class="ab-legendary-crown">👑</span>' : ''}
+                        <strong>${a.name}</strong>
+                        <small>${a.earned_at.slice(0,10)}</small>
+                    </div>`;
+                }).join("")}
             </div>`;
         container.appendChild(achEl);
     }
