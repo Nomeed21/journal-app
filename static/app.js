@@ -2793,15 +2793,33 @@ async function loadCurrentBosses() {
     }
 }
 
+// Boss difficulty tier -- mirrors BOSS_TIER_LEVELS in main.py (Novice/Adept/
+// Elite/Legendary). Bosses generated before the tier field existed on
+// weekly_bosses won't have one, so this degrades gracefully to no badge
+// rather than showing "undefined".
+const BOSS_TIER_META = {
+    Novice:    { icon: "🟢", cls: "boss-tier--novice" },
+    Adept:     { icon: "🔵", cls: "boss-tier--adept" },
+    Elite:     { icon: "🟠", cls: "boss-tier--elite" },
+    Legendary: { icon: "👑", cls: "boss-tier--legendary" },
+};
+
 function buildBossCard(b) {
     const req  = Array.isArray(b.requirements) ? b.requirements : [];
     const done = b.completed;
-    return `<div class="boss-card ${done ? 'boss-card--done' : ''}">
+    const tierMeta = BOSS_TIER_META[b.tier];
+    const tierBadge = tierMeta
+        ? `<span class="boss-tier-badge ${tierMeta.cls}">${tierMeta.icon} ${b.tier}</span>`
+        : "";
+    return `<div class="boss-card ${done ? 'boss-card--done' : ''} ${tierMeta ? tierMeta.cls + '-card' : ''}">
         <div class="boss-card-header">
             <span class="boss-icon">${done ? '☠️' : '👹'}</span>
             <div class="boss-title-block">
                 <div class="boss-name">${b.name}</div>
-                <div class="boss-domain">${b.domain}</div>
+                <div class="boss-domain-row">
+                    <span class="boss-domain">${b.domain}</span>
+                    ${tierBadge}
+                </div>
             </div>
             <div class="boss-xp">+${b.xp_reward} XP</div>
         </div>
