@@ -226,7 +226,7 @@ const PAGE_LOADERS = {
     // Domains used to be its own tab; it's now a drill-down view inside
     // Habits (see switchHabitsView), so both load together under one key.
     habits:   () => { loadStreaks(); loadDomains(); },
-    insights: () => { loadCharts(); loadInsights(); },
+    insights: () => { loadCharts(); loadInsights(); loadCoachPatterns(); },
     review:   () => renderReviewCalendar(),
 };
 const _lastPageLoad = {};
@@ -1881,6 +1881,52 @@ async function loadAIInsight() {
 }
 
 // ---------------------------------------------------------------------------
+// Coach Memory — long-horizon patterns + recommendation follow-through
+// Makes the "it studies patterns over weeks" behavior visible rather than
+// leaving it as invisible prompt-grounding: shows what's been mined from
+// history and how well past nudges have actually landed per category.
+// ---------------------------------------------------------------------------
+async function loadCoachPatterns() {
+    const card = document.getElementById("coach-patterns-card");
+    const body = document.getElementById("coach-patterns-body");
+    if (!card || !body) return;
+    try {
+        const data = await (await fetch("/coaching/patterns")).json();
+        const patterns = data.patterns || [];
+        const ft = Object.entries(data.followthrough || {});
+
+        if (!patterns.length && !ft.length) { card.style.display = "none"; return; }
+        card.style.display = "";
+
+        const patternsHtml = patterns.length
+            ? patterns.map(p => `
+                <div class="coach-pattern-row">
+                    <span class="coach-pattern-text">${_escHtml(p.description)}</span>
+                    <span class="coach-pattern-conf">${Math.round((p.confidence || 0) * 100)}%</span>
+                </div>`).join("")
+            : `<p class="plan-loading">Still building a picture — check back after a couple more weeks of activity.</p>`;
+
+        const ftHtml = ft.length
+            ? `<div class="coach-ft-section">
+                <div class="coach-ft-label">Nudge Follow-Through</div>
+                ${ft.map(([cat, v]) => `
+                    <div class="coach-ft-row">
+                        <span class="coach-ft-cat">${_escHtml(cat)}</span>
+                        <div class="coach-ft-bar-wrap">
+                            <div class="coach-ft-bar" style="width:${v.rate}%;background:${v.rate >= 60 ? '#4caf50' : v.rate >= 35 ? '#f7a94b' : '#ef5350'}"></div>
+                        </div>
+                        <span class="coach-ft-count">${v.followed}/${v.suggested} · ${v.rate}%</span>
+                    </div>`).join("")}
+              </div>`
+            : "";
+
+        body.innerHTML = patternsHtml + ftHtml;
+    } catch (_) {
+        card.style.display = "none";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Monthly review
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
@@ -2500,7 +2546,15 @@ async function loadSkills() {
         container.appendChild(treeEl);
 
         const nodesEl = treeEl.querySelector(".skt-nodes");
+        const seenSpecGroups = new Set();
         tree.nodes.forEach(node => {
+            if (node.specialization_group && !seenSpecGroups.has(node.specialization_group)) {
+                seenSpecGroups.add(node.specialization_group);
+                const header = document.createElement("div");
+                header.className = "skt-spec-header";
+                header.innerHTML = `<span class="skt-spec-header-icon">🔀</span> Choose your specialization — these paths are mutually exclusive`;
+                nodesEl.appendChild(header);
+            }
             nodesEl.appendChild(buildNodeCard(node, tree));
         });
     });
@@ -2536,6 +2590,7 @@ function buildNodeCard(node, tree) {
     let state;
     if (node.completed)                  state = "completed";
     else if (node.active_goal)           state = "active";
+    else if (node.specialization_locked) state = "spec-locked";
     else if (node.unlocked)              state = "available";
     else                                 state = "locked";
 
@@ -2574,6 +2629,9 @@ function buildNodeCard(node, tree) {
     } else if (state === "available") {
         ctaHtml = `<button class="skt-btn skt-btn--start"
             onclick="startLearning('${node.id}','${tree.category}',this)">▶ Start Learning</button>`;
+    } else if (state === "spec-locked") {
+        ctaHtml = `<div class="skt-locked-msg skt-locked-msg--spec">🔀 Locked — you chose
+            <strong>${_escHtml(node.specialization_committed_to || "another path")}</strong> instead</div>`;
     } else {
         // Locked — show what's needed
         const needsXP = !node.xp_met ? `${node.xp_required} XP in ${tree.label}` : "";
@@ -2609,6 +2667,7 @@ function buildNodeCard(node, tree) {
             <div class="skt-node-state-dot skt-dot--${state}"></div>
             <div class="skt-node-title">${node.name}</div>
             <div class="skt-node-badges">
+                ${node.specialization_group ? `<span class="skt-badge skt-badge--spec">🔀 Specialization</span>` : ""}
                 <span class="skt-badge">${DIFF_ICONS[node.difficulty] || ""} ${node.difficulty || ""}</span>
                 <span class="skt-badge">⏱ ~${node.estimated_hours || "?"}h</span>
                 <span class="skt-badge skt-badge--xp">+${node.xp_reward || node.xp_required} XP</span>
@@ -2707,7 +2766,31 @@ async function loadDomains() {
     loadRewards();
 }
 
+const PERK_TYPE_ICONS = { xp_boost: "⚡", recovery_tokens: "🛡️", quest_frequency: "🔁" };
+
 function buildDomainCard(d) {
+    if (d.unlocked === false) {
+        const preview = (d.perks_preview || []).map(p =>
+            `<div class="dom-perk dom-perk--locked">
+                <span class="dom-perk-icon">🔒</span>
+                <span>Lv ${p.level}: ${PERK_TYPE_ICONS[p.type] || "✦"} ${p.label}</span>
+             </div>`
+        ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">Reach this level to see what it unlocks.</span>`;
+
+        return `<div class="domain-card domain-card--locked" style="--dom-color:${d.color}">
+            <div class="dom-header">
+                <span class="dom-icon">${d.icon}</span>
+                <div class="dom-title-block">
+                    <div class="dom-name">${d.name}</div>
+                    <div class="dom-desc">${d.description}</div>
+                </div>
+                <div class="dom-level-badge">🔒 Lv ${d.unlock_level}</div>
+            </div>
+            <div class="dom-section-label">Unlocks at Level ${d.unlock_level} — perk preview</div>
+            <div class="dom-perks-list">${preview}</div>
+        </div>`;
+    }
+
     const pct      = Math.round(d.xp_in_level / 5);  // xp_in_level out of 500
     const habits   = (d.habits || []).slice(0, 4);
     const skills   = (d.skill_trees || []);
@@ -2742,6 +2825,22 @@ function buildDomainCard(d) {
            </div>`
         : `<span style="font-size:.8rem;color:var(--ink-faint)">No boss this week</span>`;
 
+    const perksActive = d.perks_active || [];
+    const perksNext    = d.perks_next || null;
+    const perksHtml = (perksActive.length
+        ? perksActive.map(p =>
+            `<div class="dom-perk dom-perk--active">
+                <span class="dom-perk-icon">${PERK_TYPE_ICONS[p.type] || "✦"}</span>
+                <span>${p.label}</span>
+             </div>`).join("")
+        : `<span style="font-size:.8rem;color:var(--ink-faint)">No perks unlocked yet — keep leveling this domain.</span>`)
+      + (perksNext
+            ? `<div class="dom-perk dom-perk--next">
+                    <span class="dom-perk-icon">🔒</span>
+                    <span>Lv ${perksNext.level}: ${perksNext.label}</span>
+               </div>`
+            : "");
+
     return `<div class="domain-card" style="--dom-color:${d.color}">
         <div class="dom-header">
             <span class="dom-icon">${d.icon}</span>
@@ -2758,6 +2857,9 @@ function buildDomainCard(d) {
             <span class="dom-xp-text">${d.xp_in_level}/500 XP · ${d.xp_to_next} to next</span>
         </div>
         <div class="dom-progress-pct">${d.progress}% quest completion · ${d.active_goals} active goal${d.active_goals !== 1 ? 's' : ''}</div>
+
+        <div class="dom-section-label">Domain Perks</div>
+        <div class="dom-perks-list">${perksHtml}</div>
 
         <div class="dom-section-label">Habits</div>
         <div class="dom-pills">${habitPills}</div>

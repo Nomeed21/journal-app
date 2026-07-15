@@ -378,6 +378,10 @@ create index if not exists idx_skill_progress_category on skill_progress(categor
 create index if not exists idx_weekly_bosses_week      on weekly_bosses(week_key);
 create index if not exists idx_boss_completions_boss   on boss_completions(boss_id);
 
+create index if not exists idx_coach_recs_category     on coach_recommendations(category);
+create index if not exists idx_coach_recs_pending      on coach_recommendations(followed, created_at);
+create index if not exists idx_coach_patterns_conf     on coach_patterns(confidence desc);
+
 
 -- ────────────────────────────────────────────────────────────
 -- Bug fix for existing databases: the app never populates
@@ -394,6 +398,33 @@ create table if not exists daily_pie_plans (
   plan_date  date primary key,
   slices     jsonb not null default '[]',
   updated_at timestamptz not null default now()
+);
+
+
+-- ────────────────────────────────────────────────────────────
+-- Coach Memory — recommendation follow-through & mined patterns
+-- (see _log_recommendation / _mine_weekly_patterns in main.py)
+-- ────────────────────────────────────────────────────────────
+
+create table if not exists coach_recommendations (
+    id                    bigserial primary key,
+    source                text not null,          -- proactive | action_engine
+    category              text not null default 'Personal Growth',
+    recommendation_text   text not null default '',
+    trigger_type          text default '',
+    followed              boolean,                 -- null = not yet resolved
+    resolved_at           timestamptz,
+    created_at            timestamptz default now()
+);
+
+create table if not exists coach_patterns (
+    id             bigserial primary key,
+    pattern_key    text not null unique,
+    category       text,
+    description    text not null,
+    confidence     numeric not null default 0.5,
+    last_updated   timestamptz default now(),
+    created_at     timestamptz default now()
 );
 
 -- ────────────────────────────────────────────────────────────

@@ -2840,6 +2840,45 @@ body {
     line-height: 1.4;
 }
 
+/* ============================================================
+   Skill Specializations — mutually exclusive branch choices
+   ============================================================ */
+
+.skt-spec-header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    background: linear-gradient(135deg, #f3e8ff 0%, #ede0ff 100%);
+    border: 1.5px dashed #c4b5fd;
+    border-radius: 10px;
+    padding: .65rem 1rem;
+    font-size: .82rem;
+    font-weight: 700;
+    color: #5b21b6;
+    margin: .35rem 0 .1rem;
+}
+
+.skt-spec-header-icon { font-size: 1rem; }
+
+.skt-badge--spec {
+    background: #f3e8ff;
+    color: #5b21b6;
+    border-color: #c4b5fd;
+}
+
+.skt-node--spec-locked {
+    opacity: .55;
+    border-style: dashed;
+    border-color: #c4b5fd;
+    background: var(--paper-soft);
+}
+
+.skt-dot--spec-locked { background: #c4b5fd; }
+
+.skt-locked-msg--spec { color: #5b21b6; }
+.skt-locked-msg--spec strong { color: #5b21b6; }
+
 /* Responsive skill nodes */
 @media (max-width: 600px) {
     .skt-nodes { grid-template-columns: 1fr; }
@@ -3380,6 +3419,62 @@ body {
     padding: .25rem .6rem;
     box-shadow: none;
     flex-shrink: 0;
+}
+
+/* ============================================================
+   Domain Perks — gameplay effects unlocked by a domain's own level
+   ============================================================ */
+
+.dom-perks-list {
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+}
+
+.dom-perk {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    font-size: .8rem;
+    border-radius: 8px;
+    padding: .35rem .6rem;
+    border: 1px solid transparent;
+}
+
+.dom-perk-icon { flex-shrink: 0; }
+
+.dom-perk--active {
+    background: color-mix(in srgb, var(--dom-color, var(--accent)) 10%, var(--paper-soft));
+    border-color: color-mix(in srgb, var(--dom-color, var(--accent)) 35%, white);
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.dom-perk--next {
+    background: var(--paper-soft);
+    border-color: var(--line-strong);
+    border-style: dashed;
+    color: var(--ink-faint);
+}
+
+.dom-perk--locked {
+    background: var(--paper-soft);
+    border-color: var(--line-strong);
+    border-style: dashed;
+    color: var(--ink-faint);
+}
+
+/* Locked domain card — dimmer, no live stats, just a perk preview to make
+   the unlock feel worth chasing rather than an opaque gray box. */
+.domain-card--locked {
+    opacity: .8;
+    background: var(--paper-soft);
+}
+
+.domain-card--locked .dom-level-badge {
+    background: var(--paper);
+    color: var(--ink-faint);
+    border: 1px solid var(--line-strong);
 }
 
 /* ============================================================
@@ -6228,6 +6323,86 @@ body {
 
 @media (max-width: 640px) {
     .mrc-stats-strip { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ============================================================
+   Coach Memory — long-horizon patterns + follow-through
+   ============================================================ */
+
+.coach-pattern-row {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .55rem 0;
+    border-bottom: 1px solid var(--line);
+    font-size: .88rem;
+    color: var(--ink);
+    line-height: 1.5;
+}
+.coach-pattern-row:last-of-type { border-bottom: none; }
+
+.coach-pattern-text { flex: 1; }
+
+.coach-pattern-conf {
+    flex-shrink: 0;
+    font-size: .68rem;
+    font-weight: 700;
+    color: var(--accent-deep);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    padding: .18rem .55rem;
+    white-space: nowrap;
+}
+
+.coach-ft-section {
+    margin-top: .85rem;
+    padding-top: .75rem;
+    border-top: 1px solid var(--line);
+}
+
+.coach-ft-label {
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--ink-faint);
+    margin-bottom: .5rem;
+}
+
+.coach-ft-row {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    font-size: .8rem;
+    padding: .25rem 0;
+}
+
+.coach-ft-cat {
+    min-width: 130px;
+    flex-shrink: 0;
+    color: var(--ink-soft);
+}
+
+.coach-ft-bar-wrap {
+    flex: 1;
+    height: 5px;
+    background: var(--line-strong);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.coach-ft-bar {
+    height: 100%;
+    border-radius: 3px;
+    transition: width .3s ease;
+}
+
+.coach-ft-count {
+    flex-shrink: 0;
+    min-width: 80px;
+    text-align: right;
+    color: var(--ink-faint);
+    font-weight: 600;
 }
 
 /* ============================================================

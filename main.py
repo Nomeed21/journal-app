@@ -279,12 +279,16 @@ def avg(lst, key=None):
 def ledger_add(source_type: str, source_id: str, category: str, xp: int) -> int:
     """Append an XP event. Idempotent via source_type+source_id upsert.
     Applies the player's current passive XP bonus (see PASSIVE_XP_BONUS_LEVELS,
-    unlocks at Level 10+) and returns the actual XP written, since callers that
-    echo the amount back to the user should show the boosted number, not the
-    nominal pre-bonus one."""
+    unlocks at Level 10+) plus that category's owning domain's XP-boost perk
+    (see DOMAIN_PERK_TIERS, unlocked by that domain's own level), and returns
+    the actual XP written, since callers that echo the amount back to the
+    user should show the boosted number, not the nominal pre-bonus one."""
     try:
-        level      = xp_to_level(get_total_xp())["level"]
-        boosted_xp = round(xp * passive_xp_multiplier(level))
+        level        = xp_to_level(get_total_xp())["level"]
+        domain_name  = _resolve_domain_for_category(category)
+        domain_boost = _domain_xp_boost(domain_name) if domain_name else 0.0
+        multiplier   = passive_xp_multiplier(level) * (1 + domain_boost)
+        boosted_xp   = round(xp * multiplier)
         supabase.table("xp_ledger").upsert(
             {
                 "source_type": source_type,
@@ -296,6 +300,7 @@ def ledger_add(source_type: str, source_id: str, category: str, xp: int) -> int:
             on_conflict="source_type,source_id"
         ).execute()
         _invalidate_total_xp_cache()
+        _invalidate_domain_level_cache()
         return boosted_xp
     except Exception as e:
         logger.exception("ledger_add failed (%s/%s, %s, %s xp): %s", source_type, source_id, category, xp, e)
@@ -1296,7 +1301,11 @@ def _recovery_tokens_from_dates(dates_asc: list[str]) -> int:
     return len(dates_asc) // 7
 
 def _count_tokens(habit_name: str) -> dict:
-    """Count earned vs used tokens for a habit, based on its quest-derived log dates."""
+    """Count earned vs used tokens for a habit, based on its quest-derived log dates.
+    Also folds in that habit's domain's `recovery_tokens` perk (see
+    DOMAIN_PERK_TIERS) — a domain leveled up enough grants every habit tagged
+    with it a standing bonus, on top of what the habit itself has earned
+    through consistency."""
     try:
         profile = supabase.table("habit_profiles").select("skill_tree, domain").eq("name", habit_name).limit(1).execute().data
         skill_tree = profile[0].get("skill_tree", "") if profile else ""
@@ -1307,11 +1316,14 @@ def _count_tokens(habit_name: str) -> dict:
         used_rows = supabase.table("habit_recovery_tokens_v2").select("token_type").eq("habit_name", habit_name).execute().data
         used_count = len(used_rows)
 
-        earned = _recovery_tokens_from_dates(dates_asc)
+        domain_name  = _resolve_domain_for_category(domain) or _resolve_domain_for_category(skill_tree)
+        domain_bonus = _domain_recovery_token_bonus(domain_name)
+        earned = _recovery_tokens_from_dates(dates_asc) + domain_bonus
         available = max(0, earned - used_count)
-        return {"earned": earned, "used": used_count, "available": available, "history": used_rows}
+        return {"earned": earned, "used": used_count, "available": available,
+                "history": used_rows, "domain_bonus": domain_bonus}
     except Exception:
-        return {"earned": 0, "used": 0, "available": 0, "history": []}
+        return {"earned": 0, "used": 0, "available": 0, "history": [], "domain_bonus": 0}
 
 # ── Full Habit Snapshot ───────────────────────────────────────────────────
 
@@ -2389,10 +2401,12 @@ SKILL_TREES: dict[str, dict] = {
                 "mastery_check": {"type": "challenge", "prompt": "Explain merge sort in your own words and describe why it's O(n log n). No need to write code — prove you understand it."},
             },
             {
-                "id": "cs_web", "name": "Web Development",
-                "xp_required": 350, "prerequisites": ["cs_oop"],
+                "id": "cs_web", "name": "Backend & Web Development",
+                "xp_required": 300, "prerequisites": ["cs_oop"],
+                "specialization_group": "cs_specialization",
                 "xp_reward": 250, "difficulty": "Intermediate", "estimated_hours": 20,
-                "description": "APIs, HTTP, frontend basics, backend frameworks.",
+                "description": "APIs, HTTP, frontend basics, backend frameworks. "
+                                "Specialization — mutually exclusive with AI & Machine Learning and Cybersecurity.",
                 "tasks": [
                     "Understand how HTTP works (request/response, status codes)",
                     "Learn HTML and CSS basics",
@@ -2408,9 +2422,11 @@ SKILL_TREES: dict[str, dict] = {
             },
             {
                 "id": "cs_ai", "name": "AI & Machine Learning",
-                "xp_required": 600, "prerequisites": ["cs_algorithms", "cs_oop"],
+                "xp_required": 300, "prerequisites": ["cs_oop"],
+                "specialization_group": "cs_specialization",
                 "xp_reward": 400, "difficulty": "Advanced", "estimated_hours": 25,
-                "description": "ML fundamentals, neural networks, model training.",
+                "description": "ML fundamentals, neural networks, model training. "
+                                "Specialization — mutually exclusive with Backend & Web and Cybersecurity.",
                 "tasks": [
                     "Understand supervised vs unsupervised learning",
                     "Learn linear and logistic regression",
@@ -2426,9 +2442,11 @@ SKILL_TREES: dict[str, dict] = {
             },
             {
                 "id": "cs_security", "name": "Cybersecurity",
-                "xp_required": 500, "prerequisites": ["cs_web", "cs_algorithms"],
+                "xp_required": 300, "prerequisites": ["cs_oop"],
+                "specialization_group": "cs_specialization",
                 "xp_reward": 350, "difficulty": "Advanced", "estimated_hours": 18,
-                "description": "Threats, encryption, auth, secure coding.",
+                "description": "Threats, encryption, auth, secure coding. "
+                                "Specialization — mutually exclusive with Backend & Web and AI & Machine Learning.",
                 "tasks": [
                     "Understand the OWASP Top 10 vulnerabilities",
                     "Learn how SQL injection works and how to prevent it",
@@ -2885,13 +2903,40 @@ def resolve_tree(category: str) -> dict:
     xp            = get_category_xp(category)
     completed_ids = get_completed_node_ids(category)
     active_goals  = _get_active_skill_goals(category)
+
+    # Specialization groups — nodes sharing a `specialization_group` are
+    # mutually exclusive branches (e.g. Backend vs AI vs Cybersecurity).
+    # Once the player has committed to one (completed it, or started its
+    # Goal via "Start Learning"), every sibling in the same group locks
+    # out, even if its own prerequisites/xp are otherwise satisfied.
+    # "Committed" is intentionally sticky — there's no automatic un-commit,
+    # only deleting the goal that started it (see /goals/{id} DELETE).
+    committed_by_group: dict[str, str] = {}
+    for node in tree_def["nodes"]:
+        group = node.get("specialization_group")
+        if not group:
+            continue
+        if node["id"] in completed_ids or node["id"] in active_goals:
+            committed_by_group.setdefault(group, node["id"])
+
     resolved      = []
     for node in tree_def["nodes"]:
         prereqs_met = all(p in completed_ids for p in node["prerequisites"])
         xp_met      = xp >= node["xp_required"]
-        unlocked    = prereqs_met and xp_met
         completed   = node["id"] in completed_ids
         active      = active_goals.get(node["id"])
+
+        group        = node.get("specialization_group")
+        committed_id = committed_by_group.get(group) if group else None
+        specialization_locked = bool(
+            group and committed_id and committed_id != node["id"] and not completed and not active
+        )
+        specialization_committed_to = None
+        if specialization_locked:
+            sibling = next((n for n in tree_def["nodes"] if n["id"] == committed_id), None)
+            specialization_committed_to = sibling["name"] if sibling else committed_id
+
+        unlocked     = prereqs_met and xp_met and not specialization_locked
         mastery_data = compute_node_mastery(category, node["id"])
         resolved.append({
             **node,
@@ -2906,6 +2951,9 @@ def resolve_tree(category: str) -> dict:
             "quest_progress": mastery_data["quest_progress"],
             "mastery":         mastery_data["mastery"],
             "mastered":        mastery_data["mastered"],
+            "specialization_group":        group,
+            "specialization_locked":       specialization_locked,
+            "specialization_committed_to": specialization_committed_to,
         })
     return {**tree_def, "category": category, "category_xp": xp, "nodes": resolved}
 
@@ -3108,6 +3156,13 @@ def start_learning(node_id: str, category: str):
     if not node:
         raise HTTPException(404, "Node not found")
     if not node["unlocked"]:
+        if node.get("specialization_locked"):
+            raise HTTPException(
+                403,
+                f"You've already committed to the '{node.get('specialization_committed_to')}' "
+                "specialization. Specializations are mutually exclusive, so this path is locked — "
+                "delete that goal first if you want to switch."
+            )
         raise HTTPException(403, "Node is locked. Complete prerequisites first.")
     if node["completed"]:
         raise HTTPException(400, "Node already completed.")
@@ -3244,6 +3299,326 @@ def get_predictive():
     return db_retry(predictive_analytics)
 
 # ---------------------------------------------------------------------------
+# Coach Memory — long-horizon pattern mining + recommendation follow-through
+#
+# Every coaching surface used to recompute its picture of the user from
+# scratch on every call and throw it away afterward — so "the AI coach"
+# had no actual memory of what it had already suggested or whether any of
+# it worked. This section adds two small persisted tables:
+#
+#   coach_recommendations — every actionable nudge the coach gives gets
+#     logged here. A few days later, _resolve_pending_recommendations()
+#     checks whether the user actually did something in that category
+#     (an XP ledger entry) and marks it followed True/False. This is what
+#     lets the coach eventually learn "nudging toward Finance never
+#     works, stop leaning on it" instead of repeating ignored advice.
+#
+#   coach_patterns — durable, evidence-backed observations mined from
+#     weeks of history (consistency trends, difficulty avoidance, mood/
+#     habit correlation, which categories respond to nudges), upserted by
+#     a stable key so they accumulate/refresh instead of being
+#     rediscovered-and-forgotten every request.
+#
+# Both feed build_pattern_context(), which gets injected into the
+# coaching prompts so recommendations are grounded in weeks of actual
+# behavior, not just today's snapshot.
+# ---------------------------------------------------------------------------
+
+RECOMMENDATION_RESOLVE_WINDOW_DAYS = 3   # how long we give the user to act before judging a nudge "ignored"
+PATTERN_MINING_THROTTLE_SECONDS    = 6 * 3600  # patterns are slow-moving; a few refreshes a day is plenty
+_last_pattern_mining_at: Optional[datetime] = None
+
+def _log_recommendation(source: str, category: str, text: str, trigger_type: str = "") -> Optional[int]:
+    """Record a coaching recommendation so its real-world outcome can be
+    checked later. `category` should match an xp_ledger/board_quest
+    category so follow-through can be detected automatically."""
+    try:
+        row = supabase.table("coach_recommendations").insert({
+            "created_at":          datetime.now(timezone.utc).isoformat(),
+            "source":              source,
+            "category":            category or "Personal Growth",
+            "recommendation_text": (text or "")[:280],
+            "trigger_type":        trigger_type,
+            "followed":            None,
+        }).execute()
+        return row.data[0]["id"] if row.data else None
+    except Exception as e:
+        logger.exception("_log_recommendation failed: %s", e)
+        return None
+
+def _resolve_pending_recommendations():
+    """
+    For recommendations old enough to judge (older than
+    RECOMMENDATION_RESOLVE_WINDOW_DAYS, not yet checked), decide whether
+    the user followed through: was there any XP activity in that
+    recommendation's category within the resolve window after it was made?
+    """
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=RECOMMENDATION_RESOLVE_WINDOW_DAYS)).isoformat()
+        pending = (
+            supabase.table("coach_recommendations")
+            .select("id, created_at, category")
+            .is_("followed", "null")
+            .lte("created_at", cutoff)
+            .execute()
+            .data
+        )
+        for rec in pending:
+            window_end = (
+                datetime.fromisoformat(rec["created_at"].replace("Z", "+00:00"))
+                + timedelta(days=RECOMMENDATION_RESOLVE_WINDOW_DAYS)
+            ).isoformat()
+            activity = (
+                supabase.table("xp_ledger")
+                .select("id")
+                .eq("category", rec["category"])
+                .gte("earned_at", rec["created_at"])
+                .lte("earned_at", window_end)
+                .limit(1)
+                .execute()
+                .data
+            )
+            supabase.table("coach_recommendations").update({
+                "followed":    bool(activity),
+                "resolved_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", rec["id"]).execute()
+    except Exception as e:
+        logger.exception("_resolve_pending_recommendations failed: %s", e)
+
+def _followthrough_by_category(lookback_days: int = 60) -> dict:
+    """{category: {suggested, followed, rate}} from resolved recommendations
+    in the last `lookback_days` — how often the user actually acts on a
+    coaching nudge toward each category."""
+    try:
+        start = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        rows = (
+            supabase.table("coach_recommendations")
+            .select("category, followed")
+            .not_.is_("followed", "null")
+            .gte("created_at", start)
+            .execute()
+            .data
+        )
+    except Exception:
+        rows = []
+    by_cat: dict = defaultdict(lambda: {"suggested": 0, "followed": 0})
+    for r in rows:
+        cat = r.get("category") or "Personal Growth"
+        by_cat[cat]["suggested"] += 1
+        if r.get("followed"):
+            by_cat[cat]["followed"] += 1
+    return {
+        cat: {**v, "rate": round(v["followed"] / v["suggested"] * 100) if v["suggested"] else 0}
+        for cat, v in by_cat.items()
+    }
+
+def _mine_weekly_patterns():
+    """
+    Scans several weeks of history and writes/refreshes durable rows in
+    coach_patterns, keyed by pattern_key so re-running updates confidence
+    instead of duplicating. Deliberately conservative — each pattern needs
+    a real threshold of evidence before it's recorded, since the point is
+    a small set of trustworthy observations, not a noisy dashboard.
+    """
+    now = datetime.now(timezone.utc)
+    patterns = []
+
+    # 1. Category consistency trend — comparing the most recent 2 weeks of
+    # completed quests against the 2 weeks before that, per category.
+    try:
+        start = (now - timedelta(weeks=4)).isoformat()
+        rows = (
+            supabase.table("board_quests")
+            .select("category, completed_at")
+            .eq("is_completed", True)
+            .gte("completed_at", start)
+            .execute()
+            .data
+        )
+        recent, prior = defaultdict(int), defaultdict(int)
+        split = now - timedelta(weeks=2)
+        for r in rows:
+            if not r.get("completed_at"):
+                continue
+            dt  = datetime.fromisoformat(r["completed_at"].replace("Z", "+00:00"))
+            cat = r.get("category") or "Personal Growth"
+            (recent if dt >= split else prior)[cat] += 1
+        for cat in set(list(recent.keys()) + list(prior.keys())):
+            r_ct, p_ct = recent.get(cat, 0), prior.get(cat, 0)
+            delta = r_ct - p_ct
+            if abs(delta) >= 2:
+                direction = "picking up" if delta > 0 else "slowing down"
+                patterns.append({
+                    "pattern_key": f"consistency_trend:{cat}",
+                    "category":    cat,
+                    "description": f"{cat} activity is {direction}: {p_ct} completions two weeks ago vs {r_ct} this past two weeks.",
+                    "confidence":  min(0.5 + abs(delta) * 0.08, 0.95),
+                })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns consistency trend failed: %s", e)
+
+    # 2. Difficulty avoidance — quest difficulties that get created but
+    # rarely finished, suggesting they're being set too ambitiously.
+    try:
+        rows = supabase.table("board_quests").select("difficulty, is_completed").execute().data
+        by_diff: dict = defaultdict(lambda: {"total": 0, "done": 0})
+        for r in rows:
+            d = r.get("difficulty") or "Normal"
+            by_diff[d]["total"] += 1
+            if r.get("is_completed"):
+                by_diff[d]["done"] += 1
+        for d, v in by_diff.items():
+            if v["total"] < 5 or d not in ("Hard", "Elite"):
+                continue
+            rate = v["done"] / v["total"]
+            if rate < 0.35:
+                patterns.append({
+                    "pattern_key": f"difficulty_avoidance:{d}",
+                    "category":    None,
+                    "description": f"{d} quests only get finished {round(rate*100)}% of the time ({v['done']}/{v['total']}) — they may be scoped too big to start.",
+                    "confidence":  min(0.4 + (1 - rate) * 0.5, 0.9),
+                })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns difficulty failed: %s", e)
+
+    # 3. Journaling/habit-activity vs mood correlation — a persisted
+    # version of the ad-hoc check in /habits/ai-insights, so it survives
+    # as a standing observation rather than being recomputed and discarded.
+    try:
+        all_light = fetch_all_entries_light()
+        if len(all_light) >= 10:
+            mood_by_date: dict = defaultdict(list)
+            for e in all_light:
+                mood_by_date[e["created_at"][:10]].append(e["mood"])
+            profiles = supabase.table("habit_profiles").select("skill_tree, domain").execute().data
+            active_dates = set()
+            for p in profiles:
+                active_dates.update(_habit_quest_dates(p.get("skill_tree", ""), p.get("domain", "")))
+            with_h  = [m for d, ms in mood_by_date.items() for m in ms if d in active_dates]
+            without = [m for d, ms in mood_by_date.items() for m in ms if d not in active_dates]
+            if len(with_h) >= 5 and len(without) >= 5:
+                diff = (sum(with_h) / len(with_h)) - (sum(without) / len(without))
+                if abs(diff) >= 0.3:
+                    patterns.append({
+                        "pattern_key": "mood_habit_correlation",
+                        "category":    None,
+                        "description": f"Mood averages {round(sum(with_h)/len(with_h),1)}/5 on days with a completed habit-linked quest vs {round(sum(without)/len(without),1)}/5 on days without one.",
+                        "confidence":  min(0.5 + abs(diff) * 0.3, 0.9),
+                    })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns mood correlation failed: %s", e)
+
+    # 4. Recommendation follow-through, folded in as patterns too, so a
+    # persistently-ignored or persistently-followed nudge category shows
+    # up alongside the other observations rather than a separate stat.
+    for cat, v in _followthrough_by_category().items():
+        if v["suggested"] < 3:
+            continue
+        if v["rate"] <= 25:
+            patterns.append({
+                "pattern_key": f"followthrough_low:{cat}",
+                "category":    cat,
+                "description": f"Coaching nudges toward {cat} are followed only {v['rate']}% of the time ({v['followed']}/{v['suggested']}) — worth a different angle.",
+                "confidence":  0.6,
+            })
+        elif v["rate"] >= 75:
+            patterns.append({
+                "pattern_key": f"followthrough_high:{cat}",
+                "category":    cat,
+                "description": f"Coaching nudges toward {cat} land well — followed {v['rate']}% of the time ({v['followed']}/{v['suggested']}).",
+                "confidence":  0.6,
+            })
+
+    for p in patterns:
+        try:
+            supabase.table("coach_patterns").upsert({
+                "pattern_key":  p["pattern_key"],
+                "category":     p.get("category"),
+                "description":  p["description"],
+                "confidence":   round(p["confidence"], 2),
+                "last_updated": now.isoformat(),
+            }, on_conflict="pattern_key").execute()
+        except Exception as e:
+            logger.exception("pattern upsert failed for %s: %s", p.get("pattern_key"), e)
+
+    # Patterns that weren't refreshed this run (e.g. a trend that reversed
+    # or evidence that's aged out) get pruned so the list reflects current
+    # behavior rather than accumulating stale, possibly-outdated labels.
+    try:
+        stale_cutoff = (now - timedelta(days=21)).isoformat()
+        supabase.table("coach_patterns").delete().lt("last_updated", stale_cutoff).execute()
+    except Exception:
+        pass
+
+def _run_pattern_mining_if_due(force: bool = False):
+    global _last_pattern_mining_at
+    now = datetime.now(timezone.utc)
+    if not force and _last_pattern_mining_at is not None:
+        if (now - _last_pattern_mining_at).total_seconds() < PATTERN_MINING_THROTTLE_SECONDS:
+            return
+    _resolve_pending_recommendations()
+    _mine_weekly_patterns()
+    _last_pattern_mining_at = now
+
+def build_pattern_context() -> str:
+    """Text block injected into coaching prompts so advice is grounded in
+    weeks of accumulated evidence and known follow-through, not just
+    today's snapshot. This is the piece that lets recommendations actually
+    adjust: a category with low follow-through shows up here explicitly,
+    so the model is nudged to stop repeating advice that isn't landing."""
+    _run_pattern_mining_if_due()
+    try:
+        patterns = (
+            supabase.table("coach_patterns")
+            .select("*")
+            .order("confidence", desc=True)
+            .limit(8)
+            .execute()
+            .data
+        )
+    except Exception:
+        patterns = []
+    if not patterns:
+        return "No long-horizon patterns established yet (not enough history) — do not fabricate any."
+    lines = [f"- {p['description']} (confidence {round(p['confidence']*100)}%)" for p in patterns]
+    return ("LONG-HORIZON PATTERNS (accumulated over multiple weeks — steer advice with these, "
+            "and avoid repeating suggestion types with low follow-through):\n" + "\n".join(lines))
+
+def _guess_recommendation_category(stale_cats: list, at_risk_habits: list) -> str:
+    """Best-effort category for a proactive nudge that doesn't come with
+    one attached, so its outcome can still be tracked."""
+    if stale_cats:
+        return stale_cats[0]
+    if at_risk_habits:
+        try:
+            prof = (
+                supabase.table("habit_profiles")
+                .select("domain, skill_tree")
+                .eq("name", at_risk_habits[0])
+                .limit(1)
+                .execute()
+                .data
+            )
+            if prof:
+                return prof[0].get("domain") or prof[0].get("skill_tree") or "Personal Growth"
+        except Exception:
+            pass
+    return "Personal Growth"
+
+@app.get("/coaching/patterns")
+def get_coach_patterns():
+    """Long-horizon patterns the coach has learned plus how well past
+    nudges have actually landed — powers a 'what I've noticed' panel so
+    the accumulated learning is visible, not just baked silently into
+    prompts."""
+    _run_pattern_mining_if_due()
+    try:
+        patterns = supabase.table("coach_patterns").select("*").order("confidence", desc=True).execute().data
+    except Exception:
+        patterns = []
+    return {"patterns": patterns, "followthrough": _followthrough_by_category()}
+
+# ---------------------------------------------------------------------------
 # Proactive AI coaching
 # ---------------------------------------------------------------------------
 
@@ -3291,10 +3666,13 @@ Alerts detected for this user:
 
 Recent average mood (last 7 entries): {avg_mood_7}/5
 
+{build_pattern_context()}
+
 Write ONE short, warm, direct coaching message (max 60 words) that:
 - Acknowledges the most urgent issue
 - Gives one concrete action to take today
 - Sounds like a caring friend, not a dashboard
+- If a long-horizon pattern shows a category has low follow-through, prefer steering toward a different one instead
 
 Do not list all the alerts. Pick the most important one and speak to it."""
 
@@ -3305,6 +3683,16 @@ Do not list all the alerts. Pick the most important one and speak to it."""
         max_tokens=120,
     )
     nudge = response.choices[0].message.content.strip()
+
+    # Log this nudge so a later pass can check whether the user actually
+    # acted on it — that's what lets future nudges adapt to real behavior
+    # instead of repeating whatever the alerts happen to surface.
+    _log_recommendation(
+        source="proactive",
+        category=_guess_recommendation_category(stale_cats, analytics.get("streak_at_risk", [])),
+        text=nudge,
+        trigger_type=alerts[0] if alerts else "",
+    )
 
     return {
         "needs_attention": True,
@@ -3496,7 +3884,11 @@ Entry content: "{req.content[:300]}"
 Active goals:
 {pending_block}
 
+{build_pattern_context()}
+
 Prescribe ONE specific action (5-30 min). Be specific. Match it to an existing quest if possible.
+If a long-horizon pattern shows low follow-through for a category, avoid prescribing more of that same
+category unless nothing else fits — lean toward categories that are known to land.
 
 Reply ONLY in this JSON:
 {{
@@ -3518,6 +3910,14 @@ Reply ONLY in this JSON:
         action = _json.loads(response.choices[0].message.content.strip())
     except _json.JSONDecodeError:
         return {"triggered": True, "action": None, "error": "parse_failed"}
+
+    _log_recommendation(
+        source="action_engine",
+        category=action.get("category", "Personal Growth"),
+        text=action.get("action", ""),
+        trigger_type=action.get("trigger_type", ""),
+    )
+
     created_quest = None
     if not action.get("is_existing_quest") and action.get("goal_title"):
         match = next(
@@ -3683,6 +4083,7 @@ def build_coach_context(message: str) -> str:
         ),
         f"HABIT TRACKER:\n{build_habit_block()}",
         f"RISK ALERTS:\n" + ("\n".join(risk_lines) if risk_lines else "No active risks."),
+        build_pattern_context(),
         f"RECENT ENTRIES (last {RECENT_DAYS} days):\n{build_recent_text_block(today_iso)}",
         f"OLDER HISTORY (weekly averages):\n{build_weekly_summary_block(all_light)}",
     ]
@@ -3706,6 +4107,8 @@ SYSTEM_PROMPT_BASE = (
     "(3) What is one practical next step they can take today?\n\n"
     "Your response should include: one honest observation, one direct piece of advice, "
     "one small action. Keep it to 2-4 sentences unless they ask for more. "
+    "If the context includes long-horizon patterns, weigh them over any single day's data — "
+    "and if a pattern shows low follow-through for a category, don't keep pushing that same category. "
     "Sound like a thoughtful friend who pays attention — warm, direct, concise. "
     "Never use bullet points unless they ask. "
     "If risk alerts are present, weave the most urgent one into your response naturally.\n\n"
@@ -3951,6 +4354,8 @@ You are LiAInne reviewing a user's journal analytics.
 
 Stats: {stats_for_prompt}
 
+{build_pattern_context()}
+
 Write:
 1. One observation (what you notice)
 2. One recommendation (what to do about it)
@@ -3959,7 +4364,8 @@ Rules: Max 80 words. Personal and thoughtful. No statistics listing. No slopes.
 Do NOT mention habit streaks at risk, stagnation, or "keep momentum" warnings —
 those are already covered by a separate Coach Alert elsewhere on this page,
 and repeating them here is redundant. Draw your observation from mood/energy/
-focus trends, best day, or XP/level progress instead.
+focus trends, best day, XP/level progress, or a long-horizon pattern above instead.
+If a pattern shows a category has low follow-through, don't recommend more of it.
 If level >= 5, acknowledge their progress warmly."""
 
     response = groq_client.chat.completions.create(
@@ -4187,6 +4593,131 @@ DOMAIN_DEFINITIONS = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Domain Perks — domains used to be a read-only dashboard: XP bars and
+# progress numbers with no effect on anything else. Now each domain grants
+# small permanent gameplay perks as ITS OWN level climbs (separate from the
+# player's overall level) — investing in one life area pays off inside that
+# same area, not just as a bigger number to look at.
+#
+# Perk types:
+#   xp_boost        — % bonus XP on anything logged into this domain's
+#                      categories (applied in ledger_add). Tiers don't
+#                      stack; the highest reached tier wins.
+#   recovery_tokens — bonus Recovery Tokens for any habit tagged with this
+#                      domain (applied in _count_tokens). Tiers DO stack.
+#   quest_frequency — raises how often this domain's quests are surfaced
+#                      in the Recommended section (applied in
+#                      _build_recommended_section's scoring). Tiers don't
+#                      stack; the highest reached tier wins.
+# ---------------------------------------------------------------------------
+
+DOMAIN_PERK_TIERS = {
+    "Computer Science": [
+        {"level": 5,  "type": "xp_boost", "value": 0.05, "label": "+5% XP on Computer Science quests"},
+        {"level": 15, "type": "xp_boost", "value": 0.10, "label": "+10% XP on Computer Science quests"},
+        {"level": 25, "type": "xp_boost", "value": 0.15, "label": "+15% XP on Computer Science quests"},
+    ],
+    "Health": [
+        {"level": 5,  "type": "recovery_tokens", "value": 1, "label": "+1 Recovery Token for Health habits"},
+        {"level": 10, "type": "recovery_tokens", "value": 1, "label": "+1 more Recovery Token for Health habits (2 total)"},
+        {"level": 20, "type": "recovery_tokens", "value": 1, "label": "+1 more Recovery Token for Health habits (3 total)"},
+    ],
+    "Music": [
+        {"level": 8,  "type": "quest_frequency", "value": 1, "label": "Practice quests are surfaced more often"},
+        {"level": 20, "type": "quest_frequency", "value": 2, "label": "Practice quests are surfaced even more often"},
+    ],
+    "Finance": [
+        {"level": 5,  "type": "xp_boost", "value": 0.05, "label": "+5% XP on Finance quests"},
+        {"level": 15, "type": "xp_boost", "value": 0.10, "label": "+10% XP on Finance quests"},
+    ],
+    "Creativity": [
+        {"level": 5,  "type": "quest_frequency", "value": 1, "label": "Creative prompts are surfaced more often"},
+        {"level": 15, "type": "xp_boost", "value": 0.10, "label": "+10% XP on Creativity quests"},
+    ],
+    "Relationships": [
+        {"level": 5,  "type": "recovery_tokens", "value": 1, "label": "+1 Recovery Token for Relationship habits"},
+        {"level": 15, "type": "quest_frequency", "value": 1, "label": "Connection quests are surfaced more often"},
+    ],
+    "Personal Growth": [
+        {"level": 5,  "type": "xp_boost",        "value": 0.05, "label": "+5% XP on Personal Growth quests"},
+        {"level": 15, "type": "xp_boost",        "value": 0.10, "label": "+10% XP on Personal Growth quests"},
+        {"level": 25, "type": "recovery_tokens",  "value": 1,    "label": "+1 Recovery Token for any habit"},
+    ],
+}
+
+_DOMAIN_LEVEL_CACHE_TTL = 5  # seconds — same reasoning as _total_xp_cache
+_domain_level_cache: dict = {}
+
+def _invalidate_domain_level_cache():
+    _domain_level_cache.clear()
+
+def _domain_level(domain_name: str) -> int:
+    """A domain's own level, from XP earned in that domain's categories only
+    (not the player's overall level). Cached briefly since it's now read on
+    every XP grant (ledger_add checks it for the xp_boost perk)."""
+    now = datetime.now(timezone.utc)
+    cached = _domain_level_cache.get(domain_name)
+    if cached and (now - cached["at"]).total_seconds() < _DOMAIN_LEVEL_CACHE_TTL:
+        return cached["level"]
+    defn = DOMAIN_DEFINITIONS.get(domain_name)
+    if not defn:
+        return 1
+    xp = 0
+    for cat in set(defn["skill_keys"] + defn["goal_cats"]):
+        xp += get_category_xp(cat)
+    level = xp_to_level(xp)["level"]
+    _domain_level_cache[domain_name] = {"level": level, "at": now}
+    return level
+
+def _active_domain_perks(domain_name: str) -> list[dict]:
+    tiers = DOMAIN_PERK_TIERS.get(domain_name, [])
+    level = _domain_level(domain_name)
+    return [t for t in tiers if level >= t["level"]]
+
+def _domain_xp_boost(domain_name: Optional[str]) -> float:
+    """Highest active xp_boost tier for a domain (tiers don't stack)."""
+    if not domain_name:
+        return 0.0
+    perks = [p for p in _active_domain_perks(domain_name) if p["type"] == "xp_boost"]
+    return max((p["value"] for p in perks), default=0.0)
+
+def _domain_recovery_token_bonus(domain_name: Optional[str]) -> int:
+    """Sum of recovery_tokens perks for a domain (these DO stack)."""
+    if not domain_name:
+        return 0
+    return sum(p["value"] for p in _active_domain_perks(domain_name) if p["type"] == "recovery_tokens")
+
+def _domain_quest_frequency_bonus(domain_name: Optional[str]) -> int:
+    """Highest active quest_frequency tier for a domain (tiers don't stack)."""
+    if not domain_name:
+        return 0
+    perks = [p for p in _active_domain_perks(domain_name) if p["type"] == "quest_frequency"]
+    return max((p["value"] for p in perks), default=0)
+
+def _resolve_domain_for_category(category: Optional[str]) -> Optional[str]:
+    """`category` is used loosely across this codebase — sometimes a domain
+    name itself (e.g. board quest categories), sometimes a skill-tree key
+    (e.g. "Study"), sometimes a goal category. Resolve any of those back to
+    the domain that owns them, so domain perks apply consistently regardless
+    of which name a given call site happens to be using."""
+    if not category:
+        return None
+    if category in DOMAIN_DEFINITIONS:
+        return category
+    for domain, defn in DOMAIN_DEFINITIONS.items():
+        if category in defn.get("skill_keys", []) or category in defn.get("goal_cats", []):
+            return domain
+    return None
+
+def _domain_perks_snapshot(domain_name: str) -> dict:
+    """Active + next-up perks for a domain, for frontend display."""
+    tiers  = DOMAIN_PERK_TIERS.get(domain_name, [])
+    level  = _domain_level(domain_name)
+    active = [t for t in tiers if level >= t["level"]]
+    nxt    = next((t for t in tiers if t["level"] > level), None)
+    return {"perks_active": active, "perks_next": nxt}
+
 def build_domain(name: str, defn: dict) -> dict:
     """Build full domain snapshot by aggregating from all sub-systems.
     Domains unlock progressively by player level (DOMAIN_UNLOCK_LEVELS) —
@@ -4202,6 +4733,7 @@ def build_domain(name: str, defn: dict) -> dict:
             "description":   defn["description"],
             "unlocked":      False,
             "unlock_level":  unlock_level,
+            "perks_preview": DOMAIN_PERK_TIERS.get(name, []),
         }
 
     # XP: sum ledger for all skill_keys + goal_cats
@@ -4274,6 +4806,8 @@ def build_domain(name: str, defn: dict) -> dict:
     # Boss battle this week
     boss = _get_current_boss_for_domain(name)
 
+    perks = _domain_perks_snapshot(name)
+
     return {
         "name":          name,
         "icon":          defn["icon"],
@@ -4292,6 +4826,8 @@ def build_domain(name: str, defn: dict) -> dict:
         "habits":        habit_summary,
         "skill_trees":   skill_stats,
         "weekly_boss":   boss,
+        "perks_active":  perks["perks_active"],
+        "perks_next":    perks["perks_next"],
     }
 
 def _get_current_boss_for_domain(domain: str) -> Optional[dict]:
@@ -5409,6 +5945,12 @@ def _build_recommended_section(all_quests: list[dict]) -> list[dict]:
         prog = q.get("progress", 0)
         if 0 < prog < 100:
             s += 15
+        # Domain quest_frequency perk — a leveled-up domain literally makes
+        # its own quests surface in Recommended more often (see
+        # DOMAIN_PERK_TIERS). Each tier point is worth 25 score, enough to
+        # meaningfully outrank quests that would otherwise tie with it.
+        domain_name = _resolve_domain_for_category(q.get("category"))
+        s += _domain_quest_frequency_bonus(domain_name) * 25
         return s
 
     ranked = sorted(candidates, key=score, reverse=True)[:3]

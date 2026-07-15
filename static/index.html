@@ -480,6 +480,10 @@
         <!-- PAGE: Insights -->
         <section class="page" id="page-insights">
             <div class="page-header"><h1>Insights</h1><p class="page-sub">Patterns in your data</p></div>
+            <div class="ai-coach-card" id="coach-patterns-card" style="display:none">
+                <div class="ai-coach-label">🧠 What I've Noticed (learned over weeks)</div>
+                <div id="coach-patterns-body">Loading…</div>
+            </div>
             <div class="charts-grid">
                 <div class="chart-container"><canvas id="trends-chart"></canvas></div>
                 <div class="chart-container"><canvas id="correlation-chart"></canvas></div>
@@ -562,6 +566,23 @@
                         journal entries. Skill-tree quests chain — completing a parent unlocks its
                         child node's quest — and a recommendation engine scores everything by
                         urgency, source, and difficulty to surface what matters most.</div>
+                </div>
+                <div class="hiw-card">
+                    <div class="hiw-card-icon">🔀</div>
+                    <div class="hiw-card-title">Specializations are a real choice</div>
+                    <div class="hiw-card-body">Some skill-tree branches fork into mutually exclusive
+                        paths — start one (e.g. AI over Backend or Cybersecurity) and its siblings
+                        lock immediately. There's no automatic un-commit; delete the goal it created
+                        if you want to switch.</div>
+                </div>
+                <div class="hiw-card">
+                    <div class="hiw-card-icon">🌐</div>
+                    <div class="hiw-card-title">Domains level up on their own — and pay you back</div>
+                    <div class="hiw-card-body">Each domain has its own level, separate from your
+                        overall one, and unlocks real perks as it climbs: bonus XP in that domain,
+                        extra Recovery Tokens for habits tagged with it, or its quests surfacing in
+                        Recommended more often. Check a domain's card to see what's active and
+                        what's next.</div>
                 </div>
             </div>
             <label class="hiw-dismiss-row">
