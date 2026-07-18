@@ -444,6 +444,59 @@ function showXPFlash(xp, category) {
 }
 
 // ---------------------------------------------------------------------------
+// Instant feedback: XP fly-in + skill node pulse
+// These fire immediately from the same click handlers that already know an
+// XP grant happened, rather than waiting for the next full page/section
+// reload to reflect it -- the whole point being that progress is felt at
+// the moment of the action, not a beat later when data refetches.
+// ---------------------------------------------------------------------------
+
+// Spawns a "+N XP" chip at originEl's position and flies it toward the
+// sidebar XP bar, then pulses that bar on arrival. originEl can be any
+// element near the action that triggered the XP gain (a button, a checkbox).
+function flyXP(originEl, amount) {
+    if (!originEl || !amount) return;
+    const hud = document.getElementById("xp-hud");
+    if (!hud) return;
+    try {
+        const from = originEl.getBoundingClientRect();
+        const to   = hud.getBoundingClientRect();
+        const dx = (to.left + to.width / 2) - (from.left + from.width / 2);
+        const dy = (to.top  + to.height / 2) - (from.top);
+
+        const chip = document.createElement("div");
+        chip.className = "xp-fly-particle";
+        chip.textContent = `+${amount} XP`;
+        chip.style.left = `${from.left + from.width / 2}px`;
+        chip.style.top  = `${from.top}px`;
+        chip.style.setProperty("--fly-transform", `translate(${dx}px, ${dy}px)`);
+        document.body.appendChild(chip);
+
+        setTimeout(() => {
+            chip.remove();
+            const fill = hud.querySelector(".xp-hud-bar-fill");
+            if (fill) {
+                fill.classList.remove("pulse-on-gain");
+                void fill.offsetWidth; // restart animation if triggered again quickly
+                fill.classList.add("pulse-on-gain");
+            }
+        }, 600);
+    } catch (_) { /* layout not ready -- skip the flourish, XP still lands via loadXPHUD */ }
+}
+
+// Pulses a skill node's card if it's currently rendered on the Skills page.
+// A no-op (not an error) if the node isn't in the DOM right now -- it'll
+// just show its updated state next time that page renders.
+function pulseSkillNode(category, nodeId) {
+    if (!category || !nodeId) return;
+    const wrap = document.getElementById(`nodes-${category}`);
+    const el   = wrap?.querySelector(`.skt-node[data-node-id="${nodeId}"]`);
+    if (!el) return;
+    el.classList.add("xp-pulse");
+    setTimeout(() => el.classList.remove("xp-pulse"), 750);
+}
+
+// ---------------------------------------------------------------------------
 // Entry tabs
 // ---------------------------------------------------------------------------
 let currentEntryType   = "morning";
@@ -1125,6 +1178,10 @@ if (piePlannerForm) {
 // ── State ────────────────────────────────────────────────────
 let allSkillNodes = [];
 let currentHabits = {};
+// Tracks each habit's last-rendered streak so _buildHabitCard can detect an
+// increase and grow the flame for a beat, instead of the number just
+// silently changing on the next render.
+const _lastSeenStreak = new Map();
 
 // ── Boot ─────────────────────────────────────────────────────
 async function loadStreaks() {
@@ -1333,6 +1390,10 @@ function _renderHabitsPage() {
 // ── Habit Card Builder ────────────────────────────────────────
 function _buildHabitCard(name, h) {
     const streak      = h.current_streak || 0;
+    // Streak grew since the last time this card was rendered -> grow the
+    // flame for a beat instead of the number just quietly changing.
+    const streakGrew  = _lastSeenStreak.has(name) && streak > _lastSeenStreak.get(name);
+    _lastSeenStreak.set(name, streak);
     const total       = h.total_logs || 0;
     const mastery     = h.mastery_label || "Beginner";
     const masteryLvl  = h.mastery_level || 1;
@@ -1438,7 +1499,7 @@ function _buildHabitCard(name, h) {
                     <span class="hv2-tag hv2-tag--mastery">${mastery}</span>
                 </div>
                 <div class="hv2-stats-row">
-                    <span class="hv2-stat">🔥 ${streak}-day streak</span>
+                    <span class="hv2-stat ${streakGrew ? 'flame-grow' : ''}">🔥 ${streak}-day streak</span>
                     <span class="hv2-stat hv2-stat--faint">${total} total</span>
                     <span class="hv2-stat hv2-stat--faint">${successRate}% rate</span>
                     <span class="hv2-xp">+${xp} XP</span>
@@ -2315,14 +2376,22 @@ function buildQuestCard(q, sectionKey) {
 window.completeQuestBoard = async function(questId, btn) {
     btn.disabled = true;
     btn.textContent = "Completing…";
+    // OPTIMISTIC: flash the card as done immediately -- don't make the user
+    // wait for the network round-trip just to see the click registered.
+    const card = document.getElementById(`qb-card-${questId}`);
+    card?.classList.add("qb-card--flash-done");
     try {
         const data = await (await fetch(`/board/quests/${questId}/complete`, { method: "POST" })).json();
-        if (data.xp_earned) showXPFlash(data.xp_earned, data.category || "Quest");
+        if (data.xp_earned) {
+            flyXP(btn, data.xp_earned);
+            showXPFlash(data.xp_earned, data.category || "Quest");
+        }
         if (data.vp_earned) _toast(`💰 +${data.vp_earned} VP earned`, "#d6a73a", 2800);
         if (data.new_achievements) showAchievementToast(data.new_achievements);
         if (data.children_unlocked > 0)
             _toast(`🔓 ${data.children_unlocked} new quest${data.children_unlocked > 1 ? 's' : ''} unlocked!`, "#2e7d32", 3500);
         if (data.skill_completion) {
+            pulseSkillNode(data.skill_completion.category, data.skill_completion.node_id);
             _toast(`🌳 Skill node <strong>${data.skill_completion.node_name}</strong> mastered!`, "#2e7d32", 4000);
             if (data.skill_completion.newly_unlocked?.length)
                 setTimeout(() => _toast(`🔓 Unlocked: ${data.skill_completion.newly_unlocked.join(", ")}`, "#2e7d32", 4000), 400);
@@ -2333,6 +2402,7 @@ window.completeQuestBoard = async function(questId, btn) {
         loadQuestBoard();
         loadXPHUD();
     } catch (_) {
+        card?.classList.remove("qb-card--flash-done");
         btn.disabled = false;
         btn.textContent = "⚔️ Complete";
     }
@@ -2347,21 +2417,38 @@ window.deleteQuestBoard = async function(questId, e) {
 
 window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCategory) {
     cb.disabled = true;
+    const card = document.getElementById(`qb-card-${questId}`);
+    const row  = document.getElementById(`qbt-row-${taskId}`);
+    // OPTIMISTIC: flip the row and fill the progress bar the instant the
+    // checkbox is clicked, rather than waiting on the round-trip to show
+    // any visible change.
+    const wasChecked = cb.checked;
+    row?.classList.toggle("qb-task-done", wasChecked);
+    if (card) {
+        const totalRows = card.querySelectorAll(".qb-task-row").length;
+        const doneRows  = card.querySelectorAll(".qb-task-row.qb-task-done").length;
+        const fill  = card.querySelector(".qb-prog-fill");
+        const label = card.querySelector(".qb-prog-label");
+        if (fill)  fill.style.width = `${totalRows ? Math.round(doneRows / totalRows * 100) : 0}%`;
+        if (label) label.textContent = `${doneRows}/${totalRows}`;
+    }
     try {
         const data = await (await fetch(`/board/tasks/${taskId}`, { method: "PUT" })).json();
-        const row  = document.getElementById(`qbt-row-${taskId}`);
         if (row) row.classList.toggle("qb-task-done", data.is_completed);
         cb.disabled = false;
 
         // If completing this task finished the whole quest, XP was already awarded
         // server-side — reflect it here instead of waiting for a manual "Complete" click.
         if (data.quest_completion) {
+            flyXP(cb, data.quest_completion.xp_earned);
             showXPFlash(data.quest_completion.xp_earned, data.quest_completion.category || questCategory || "Quest");
             if (data.quest_completion.vp_earned) _toast(`💰 +${data.quest_completion.vp_earned} VP earned`, "#d6a73a", 2800);
             if (data.quest_completion.new_achievements) showAchievementToast(data.quest_completion.new_achievements);
             _toast("⚔️ Quest auto-completed!", "#2e7d32", 3000);
+            card?.classList.add("qb-card--flash-done");
             if (data.quest_completion.skill_completion) {
                 const sc = data.quest_completion.skill_completion;
+                pulseSkillNode(sc.category, sc.node_id);
                 setTimeout(() => _toast(`🌳 Skill node <strong>${sc.node_name}</strong> mastered!`, "#2e7d32", 4000), 400);
                 if (sc.newly_unlocked?.length)
                     setTimeout(() => _toast(`🔓 Unlocked: ${sc.newly_unlocked.join(", ")}`, "#2e7d32", 4000), 900);
@@ -2373,14 +2460,18 @@ window.toggleBoardTask = async function(taskId, questId, cb, questTitle, questCa
 
         // If all tasks done, suggest completing quest
         if (data.all_tasks_done) {
-            const card = document.getElementById(`qb-card-${questId}`);
             const completeBtn = card?.querySelector(".qb-complete-btn");
             if (completeBtn) {
                 completeBtn.style.animation = "urgentPulse .5s 3";
                 _toast("✦ All tasks done — complete the quest to earn XP!", "var(--accent)", 3500);
             }
         }
-    } catch (_) { cb.disabled = false; }
+    } catch (_) {
+        // Roll back the optimistic UI on failure
+        row?.classList.toggle("qb-task-done", !wasChecked);
+        cb.checked = !wasChecked;
+        cb.disabled = false;
+    }
 };
 
 window.addBoardTask = async function(questId) {
@@ -2595,6 +2686,7 @@ function buildNodeCard(node, tree) {
     else                                 state = "locked";
 
     el.className = `skt-node skt-node--${state}`;
+    el.dataset.nodeId = node.id;
 
     // Prerequisites display
     const prereqNames = (node.prerequisites || []).map(pid => {
@@ -2753,13 +2845,17 @@ function showSkillCompleteModal(sc) {
 
 async function loadDomains() {
     const container = document.getElementById("domain-cards");
-    container.innerHTML = "<p class='empty-state'>Loading domains…</p>";
+    if (!container.dataset.initialized) container.innerHTML = "<p class='empty-state'>Loading domains…</p>";
     try {
         const domains = await (await fetch("/domains")).json();
-        if (!domains.length) { container.innerHTML = "<p class='empty-state'>No domain data yet.</p>"; return; }
-        container.innerHTML = domains.map(d => buildDomainCard(d)).join("");
+        if (!domains.length) {
+            container.innerHTML = "<p class='empty-state'>No domain data yet.</p>";
+            container.dataset.initialized = "";
+            return;
+        }
+        renderDomainCards(container, domains);
     } catch (_) {
-        container.innerHTML = "<p class='empty-state'>Could not load domains.</p>";
+        if (!container.dataset.initialized) container.innerHTML = "<p class='empty-state'>Could not load domains.</p>";
     }
     loadActionEngine();
     loadCurrentBosses();
@@ -2767,6 +2863,70 @@ async function loadDomains() {
 }
 
 const PERK_TYPE_ICONS = { xp_boost: "⚡", recovery_tokens: "🛡️", quest_frequency: "🔁" };
+
+// ── Per-section HTML builders ────────────────────────────────
+// Factored out of buildDomainCard so updateDomainCardInPlace can refresh
+// just one section's innerHTML (e.g. habits changed) without touching the
+// rest of the card -- in particular without touching the XP bar, whose
+// CSS width transition only animates if the element survives between
+// renders instead of being destroyed and recreated from scratch.
+function _buildDomainPerksHtml(d) {
+    const perksActive = d.perks_active || [];
+    const perksNext    = d.perks_next || null;
+    return (perksActive.length
+        ? perksActive.map(p =>
+            `<div class="dom-perk dom-perk--active">
+                <span class="dom-perk-icon">${PERK_TYPE_ICONS[p.type] || "✦"}</span>
+                <span>${p.label}</span>
+             </div>`).join("")
+        : `<span style="font-size:.8rem;color:var(--ink-faint)">No perks unlocked yet — keep leveling this domain.</span>`)
+      + (perksNext
+            ? `<div class="dom-perk dom-perk--next">
+                    <span class="dom-perk-icon">🔒</span>
+                    <span>Lv ${perksNext.level}: ${perksNext.label}</span>
+               </div>`
+            : "");
+}
+
+function _buildDomainHabitPillsHtml(d) {
+    const habits = (d.habits || []).slice(0, 4);
+    return habits.map(h =>
+        `<span class="dom-pill ${h.done_today ? 'dom-pill--done' : ''}">${h.done_today ? '✓' : '○'} ${h.name} (${h.streak}🔥)</span>`
+    ).join("") || `<span class="dom-pill dom-pill--empty">No habits linked</span>`;
+}
+
+function _buildDomainSkillTreesHtml(d) {
+    const skills = d.skill_trees || [];
+    return skills.map(s =>
+        `<div class="dom-skill-row">
+            <span class="dom-skill-name">${s.label}</span>
+            <div class="dom-skill-bar"><div class="dom-skill-fill" style="width:${s.pct}%;background:${d.color}"></div></div>
+            <span class="dom-skill-pct">${s.completed}/${s.total}</span>
+         </div>`
+    ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">No skill trees</span>`;
+}
+
+function _buildDomainGoalsHtml(d) {
+    const goals = (d.goals || []).filter(g => g.progress < 100).slice(0, 3);
+    return goals.map(g =>
+        `<div class="dom-goal-row">
+            <span class="dom-goal-title">${g.title}</span>
+            <div class="dom-goal-bar"><div class="dom-goal-fill" style="width:${g.progress}%;background:${d.color}"></div></div>
+            <span class="dom-goal-pct">${g.progress}%</span>
+         </div>`
+    ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">No active goals</span>`;
+}
+
+function _buildDomainBossHtml(d) {
+    const boss = d.weekly_boss;
+    return boss
+        ? `<div class="dom-boss ${boss.completed ? 'dom-boss--done' : ''}">
+               <span class="dom-boss-icon">${boss.completed ? '✅' : '⚔️'}</span>
+               <span class="dom-boss-name">${boss.name}</span>
+               ${!boss.completed ? `<button class="dom-boss-btn" onclick="defeatBoss(${boss.id}, this)">Defeat</button>` : '<span class="dom-boss-defeated">Defeated!</span>'}
+           </div>`
+        : `<span style="font-size:.8rem;color:var(--ink-faint)">No boss this week</span>`;
+}
 
 function buildDomainCard(d) {
     if (d.unlocked === false) {
@@ -2777,7 +2937,7 @@ function buildDomainCard(d) {
              </div>`
         ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">Reach this level to see what it unlocks.</span>`;
 
-        return `<div class="domain-card domain-card--locked" style="--dom-color:${d.color}">
+        return `<div class="domain-card domain-card--locked" style="--dom-color:${d.color}" data-domain="${_escAttr(d.name)}" data-unlocked="0">
             <div class="dom-header">
                 <span class="dom-icon">${d.icon}</span>
                 <div class="dom-title-block">
@@ -2791,57 +2951,9 @@ function buildDomainCard(d) {
         </div>`;
     }
 
-    const pct      = Math.round(d.xp_in_level / 5);  // xp_in_level out of 500
-    const habits   = (d.habits || []).slice(0, 4);
-    const skills   = (d.skill_trees || []);
-    const goals    = (d.goals || []).filter(g => g.progress < 100).slice(0, 3);
-    const boss     = d.weekly_boss;
+    const pct = Math.round(d.xp_in_level / 5);  // xp_in_level out of 500
 
-    const habitPills = habits.map(h =>
-        `<span class="dom-pill ${h.done_today ? 'dom-pill--done' : ''}">${h.done_today ? '✓' : '○'} ${h.name} (${h.streak}🔥)</span>`
-    ).join("") || `<span class="dom-pill dom-pill--empty">No habits linked</span>`;
-
-    const skillBars = skills.map(s =>
-        `<div class="dom-skill-row">
-            <span class="dom-skill-name">${s.label}</span>
-            <div class="dom-skill-bar"><div class="dom-skill-fill" style="width:${s.pct}%;background:${d.color}"></div></div>
-            <span class="dom-skill-pct">${s.completed}/${s.total}</span>
-         </div>`
-    ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">No skill trees</span>`;
-
-    const goalList = goals.map(g =>
-        `<div class="dom-goal-row">
-            <span class="dom-goal-title">${g.title}</span>
-            <div class="dom-goal-bar"><div class="dom-goal-fill" style="width:${g.progress}%;background:${d.color}"></div></div>
-            <span class="dom-goal-pct">${g.progress}%</span>
-         </div>`
-    ).join("") || `<span style="font-size:.8rem;color:var(--ink-faint)">No active goals</span>`;
-
-    const bossHtml = boss
-        ? `<div class="dom-boss ${boss.completed ? 'dom-boss--done' : ''}">
-               <span class="dom-boss-icon">${boss.completed ? '✅' : '⚔️'}</span>
-               <span class="dom-boss-name">${boss.name}</span>
-               ${!boss.completed ? `<button class="dom-boss-btn" onclick="defeatBoss(${boss.id}, this)">Defeat</button>` : '<span class="dom-boss-defeated">Defeated!</span>'}
-           </div>`
-        : `<span style="font-size:.8rem;color:var(--ink-faint)">No boss this week</span>`;
-
-    const perksActive = d.perks_active || [];
-    const perksNext    = d.perks_next || null;
-    const perksHtml = (perksActive.length
-        ? perksActive.map(p =>
-            `<div class="dom-perk dom-perk--active">
-                <span class="dom-perk-icon">${PERK_TYPE_ICONS[p.type] || "✦"}</span>
-                <span>${p.label}</span>
-             </div>`).join("")
-        : `<span style="font-size:.8rem;color:var(--ink-faint)">No perks unlocked yet — keep leveling this domain.</span>`)
-      + (perksNext
-            ? `<div class="dom-perk dom-perk--next">
-                    <span class="dom-perk-icon">🔒</span>
-                    <span>Lv ${perksNext.level}: ${perksNext.label}</span>
-               </div>`
-            : "");
-
-    return `<div class="domain-card" style="--dom-color:${d.color}">
+    return `<div class="domain-card" style="--dom-color:${d.color}" data-domain="${_escAttr(d.name)}" data-unlocked="1">
         <div class="dom-header">
             <span class="dom-icon">${d.icon}</span>
             <div class="dom-title-block">
@@ -2859,20 +2971,95 @@ function buildDomainCard(d) {
         <div class="dom-progress-pct">${d.progress}% quest completion · ${d.active_goals} active goal${d.active_goals !== 1 ? 's' : ''}</div>
 
         <div class="dom-section-label">Domain Perks</div>
-        <div class="dom-perks-list">${perksHtml}</div>
+        <div class="dom-perks-list">${_buildDomainPerksHtml(d)}</div>
 
         <div class="dom-section-label">Habits</div>
-        <div class="dom-pills">${habitPills}</div>
+        <div class="dom-pills">${_buildDomainHabitPillsHtml(d)}</div>
 
         <div class="dom-section-label">Skill Trees</div>
-        ${skillBars}
+        <div class="dom-skill-trees-wrap">${_buildDomainSkillTreesHtml(d)}</div>
 
         <div class="dom-section-label">Active Goals</div>
-        ${goalList}
+        <div class="dom-goals-wrap">${_buildDomainGoalsHtml(d)}</div>
 
         <div class="dom-section-label">This Week's Boss</div>
-        ${bossHtml}
+        <div class="dom-boss-wrap">${_buildDomainBossHtml(d)}</div>
     </div>`;
+}
+
+// ── In-place patching ────────────────────────────────────────
+// Rebuilding every domain card's innerHTML from scratch on every
+// loadDomains() call means the XP bar's CSS width transition never gets to
+// animate -- the browser never sees an "old" width to transition from,
+// since the element itself is brand new each time. renderDomainCards tries
+// to patch existing cards in place instead (updateDomainCardInPlace), and
+// only falls back to rebuilding a card from scratch when its structure
+// actually changed (e.g. a domain just crossed its unlock level).
+function renderDomainCards(container, domains) {
+    const existingCount = container.querySelectorAll(".domain-card").length;
+    if (!container.dataset.initialized || existingCount !== domains.length) {
+        container.innerHTML = domains.map(d => buildDomainCard(d)).join("");
+        container.dataset.initialized = "1";
+        return;
+    }
+    domains.forEach(d => {
+        if (updateDomainCardInPlace(container, d)) return;
+        // Structure changed (lock state flipped) -- swap just this one card.
+        const existing = container.querySelector(`.domain-card[data-domain="${CSS.escape(d.name)}"]`);
+        const wrapper = document.createElement("div");
+        wrapper.innerHTML = buildDomainCard(d).trim();
+        const fresh = wrapper.firstElementChild;
+        if (existing) existing.replaceWith(fresh);
+        else container.appendChild(fresh);
+    });
+}
+
+function updateDomainCardInPlace(container, d) {
+    const el = container.querySelector(`.domain-card[data-domain="${CSS.escape(d.name)}"]`);
+    if (!el) return false;
+
+    const isUnlocked  = d.unlocked !== false;
+    const wasUnlocked = el.dataset.unlocked === "1";
+    if (isUnlocked !== wasUnlocked) return false; // lock state changed -- needs the full locked/unlocked markup swap
+    if (!isUnlocked) return true;                 // locked cards have nothing numeric to animate
+
+    const levelBadge = el.querySelector(".dom-level-badge");
+    if (levelBadge) {
+        const text = `Lv ${d.level}`;
+        if (levelBadge.textContent !== text) {
+            levelBadge.textContent = text;
+            levelBadge.classList.remove("pulse-on-gain");
+            void levelBadge.offsetWidth; // restart the pulse if it fires again quickly
+            levelBadge.classList.add("pulse-on-gain");
+        }
+    }
+
+    const fill = el.querySelector(".dom-xp-bar-fill");
+    if (fill) fill.style.width = `${Math.round(d.xp_in_level / 5)}%`; // the existing CSS transition on width animates this
+
+    const xpText = el.querySelector(".dom-xp-text");
+    if (xpText) xpText.textContent = `${d.xp_in_level}/500 XP · ${d.xp_to_next} to next`;
+
+    const progressPct = el.querySelector(".dom-progress-pct");
+    if (progressPct) progressPct.textContent = `${d.progress}% quest completion · ${d.active_goals} active goal${d.active_goals !== 1 ? 's' : ''}`;
+
+    // These can change in composition, not just a number ticking up (a
+    // habit got linked, a goal finished, a new perk tier reached) -- so
+    // they're refreshed by swapping just that sub-section's innerHTML.
+    // Still far cheaper than rebuilding the whole card, and critically
+    // doesn't touch the XP bar element above, so its transition survives.
+    const perksList = el.querySelector(".dom-perks-list");
+    if (perksList) perksList.innerHTML = _buildDomainPerksHtml(d);
+    const habitPills = el.querySelector(".dom-pills");
+    if (habitPills) habitPills.innerHTML = _buildDomainHabitPillsHtml(d);
+    const skillWrap = el.querySelector(".dom-skill-trees-wrap");
+    if (skillWrap) skillWrap.innerHTML = _buildDomainSkillTreesHtml(d);
+    const goalWrap = el.querySelector(".dom-goals-wrap");
+    if (goalWrap) goalWrap.innerHTML = _buildDomainGoalsHtml(d);
+    const bossWrap = el.querySelector(".dom-boss-wrap");
+    if (bossWrap) bossWrap.innerHTML = _buildDomainBossHtml(d);
+
+    return true;
 }
 
 async function loadActionEngine() {
@@ -3021,7 +3208,10 @@ window.defeatBoss = async function(bossId, btn) {
     btn.textContent = "Processing…";
     try {
         const data = await (await fetch(`/bosses/${bossId}/complete`, { method: "POST" })).json();
-        if (data.xp_earned) showXPFlash(data.xp_earned, data.domain);
+        if (data.xp_earned) {
+            flyXP(btn, data.xp_earned);
+            showXPFlash(data.xp_earned, data.domain);
+        }
         if (data.new_achievements) showAchievementToast(data.new_achievements);
         loadCurrentBosses();
         loadDomains();

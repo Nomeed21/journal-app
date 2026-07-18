@@ -456,5 +456,19 @@ end
 $$;
 
 
+create table if not exists stated_intents (
+  id bigint generated always as identity primary key,
+  normalized_key text unique not null,
+  phrase text not null,
+  category text not null default 'Personal Growth',
+  first_mentioned_at timestamptz not null default now(),
+  last_mentioned_at timestamptz not null default now(),
+  mention_count int not null default 1,
+  source_entry_ids jsonb not null default '[]'::jsonb,
+  resolved boolean not null default false,
+  resolved_at timestamptz
+);
+
+
 -- ────────────────────────────────────────────────────────────
 notify pgrst, 'reload schema';

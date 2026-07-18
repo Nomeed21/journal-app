@@ -2387,6 +2387,65 @@ body {
 .xp-flash { position: fixed; bottom: 4rem; right: 1.5rem; background: var(--accent); color: #fff; padding: .45rem 1rem; border-radius: 999px; font-size: .85rem; font-weight: 700; box-shadow: 0 4px 12px var(--shadow); opacity: 0; transform: translateY(8px); transition: opacity .25s, transform .25s; z-index: 9998; pointer-events: none; }
 .xp-flash.show { opacity: 1; transform: translateY(0); }
 
+/* ============================================
+   Instant-feedback animation primitives
+   Used across quest completion, skill mastery, habit streaks, and the
+   XP HUD so gaining XP/progress *feels* immediate instead of only being
+   visible after the next full section reload.
+   ============================================ */
+
+/* XP flies from the click point toward the sidebar HUD */
+@keyframes xpFlyIn {
+    0%   { transform: translate(0, 0) scale(1);    opacity: 1; }
+    70%  { opacity: 1; }
+    100% { transform: var(--fly-transform, translate(0,0)) scale(.35); opacity: 0; }
+}
+.xp-fly-particle {
+    position: fixed;
+    z-index: 9999;
+    pointer-events: none;
+    font-weight: 800;
+    font-size: .85rem;
+    color: var(--accent-deep);
+    background: var(--paper);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: .15rem .55rem;
+    box-shadow: 0 2px 8px var(--shadow);
+    animation: xpFlyIn .65s cubic-bezier(.2,.7,.3,1) forwards;
+}
+
+/* Bar "gulp" when it absorbs XP on arrival */
+@keyframes barPulse {
+    0%   { filter: brightness(1); }
+    45%  { filter: brightness(1.6); }
+    100% { filter: brightness(1); }
+}
+.pulse-on-gain { animation: barPulse .5s ease; }
+
+/* Skill node / card pulse ring — fires the instant XP lands on it */
+@keyframes pulseRing {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+    100% { box-shadow: 0 0 0 16px transparent; }
+}
+.xp-pulse { animation: pulseRing .7s ease; }
+
+/* Streak flame grows for a beat when a streak count goes up */
+@keyframes flameGrow {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.45) rotate(-4deg); }
+    100% { transform: scale(1); }
+}
+.flame-grow { display: inline-block; animation: flameGrow .5s ease; }
+
+/* Quest card instant "done" flash, shown the moment Complete is clicked —
+   before the network response / section re-sort has even happened. */
+@keyframes cardDoneFlash {
+    0%   { background: color-mix(in srgb, #4caf50 18%, var(--paper)); }
+    100% { background: var(--paper); }
+}
+.qb-card--flash-done { animation: cardDoneFlash 1s ease; pointer-events: none; }
+
 /* XP HUD sidebar */
 .xp-hud { margin-bottom: .75rem; }
 .xp-hud-level { font-size: .75rem; font-weight: 700; color: var(--accent-deep); margin-bottom: .2rem; }

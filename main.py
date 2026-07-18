@@ -943,6 +943,7 @@ def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
     entry_id = saved_row["id"]
     if used_fast_path:
         background_tasks.add_task(_backfill_entry_embedding, entry_id, combined)
+    background_tasks.add_task(_record_stated_intents, entry_id, combined)
 
     # Grant XP for journaling (into Personal Growth)
     xp_map = {"morning": 15, "night": 20, "free": 10}
@@ -3412,6 +3413,156 @@ def _followthrough_by_category(lookback_days: int = 60) -> dict:
         for cat, v in by_cat.items()
     }
 
+def _count_restart_cycles(dates_desc: list[str], gap_threshold_days: int = 10) -> dict:
+    """
+    How many times a habit's quest-derived activity went quiet for
+    gap_threshold_days+ and then resumed. A high cycle count tells a
+    different story than "streak is broken right now" -- it's a pattern of
+    repeated abandonment-and-return, worth naming explicitly rather than
+    only ever showing the current streak number.
+    """
+    if len(dates_desc) < 2:
+        return {"cycles": 0, "avg_gap_days": 0, "longest_gap_days": 0}
+    dates_asc = sorted(dates_desc)
+    gaps = []
+    for i in range(1, len(dates_asc)):
+        a = datetime.strptime(dates_asc[i - 1], "%Y-%m-%d")
+        b = datetime.strptime(dates_asc[i], "%Y-%m-%d")
+        gap = (b - a).days
+        if gap >= gap_threshold_days:
+            gaps.append(gap)
+    return {
+        "cycles":          len(gaps),
+        "avg_gap_days":    round(sum(gaps) / len(gaps)) if gaps else 0,
+        "longest_gap_days": max(gaps) if gaps else 0,
+    }
+
+# ---------------------------------------------------------------------------
+# Stated Intents — things the person says they want/intend/keep meaning to
+# do, distinct from _extract_journal_quest_candidates (which pulls concrete
+# tasks for TODAY and is thrown away if not confirmed). This tracks loose
+# aspirations across entries so a repeated, unactioned wish ("I keep meaning
+# to get back into guitar") can surface weeks later as its own pattern,
+# instead of only ever living in whichever single entry mentioned it.
+# ---------------------------------------------------------------------------
+
+def _normalize_intent_key(phrase: str) -> str:
+    import re
+    key = re.sub(r'[^a-z0-9 ]', '', (phrase or "").lower()).strip()
+    return re.sub(r'\s+', ' ', key)[:120]
+
+def _extract_stated_intents(content: str) -> list[dict]:
+    """AI extraction pass for loose aspirations in a journal entry."""
+    prompt = f"""Extract STATED ASPIRATIONS from this journal entry -- things
+the person says they want, intend, or keep meaning to do, phrased as a wish
+rather than a concrete task for today.
+
+Entry: "{content[:600]}"
+
+Reply ONLY as a JSON array (empty array if none):
+[{{"phrase": "short paraphrase, under 12 words", "category": "one of: Computer Science, Health, Music, Relationships, Personal Growth, Finance, Creativity"}}]
+
+No markdown, pure JSON only."""
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3, max_tokens=250,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
+        parsed = _json.loads(raw.strip())
+        return parsed if isinstance(parsed, list) else []
+    except Exception as e:
+        logger.exception("_extract_stated_intents failed: %s", e)
+        return []
+
+def _record_stated_intents(entry_id: int, content: str):
+    """
+    Background task, same pattern as _backfill_entry_embedding -- called
+    after the entry-save response has already gone out. Upserts by
+    normalized phrase (stated_intents.normalized_key) so a repeated mention
+    across entries accumulates mention_count instead of creating duplicate
+    rows, and re-mentioning an intent flips `resolved` back to False since
+    it's evidently still on the person's mind.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    for intent in _extract_stated_intents(content):
+        phrase = (intent.get("phrase") or "").strip()
+        key = _normalize_intent_key(phrase)
+        if not key:
+            continue
+        try:
+            existing = supabase.table("stated_intents").select("*").eq("normalized_key", key).execute()
+            if existing.data:
+                row = existing.data[0]
+                ids = row.get("source_entry_ids") or []
+                if entry_id not in ids:
+                    ids.append(entry_id)
+                supabase.table("stated_intents").update({
+                    "last_mentioned_at": now,
+                    "mention_count":     row.get("mention_count", 1) + 1,
+                    "source_entry_ids":  _json.dumps(ids),
+                    "resolved":          False,
+                }).eq("normalized_key", key).execute()
+            else:
+                supabase.table("stated_intents").insert({
+                    "normalized_key":    key,
+                    "phrase":            phrase,
+                    "category":          intent.get("category", "Personal Growth"),
+                    "first_mentioned_at": now,
+                    "last_mentioned_at": now,
+                    "mention_count":     1,
+                    "source_entry_ids":  _json.dumps([entry_id]),
+                    "resolved":          False,
+                }).execute()
+        except Exception as e:
+            logger.exception("_record_stated_intents upsert failed for '%s': %s", phrase, e)
+
+def _resolve_stated_intents():
+    """
+    An open intent resolves once there's xp_ledger activity in its category
+    after it was first mentioned -- mirrors _resolve_pending_recommendations.
+    """
+    try:
+        open_intents = supabase.table("stated_intents").select("*").eq("resolved", False).execute().data
+        for intent in open_intents:
+            activity = (
+                supabase.table("xp_ledger")
+                .select("id")
+                .eq("category", intent["category"])
+                .gte("earned_at", intent["first_mentioned_at"])
+                .limit(1)
+                .execute()
+                .data
+            )
+            if activity:
+                supabase.table("stated_intents").update({
+                    "resolved":    True,
+                    "resolved_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", intent["id"]).execute()
+    except Exception as e:
+        logger.exception("_resolve_stated_intents failed: %s", e)
+
+def _stale_stated_intents(min_mentions: int = 2, min_age_days: int = 14) -> list[dict]:
+    """Unresolved intents mentioned enough times, long enough ago, to be
+    worth surfacing as a pattern rather than noise from a single entry."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
+    try:
+        return (
+            supabase.table("stated_intents")
+            .select("*")
+            .eq("resolved", False)
+            .gte("mention_count", min_mentions)
+            .lte("first_mentioned_at", cutoff)
+            .order("mention_count", desc=True)
+            .execute()
+            .data
+        )
+    except Exception:
+        return []
+
 def _mine_weekly_patterns():
     """
     Scans several weeks of history and writes/refreshes durable rows in
@@ -3508,7 +3659,55 @@ def _mine_weekly_patterns():
     except Exception as e:
         logger.exception("_mine_weekly_patterns mood correlation failed: %s", e)
 
-    # 4. Recommendation follow-through, folded in as patterns too, so a
+    # 4. Habit restart cycles -- repeated quiet-then-resume patterns, from
+    # the same quest-derived date lists _compute_streaks_raw already reads.
+    # This is what lets the coach say "you've abandoned guitar five times"
+    # instead of only ever reporting today's streak in isolation.
+    try:
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+        for p in profiles:
+            dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+            if len(dates) < 4:
+                continue
+            cyc = _count_restart_cycles(dates)
+            if cyc["cycles"] >= 2:
+                patterns.append({
+                    "pattern_key": f"restart_cycles:{p['name']}",
+                    "category":    p.get("domain") or p.get("skill_tree") or "Personal Growth",
+                    "description": (
+                        f"'{p['name']}' has stalled and restarted {cyc['cycles']} times, "
+                        f"going quiet for {cyc['avg_gap_days']} days on average before picking back up "
+                        f"(longest gap: {cyc['longest_gap_days']} days)."
+                    ),
+                    "confidence": min(0.5 + cyc["cycles"] * 0.1, 0.9),
+                })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns restart cycles failed: %s", e)
+
+    # 5. Stated-but-unactioned intents -- loose aspirations repeated across
+    # journal entries with no matching category activity since. This is
+    # what lets the coach say "three weeks ago you kept saying you wanted
+    # to study algorithms" instead of only reacting to today's entry.
+    try:
+        _resolve_stated_intents()
+        now_dt = datetime.now(timezone.utc)
+        for intent in _stale_stated_intents():
+            first_dt   = datetime.fromisoformat(intent["first_mentioned_at"].replace("Z", "+00:00"))
+            weeks_ago  = max(1, (now_dt - first_dt).days // 7)
+            patterns.append({
+                "pattern_key": f"stated_intent:{intent['normalized_key']}",
+                "category":    intent["category"],
+                "description": (
+                    f"You've mentioned wanting to \"{intent['phrase']}\" {intent['mention_count']} times "
+                    f"since {intent['first_mentioned_at'][:10]} ({weeks_ago}w ago), "
+                    f"with no {intent['category']} activity since."
+                ),
+                "confidence": min(0.4 + intent["mention_count"] * 0.1, 0.9),
+            })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns stated intents failed: %s", e)
+
+    # 6. Recommendation follow-through, folded in as patterns too, so a
     # persistently-ignored or persistently-followed nudge category shows
     # up alongside the other observations rather than a separate stat.
     for cat, v in _followthrough_by_category().items():
