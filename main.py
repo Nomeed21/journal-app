@@ -3739,6 +3739,8 @@ def _discover_time_of_day_peaks(min_total_entries: int = 15, min_bin_entries: in
                         f"({_evidence_strength(best_n)})."
                     ),
                     "category": "Personal Growth",
+                    # Trackable value -- the peak-window average itself.
+                    "value":    round(best_avg, 2),
                 })
     except Exception as e:
         logger.exception("_discover_time_of_day_peaks failed: %s", e)
@@ -3779,6 +3781,9 @@ def _discover_category_completion_rates(min_total: int = 8, high_threshold: floa
                 "title":    f"{cat} quests have a {round(rate*100)}% completion rate",
                 "detail":   f"Based on {total} quests tracked so far ({_evidence_strength(total)}).",
                 "category": cat,
+                # Trackable value for _record_discovery_snapshot / _discovery_delta
+                # -- the percentage itself, so a later run can say it moved.
+                "value":    round(rate * 100, 1),
             })
     except Exception as e:
         logger.exception("_discover_category_completion_rates failed: %s", e)
@@ -3828,10 +3833,139 @@ def _discover_mood_after_habits(min_sample: int = 8, margin: float = 0.4) -> lis
                     f"· {len(with_m)} vs {len(without_m)} days ({_evidence_strength(weaker_side)})."
                 ),
                 "category": p.get("domain") or p.get("skill_tree") or "Personal Growth",
+                # Trackable value -- the mood delta itself (with minus without).
+                "value":    round(diff, 2),
             })
     except Exception as e:
         logger.exception("_discover_mood_after_habits failed: %s", e)
     return cards
+
+# ---------------------------------------------------------------------------
+# Discovery persistence — snapshot-on-change history + deltas
+#
+# Every discovery card above used to be pure recomputation: run the query,
+# derive a fact, hand it to the frontend, forget it ever happened. That's
+# fine for "what's true right now" but it means the feed can never say
+# "this got better" or "this got worse" — there's nothing to compare
+# against. This section adds a `discoveries` table (discovery_id, kind,
+# category, value, snapshot jsonb, recorded_at) and writes a new row only
+# when a card's tracked `value` actually differs from the last one stored
+# for that discovery_id — snapshot-on-change, not snapshot-on-every-poll,
+# so a stable fact doesn't flood the table with identical daily rows.
+# Not every card has a single trackable number (habit_inactive is a
+# point-in-time gap, not a metric that trends) — those are skipped here
+# and just never accumulate history, which is fine.
+# ---------------------------------------------------------------------------
+
+DISCOVERY_DELTA_LOOKBACK_DAYS = 30  # "this month" — matches Monthly Review's cadence
+DISCOVERY_DELTA_MIN_MOVE      = 1.0  # ignore sub-1-point noise, not a real move
+
+def _record_discovery_snapshot(card: dict):
+    """Write a new discoveries row for this card iff its tracked value has
+    changed since the last row for the same discovery_id (or there is no
+    prior row). Silently skips cards with no trackable `value`."""
+    value = card.get("value")
+    if value is None:
+        return
+    try:
+        latest = (
+            supabase.table("discoveries")
+            .select("value")
+            .eq("discovery_id", card["id"])
+            .order("recorded_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if latest and latest[0]["value"] == value:
+            return  # unchanged since the last snapshot -- nothing new to write
+        supabase.table("discoveries").insert({
+            "discovery_id": card["id"],
+            "kind":         card.get("kind", ""),
+            "category":     card.get("category", ""),
+            "value":        value,
+            "snapshot":     _json.dumps({"title": card.get("title", ""), "detail": card.get("detail", "")}),
+            "recorded_at":  datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception as e:
+        logger.exception("_record_discovery_snapshot failed for %s: %s", card.get("id"), e)
+
+def _discovery_delta(discovery_id: str, current_value: float,
+                      lookback_days: int = DISCOVERY_DELTA_LOOKBACK_DAYS) -> Optional[dict]:
+    """
+    Compares current_value against the closest snapshot at or before
+    `lookback_days` ago and returns a delta description if it moved by
+    more than DISCOVERY_DELTA_MIN_MOVE. This is the entire point of
+    persisting snapshots: "dropped from 94% to 71% this month" can only
+    exist by looking at what was actually written down a month ago, not
+    by recomputing the present moment over and over.
+    """
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        prior = (
+            supabase.table("discoveries")
+            .select("value, recorded_at")
+            .eq("discovery_id", discovery_id)
+            .lte("recorded_at", cutoff)
+            .order("recorded_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if not prior:
+            return None
+        prior_value = prior[0]["value"]
+        diff = round(current_value - prior_value, 2)
+        if abs(diff) < DISCOVERY_DELTA_MIN_MOVE:
+            return None
+        direction = "risen" if diff > 0 else "dropped"
+        return {
+            "prior_value":   prior_value,
+            "current_value": current_value,
+            "delta":         diff,
+            "direction":     direction,
+            "since_days":    lookback_days,
+            "description":   f"{direction} from {prior_value} to {current_value} over the past {lookback_days} days",
+        }
+    except Exception as e:
+        logger.exception("_discovery_delta failed for %s: %s", discovery_id, e)
+        return None
+
+def _get_discoveries_for_month(y: int, m: int) -> list[dict]:
+    """Real discovered facts actually recorded during this month, pulled
+    from persisted history rather than re-derived live -- lets Monthly
+    Review cite genuine discovered patterns (a completion rate that moved,
+    a mood-habit correlation that emerged) instead of the LLM re-deriving
+    trend language from a bare stats dict every time."""
+    try:
+        start = datetime(y, m, 1, tzinfo=timezone.utc)
+        end   = datetime(y + 1, 1, 1, tzinfo=timezone.utc) if m == 12 else datetime(y, m + 1, 1, tzinfo=timezone.utc)
+        rows = (
+            supabase.table("discoveries")
+            .select("discovery_id, kind, category, value, snapshot, recorded_at")
+            .gte("recorded_at", start.isoformat())
+            .lt("recorded_at", end.isoformat())
+            .order("recorded_at")
+            .execute()
+            .data
+        )
+        out = []
+        for r in rows:
+            snap = r.get("snapshot")
+            if isinstance(snap, str):
+                try:
+                    snap = _json.loads(snap)
+                except Exception:
+                    snap = {}
+            out.append({
+                "date":  (r.get("recorded_at") or "")[:10],
+                "title": (snap or {}).get("title", ""),
+                "value": r.get("value"),
+            })
+        return out
+    except Exception as e:
+        logger.exception("_get_discoveries_for_month failed: %s", e)
+        return []
 
 def _build_discovery_cards() -> list[dict]:
     cards = []
@@ -3839,6 +3973,19 @@ def _build_discovery_cards() -> list[dict]:
     cards += _discover_time_of_day_peaks()
     cards += _discover_category_completion_rates()
     cards += _discover_mood_after_habits()
+
+    # Persist + enrich with trend deltas. This runs at most as often as
+    # GET /discoveries itself is allowed to recompute (throttled by
+    # _DISCOVERY_CACHE_TTL below), which doubles as a natural write
+    # throttle on top of the snapshot-on-change dedup inside
+    # _record_discovery_snapshot.
+    for c in cards:
+        _record_discovery_snapshot(c)
+        if c.get("value") is not None:
+            delta = _discovery_delta(c["id"], c["value"])
+            if delta:
+                c["delta"] = delta
+                c["detail"] = f"{c.get('detail', '')} · {delta['description']}.".strip(" ·")
     return cards
 
 def _award_first_discovery_achievement() -> list[dict]:
@@ -3868,23 +4015,99 @@ def _award_first_discovery_achievement() -> list[dict]:
         logger.exception("_award_first_discovery_achievement failed: %s", e)
         return []
 
+@app.get("/discoveries/history/{discovery_id}")
+def get_discovery_history(discovery_id: str, days: int = 90):
+    """Full snapshot history for one discovery (e.g. 'completion_rate:Study'),
+    the raw material behind the single before/after delta baked into that
+    card's detail text. A future frontend could chart this over time rather
+    than only ever showing the latest before/after comparison."""
+    try:
+        start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = (
+            supabase.table("discoveries")
+            .select("value, recorded_at")
+            .eq("discovery_id", discovery_id)
+            .gte("recorded_at", start)
+            .order("recorded_at")
+            .execute()
+            .data
+        )
+    except Exception:
+        rows = []
+    return {"discovery_id": discovery_id, "history": rows}
+
+def _get_cached_discovery_cards() -> list[dict]:
+    """
+    Shared TTL cache in front of _build_discovery_cards(), used by both
+    GET /discoveries (the visible feed on the Journal page) and
+    build_discovery_context() below (the coaching-prompt version) -- so
+    a chat message or proactive nudge doesn't trigger its own full
+    discovery recomputation on top of whatever the Journal page already
+    triggered a moment ago. Same cache, same TTL, one source of truth for
+    "what does the discovery feed currently say."
+    """
+    now = datetime.now(timezone.utc)
+    cached_at = _discovery_cache["at"]
+    if _discovery_cache["data"] is not None and cached_at and (now - cached_at).total_seconds() < _DISCOVERY_CACHE_TTL:
+        return _discovery_cache["data"]
+    cards = db_retry(_build_discovery_cards)
+    _discovery_cache["data"] = cards
+    _discovery_cache["at"] = now
+    return cards
+
+def build_discovery_context() -> str:
+    """
+    Text block injected into coaching prompts (chat, proactive nudges,
+    action engine, ai-insight) so the coach can spontaneously bring up a
+    discovery-feed fact in conversation -- "you peak 9-11am, want to move
+    tomorrow's algorithms quest there?" -- instead of that fact only ever
+    reaching the user if they happen to open the Journal page and notice
+    the card. Deliberately kept as its own labeled block rather than
+    folded into build_pattern_context(): coach_patterns is slow-moving
+    LLM-mined narrative (refreshed every few hours), discoveries is
+    fast-moving pure-stat computation (refreshed every ~60s) -- different
+    provenance and different refresh cadence, so they stay two systems
+    that both now reach the same prompts rather than merging into one.
+    """
+    try:
+        cards = _get_cached_discovery_cards()
+    except Exception as e:
+        logger.exception("build_discovery_context failed: %s", e)
+        cards = []
+    if not cards:
+        return "DISCOVERY FEED: nothing surfaced yet -- don't fabricate a pattern."
+    lines = []
+    for c in cards[:6]:
+        line = f"- {c.get('title', '')}"
+        if c.get("detail"):
+            line += f" — {c['detail']}"
+        lines.append(line)
+    return (
+        "DISCOVERY FEED (small factual patterns detected directly from the data, refreshed "
+        "continuously -- these are things YOU noticed, not things the user has already seen; if one "
+        "is genuinely relevant to what they're asking about or struggling with right now, bring it up "
+        "naturally and specifically, the way a friend would mention something they noticed -- don't "
+        "read the list aloud, and don't force one in if none actually fits):\n" + "\n".join(lines)
+    )
+
 @app.get("/discoveries")
 def get_discoveries():
     """No-button auto-discovery feed: small factual pattern cards computed
     live from existing habit/entry/quest data, no LLM calls involved.
     Cached briefly since this is meant to be polled on every page load
-    rather than triggered by user action. The first time any card is ever
+    rather than triggered by user action. Each card with a trackable value
+    is snapshotted into the `discoveries` table (snapshot-on-change, see
+    _record_discovery_snapshot) and enriched with a delta against ~30 days
+    ago when one exists (see _discovery_delta) -- so a completion rate that
+    slid from 94% to 71% actually gets said out loud instead of just
+    showing today's number in isolation. The first time any card is ever
     surfaced, grants the one-time "Self-Aware" achievement (+XP) -- see
     _award_first_discovery_achievement -- so Discoveries feeds the XP
-    ledger like every other system instead of being the sole exception."""
-    now = datetime.now(timezone.utc)
-    cached_at = _discovery_cache["at"]
-    if _discovery_cache["data"] is not None and cached_at and (now - cached_at).total_seconds() < _DISCOVERY_CACHE_TTL:
-        cards = _discovery_cache["data"]
-    else:
-        cards = db_retry(_build_discovery_cards)
-        _discovery_cache["data"] = cards
-        _discovery_cache["at"] = now
+    ledger like every other system instead of being the sole exception.
+    These same cards also reach the AI coach directly -- see
+    build_discovery_context() -- so this feed isn't the only way they
+    surface anymore."""
+    cards = _get_cached_discovery_cards()
     new_achievements = _award_first_discovery_achievement() if cards else []
     return {"cards": cards, "new_achievements": new_achievements}
 
@@ -3938,11 +4161,14 @@ Recent average mood (last 7 entries): {avg_mood_7}/5
 
 {build_pattern_context()}
 
+{build_discovery_context()}
+
 Write ONE short, warm, direct coaching message (max 60 words) that:
 - Acknowledges the most urgent issue
 - Gives one concrete action to take today
 - Sounds like a caring friend, not a dashboard
 - If a long-horizon pattern shows a category has low follow-through, prefer steering toward a different one instead
+- If nothing in the alerts is urgent enough on its own but a discovery-feed fact is unusually relevant, you may lead with that instead
 
 Do not list all the alerts. Pick the most important one and speak to it."""
 
@@ -4156,9 +4382,13 @@ Active goals:
 
 {build_pattern_context()}
 
+{build_discovery_context()}
+
 Prescribe ONE specific action (5-30 min). Be specific. Match it to an existing quest if possible.
 If a long-horizon pattern shows low follow-through for a category, avoid prescribing more of that same
 category unless nothing else fits — lean toward categories that are known to land.
+If a discovery-feed fact points at a better time or approach for the action (e.g. a focus/energy peak
+window), let it shape "reason" rather than ignoring it.
 
 Reply ONLY in this JSON:
 {{
@@ -4354,6 +4584,7 @@ def build_coach_context(message: str) -> str:
         f"HABIT TRACKER:\n{build_habit_block()}",
         f"RISK ALERTS:\n" + ("\n".join(risk_lines) if risk_lines else "No active risks."),
         build_pattern_context(),
+        build_discovery_context(),
         f"RECENT ENTRIES (last {RECENT_DAYS} days):\n{build_recent_text_block(today_iso)}",
         f"OLDER HISTORY (weekly averages):\n{build_weekly_summary_block(all_light)}",
     ]
@@ -4370,7 +4601,8 @@ SYSTEM_PROMPT_BASE = (
     "Your name is LiAInne. You are a warm but honest personal coach. "
     "You are not a therapist, doctor, or crisis counselor. "
     "You have access to the user's full journal context including trend stats, "
-    "habit streaks, goal progress, risk alerts, and past entries. "
+    "habit streaks, goal progress, risk alerts, past entries, and a discovery feed of small "
+    "factual patterns detected directly from their data. "
     "Use this privately — do not read it back like a report.\n\n"
     "Before answering, silently decide: (1) What is the real problem? "
     "(2) What pattern or detail from their journal is most relevant? "
@@ -4379,6 +4611,13 @@ SYSTEM_PROMPT_BASE = (
     "one small action. Keep it to 2-4 sentences unless they ask for more. "
     "If the context includes long-horizon patterns, weigh them over any single day's data — "
     "and if a pattern shows low follow-through for a category, don't keep pushing that same category. "
+    "DISCOVERY FEED: if it contains a fact that's genuinely relevant to what the user is asking about "
+    "or currently working on, bring it up on your own even if they didn't ask — e.g. if they mention "
+    "wanting to tackle something hard and the feed shows a focus/energy peak window, suggest scheduling "
+    "it there. This is the one part of your context you should volunteer proactively rather than only "
+    "drawing on when asked; everything else stays background unless it's directly relevant. Don't force "
+    "one in in every reply, and never claim it as something the user already knows or has seen — treat "
+    "it as something you personally noticed. "
     "Sound like a thoughtful friend who pays attention — warm, direct, concise. "
     "Never use bullet points unless they ask. "
     "If risk alerts are present, weave the most urgent one into your response naturally.\n\n"
@@ -4626,6 +4865,8 @@ Stats: {stats_for_prompt}
 
 {build_pattern_context()}
 
+{build_discovery_context()}
+
 Write:
 1. One observation (what you notice)
 2. One recommendation (what to do about it)
@@ -4634,8 +4875,8 @@ Rules: Max 80 words. Personal and thoughtful. No statistics listing. No slopes.
 Do NOT mention habit streaks at risk, stagnation, or "keep momentum" warnings —
 those are already covered by a separate Coach Alert elsewhere on this page,
 and repeating them here is redundant. Draw your observation from mood/energy/
-focus trends, best day, XP/level progress, or a long-horizon pattern above instead.
-If a pattern shows a category has low follow-through, don't recommend more of it.
+focus trends, best day, XP/level progress, a long-horizon pattern, or a discovery-feed
+fact above instead. If a pattern shows a category has low follow-through, don't recommend more of it.
 If level >= 5, acknowledge their progress warmly."""
 
     response = groq_client.chat.completions.create(
@@ -4742,6 +4983,11 @@ def _compute_month_stats(y: int, m: int) -> Optional[dict]:
         "total_xp": total_xp, "best_category": best_cat,
         "stalled_categories": stale_cats,
         "achievements_this_month": achievements,
+        # Real discovered facts actually recorded during this month (see
+        # _get_discoveries_for_month) — persisted history the review prompt
+        # can cite directly, rather than the LLM re-deriving "trends" from
+        # this same live stats dict every time it's asked for a review.
+        "discoveries_this_month": _get_discoveries_for_month(y, m),
         "_entries": entries,  # internal — used to build the prompt, stripped before response
     }
 
@@ -4787,6 +5033,14 @@ def monthly_review(year: Optional[int] = None, month: Optional[int] = None, forc
     prompt = f"""You are LiAInne. Create a monthly review for {month_label}.
 
 Context: {context}
+
+The "discoveries_this_month" list inside that context is not a guess — each
+entry is a fact that was actually detected and persisted on the date shown
+(a completion rate, a mood/habit correlation, a time-of-day peak), including
+any that moved noticeably since the prior snapshot. Prefer citing those over
+re-deriving your own trend language from the raw stats, and if one shows a
+real shift (e.g. a completion rate that rose or fell), name it specifically
+in Patterns rather than a generic "stay consistent" observation.
 
 Write using exactly these sections:
 ## Wins

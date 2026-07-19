@@ -469,6 +469,35 @@ create table if not exists stated_intents (
   resolved_at timestamptz
 );
 
+-- ────────────────────────────────────────────────────────────
+-- Discovery persistence — snapshot-on-change history for the
+-- auto-discovery feed (see _record_discovery_snapshot /
+-- _discovery_delta / _get_discoveries_for_month in main.py)
+-- ────────────────────────────────────────────────────────────
 
+create table if not exists discoveries (
+    id            bigint generated always as identity primary key,
+    discovery_id  text    not null,          -- e.g. 'completion_rate:Study', 'peak:mood', 'mood_after:Meditation'
+    kind          text    not null default '',  -- category_completion_rate | time_of_day_peak | mood_after_habit
+    category      text    not null default '',
+    value         numeric not null,          -- the single trackable number for this discovery
+    snapshot      jsonb   default '{}',      -- {"title": ..., "detail": ...} at the time this was recorded
+    recorded_at   timestamptz default now()
+    -- deliberately no unique constraint: this table accumulates history,
+    -- one row per change, not one row per discovery_id.
+);
+
+create index if not exists idx_discoveries_id_time on discoveries(discovery_id, recorded_at desc);
+create index if not exists idx_discoveries_recorded_at on discoveries(recorded_at);
+
+-- No RLS: matches xp_ledger, board_quests, coach_recommendations,
+-- coach_patterns, stated_intents, etc. — every table added since the
+-- service-role-only backend was in place skips RLS entirely, since
+-- service_role bypasses it regardless. Only the handful of tables that
+-- predate that pattern (quests, habit_profiles, habit_recovery_tokens_v2,
+-- habit_synergies) have it enabled, and only because it was already
+-- turned on before anyone noticed it doesn't do anything for this app.
+
+notify pgrst, 'reload schema';
 -- ────────────────────────────────────────────────────────────
 notify pgrst, 'reload schema';
