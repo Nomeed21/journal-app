@@ -943,7 +943,6 @@ def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
     entry_id = saved_row["id"]
     if used_fast_path:
         background_tasks.add_task(_backfill_entry_embedding, entry_id, combined)
-    background_tasks.add_task(_record_stated_intents, entry_id, combined)
 
     # Grant XP for journaling (into Personal Growth)
     xp_map = {"morning": 15, "night": 20, "free": 10}
@@ -3413,156 +3412,6 @@ def _followthrough_by_category(lookback_days: int = 60) -> dict:
         for cat, v in by_cat.items()
     }
 
-def _count_restart_cycles(dates_desc: list[str], gap_threshold_days: int = 10) -> dict:
-    """
-    How many times a habit's quest-derived activity went quiet for
-    gap_threshold_days+ and then resumed. A high cycle count tells a
-    different story than "streak is broken right now" -- it's a pattern of
-    repeated abandonment-and-return, worth naming explicitly rather than
-    only ever showing the current streak number.
-    """
-    if len(dates_desc) < 2:
-        return {"cycles": 0, "avg_gap_days": 0, "longest_gap_days": 0}
-    dates_asc = sorted(dates_desc)
-    gaps = []
-    for i in range(1, len(dates_asc)):
-        a = datetime.strptime(dates_asc[i - 1], "%Y-%m-%d")
-        b = datetime.strptime(dates_asc[i], "%Y-%m-%d")
-        gap = (b - a).days
-        if gap >= gap_threshold_days:
-            gaps.append(gap)
-    return {
-        "cycles":          len(gaps),
-        "avg_gap_days":    round(sum(gaps) / len(gaps)) if gaps else 0,
-        "longest_gap_days": max(gaps) if gaps else 0,
-    }
-
-# ---------------------------------------------------------------------------
-# Stated Intents — things the person says they want/intend/keep meaning to
-# do, distinct from _extract_journal_quest_candidates (which pulls concrete
-# tasks for TODAY and is thrown away if not confirmed). This tracks loose
-# aspirations across entries so a repeated, unactioned wish ("I keep meaning
-# to get back into guitar") can surface weeks later as its own pattern,
-# instead of only ever living in whichever single entry mentioned it.
-# ---------------------------------------------------------------------------
-
-def _normalize_intent_key(phrase: str) -> str:
-    import re
-    key = re.sub(r'[^a-z0-9 ]', '', (phrase or "").lower()).strip()
-    return re.sub(r'\s+', ' ', key)[:120]
-
-def _extract_stated_intents(content: str) -> list[dict]:
-    """AI extraction pass for loose aspirations in a journal entry."""
-    prompt = f"""Extract STATED ASPIRATIONS from this journal entry -- things
-the person says they want, intend, or keep meaning to do, phrased as a wish
-rather than a concrete task for today.
-
-Entry: "{content[:600]}"
-
-Reply ONLY as a JSON array (empty array if none):
-[{{"phrase": "short paraphrase, under 12 words", "category": "one of: Computer Science, Health, Music, Relationships, Personal Growth, Finance, Creativity"}}]
-
-No markdown, pure JSON only."""
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3, max_tokens=250,
-        )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
-        parsed = _json.loads(raw.strip())
-        return parsed if isinstance(parsed, list) else []
-    except Exception as e:
-        logger.exception("_extract_stated_intents failed: %s", e)
-        return []
-
-def _record_stated_intents(entry_id: int, content: str):
-    """
-    Background task, same pattern as _backfill_entry_embedding -- called
-    after the entry-save response has already gone out. Upserts by
-    normalized phrase (stated_intents.normalized_key) so a repeated mention
-    across entries accumulates mention_count instead of creating duplicate
-    rows, and re-mentioning an intent flips `resolved` back to False since
-    it's evidently still on the person's mind.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    for intent in _extract_stated_intents(content):
-        phrase = (intent.get("phrase") or "").strip()
-        key = _normalize_intent_key(phrase)
-        if not key:
-            continue
-        try:
-            existing = supabase.table("stated_intents").select("*").eq("normalized_key", key).execute()
-            if existing.data:
-                row = existing.data[0]
-                ids = row.get("source_entry_ids") or []
-                if entry_id not in ids:
-                    ids.append(entry_id)
-                supabase.table("stated_intents").update({
-                    "last_mentioned_at": now,
-                    "mention_count":     row.get("mention_count", 1) + 1,
-                    "source_entry_ids":  _json.dumps(ids),
-                    "resolved":          False,
-                }).eq("normalized_key", key).execute()
-            else:
-                supabase.table("stated_intents").insert({
-                    "normalized_key":    key,
-                    "phrase":            phrase,
-                    "category":          intent.get("category", "Personal Growth"),
-                    "first_mentioned_at": now,
-                    "last_mentioned_at": now,
-                    "mention_count":     1,
-                    "source_entry_ids":  _json.dumps([entry_id]),
-                    "resolved":          False,
-                }).execute()
-        except Exception as e:
-            logger.exception("_record_stated_intents upsert failed for '%s': %s", phrase, e)
-
-def _resolve_stated_intents():
-    """
-    An open intent resolves once there's xp_ledger activity in its category
-    after it was first mentioned -- mirrors _resolve_pending_recommendations.
-    """
-    try:
-        open_intents = supabase.table("stated_intents").select("*").eq("resolved", False).execute().data
-        for intent in open_intents:
-            activity = (
-                supabase.table("xp_ledger")
-                .select("id")
-                .eq("category", intent["category"])
-                .gte("earned_at", intent["first_mentioned_at"])
-                .limit(1)
-                .execute()
-                .data
-            )
-            if activity:
-                supabase.table("stated_intents").update({
-                    "resolved":    True,
-                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", intent["id"]).execute()
-    except Exception as e:
-        logger.exception("_resolve_stated_intents failed: %s", e)
-
-def _stale_stated_intents(min_mentions: int = 2, min_age_days: int = 14) -> list[dict]:
-    """Unresolved intents mentioned enough times, long enough ago, to be
-    worth surfacing as a pattern rather than noise from a single entry."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
-    try:
-        return (
-            supabase.table("stated_intents")
-            .select("*")
-            .eq("resolved", False)
-            .gte("mention_count", min_mentions)
-            .lte("first_mentioned_at", cutoff)
-            .order("mention_count", desc=True)
-            .execute()
-            .data
-        )
-    except Exception:
-        return []
-
 def _mine_weekly_patterns():
     """
     Scans several weeks of history and writes/refreshes durable rows in
@@ -3659,55 +3508,7 @@ def _mine_weekly_patterns():
     except Exception as e:
         logger.exception("_mine_weekly_patterns mood correlation failed: %s", e)
 
-    # 4. Habit restart cycles -- repeated quiet-then-resume patterns, from
-    # the same quest-derived date lists _compute_streaks_raw already reads.
-    # This is what lets the coach say "you've abandoned guitar five times"
-    # instead of only ever reporting today's streak in isolation.
-    try:
-        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
-        for p in profiles:
-            dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
-            if len(dates) < 4:
-                continue
-            cyc = _count_restart_cycles(dates)
-            if cyc["cycles"] >= 2:
-                patterns.append({
-                    "pattern_key": f"restart_cycles:{p['name']}",
-                    "category":    p.get("domain") or p.get("skill_tree") or "Personal Growth",
-                    "description": (
-                        f"'{p['name']}' has stalled and restarted {cyc['cycles']} times, "
-                        f"going quiet for {cyc['avg_gap_days']} days on average before picking back up "
-                        f"(longest gap: {cyc['longest_gap_days']} days)."
-                    ),
-                    "confidence": min(0.5 + cyc["cycles"] * 0.1, 0.9),
-                })
-    except Exception as e:
-        logger.exception("_mine_weekly_patterns restart cycles failed: %s", e)
-
-    # 5. Stated-but-unactioned intents -- loose aspirations repeated across
-    # journal entries with no matching category activity since. This is
-    # what lets the coach say "three weeks ago you kept saying you wanted
-    # to study algorithms" instead of only reacting to today's entry.
-    try:
-        _resolve_stated_intents()
-        now_dt = datetime.now(timezone.utc)
-        for intent in _stale_stated_intents():
-            first_dt   = datetime.fromisoformat(intent["first_mentioned_at"].replace("Z", "+00:00"))
-            weeks_ago  = max(1, (now_dt - first_dt).days // 7)
-            patterns.append({
-                "pattern_key": f"stated_intent:{intent['normalized_key']}",
-                "category":    intent["category"],
-                "description": (
-                    f"You've mentioned wanting to \"{intent['phrase']}\" {intent['mention_count']} times "
-                    f"since {intent['first_mentioned_at'][:10]} ({weeks_ago}w ago), "
-                    f"with no {intent['category']} activity since."
-                ),
-                "confidence": min(0.4 + intent["mention_count"] * 0.1, 0.9),
-            })
-    except Exception as e:
-        logger.exception("_mine_weekly_patterns stated intents failed: %s", e)
-
-    # 6. Recommendation follow-through, folded in as patterns too, so a
+    # 4. Recommendation follow-through, folded in as patterns too, so a
     # persistently-ignored or persistently-followed nudge category shows
     # up alongside the other observations rather than a separate stat.
     for cat, v in _followthrough_by_category().items():
@@ -3816,6 +3617,200 @@ def get_coach_patterns():
     except Exception:
         patterns = []
     return {"patterns": patterns, "followthrough": _followthrough_by_category()}
+
+# ---------------------------------------------------------------------------
+# Auto-Discovery Cards — small, factual pattern cards surfaced with no
+# button and no LLM call, distinct from coach_patterns (which is narrative,
+# prompt-grounding text for the AI coach). These are cheap pure-computation
+# facts pulled straight from data already on hand: habit inactivity gaps,
+# time-of-day performance peaks, per-category quest completion rates, and
+# mood deltas around specific habits. Meant to be skimmed as a feed, not
+# read as advice -- no interpretation, just numbers. Cached briefly since
+# GET /discoveries is designed to be polled on every relevant page load.
+# ---------------------------------------------------------------------------
+
+_DISCOVERY_CACHE_TTL = 60  # seconds
+_discovery_cache: dict = {"data": None, "at": None}
+
+def _discover_inactive_habits(min_established_logs: int = 3, inactive_days: int = 5) -> list[dict]:
+    """Established habits (enough history to mean something) gone quiet for
+    inactive_days+. Distinct from the same-day 'streak at risk' alerts
+    elsewhere -- this is a standing gap fact ("haven't practiced piano in
+    8 days"), not a same-day nudge."""
+    cards = []
+    try:
+        today = datetime.now(timezone.utc).date()
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+        for p in profiles:
+            dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
+            if len(dates) < min_established_logs:
+                continue
+            last = datetime.strptime(dates[0], "%Y-%m-%d").date()
+            gap = (today - last).days
+            if gap >= inactive_days:
+                cards.append({
+                    "id":       f"inactive:{p['name']}",
+                    "kind":     "habit_inactive",
+                    "icon":     "⏸️",
+                    "title":    f"You haven't done '{p['name']}' in {gap} days",
+                    "detail":   f"Last activity: {dates[0]} · {len(dates)} total completions on record.",
+                    "category": p.get("domain") or p.get("skill_tree") or "Personal Growth",
+                })
+    except Exception as e:
+        logger.exception("_discover_inactive_habits failed: %s", e)
+    return cards
+
+def _discover_time_of_day_peaks(min_total_entries: int = 10, min_bin_entries: int = 3, margin: float = 0.4) -> list[dict]:
+    """Buckets journal entries into 3-hour local-time windows and surfaces
+    whichever window beats the overall average by `margin` -- "your focus
+    peaks between 9-11am" style facts, purely from mood/energy/focus
+    ratings already attached to every entry."""
+    cards = []
+    try:
+        entries = fetch_all_entries_light()
+        if len(entries) < min_total_entries:
+            return cards
+        bins: dict[int, dict] = defaultdict(lambda: {"mood": [], "energy": [], "focus": []})
+        for e in entries:
+            try:
+                dt = datetime.fromisoformat(e["created_at"].replace("Z", "+00:00")) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)
+            except Exception:
+                continue
+            bin_start = (dt.hour // 3) * 3
+            bins[bin_start]["mood"].append(e["mood"])
+            bins[bin_start]["energy"].append(e["energy"])
+            bins[bin_start]["focus"].append(e["focus"])
+
+        overall = {
+            "mood":   avg([e["mood"] for e in entries]),
+            "energy": avg([e["energy"] for e in entries]),
+            "focus":  avg([e["focus"] for e in entries]),
+        }
+        METRIC_LABEL = {"mood": "Mood", "energy": "Energy", "focus": "Focus"}
+        METRIC_ICON  = {"mood": "😊", "energy": "⚡", "focus": "🎯"}
+        for metric in ("mood", "energy", "focus"):
+            if not overall[metric]:
+                continue
+            best_bin, best_avg = None, None
+            for bin_start, vals in bins.items():
+                vlist = vals[metric]
+                if len(vlist) < min_bin_entries:
+                    continue
+                a = sum(vlist) / len(vlist)
+                if best_avg is None or a > best_avg:
+                    best_bin, best_avg = bin_start, a
+            if best_bin is not None and (best_avg - overall[metric]) >= margin:
+                end = (best_bin + 3) % 24
+                cards.append({
+                    "id":       f"peak:{metric}",
+                    "kind":     "time_of_day_peak",
+                    "icon":     METRIC_ICON[metric],
+                    "title":    f"Your {METRIC_LABEL[metric].lower()} peaks between {best_bin}:00–{end}:00",
+                    "detail":   f"Avg {METRIC_LABEL[metric].lower()} in that window: {round(best_avg,1)}/5 vs {round(overall[metric],1)}/5 overall.",
+                    "category": "Personal Growth",
+                })
+    except Exception as e:
+        logger.exception("_discover_time_of_day_peaks failed: %s", e)
+    return cards
+
+def _discover_category_completion_rates(min_total: int = 5, high_threshold: float = 0.7) -> list[dict]:
+    """Per-category board-quest completion rate, surfaced only once a
+    category has enough sample size (min_total) and clears a high bar --
+    "Programming quests have a 94% completion rate" style facts. Low-rate
+    categories are already covered elsewhere (stale-category warnings), so
+    this stays a positive-signal feed rather than duplicating that."""
+    cards = []
+    try:
+        rows = supabase.table("board_quests").select("category, is_completed").execute().data
+        by_cat: dict[str, dict] = defaultdict(lambda: {"total": 0, "done": 0})
+        for r in rows:
+            cat = r.get("category") or "Personal Growth"
+            by_cat[cat]["total"] += 1
+            if r.get("is_completed"):
+                by_cat[cat]["done"] += 1
+        ranked = [
+            (cat, v["done"] / v["total"], v["total"])
+            for cat, v in by_cat.items() if v["total"] >= min_total
+        ]
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        for cat, rate, total in ranked[:2]:
+            if rate < high_threshold:
+                continue
+            cards.append({
+                "id":       f"completion_rate:{cat}",
+                "kind":     "category_completion_rate",
+                "icon":     "✅",
+                "title":    f"{cat} quests have a {round(rate*100)}% completion rate",
+                "detail":   f"Based on {total} quests tracked so far.",
+                "category": cat,
+            })
+    except Exception as e:
+        logger.exception("_discover_category_completion_rates failed: %s", e)
+    return cards
+
+def _discover_mood_after_habits(min_sample: int = 5, margin: float = 0.4) -> list[dict]:
+    """Per-habit mood comparison: average mood on days that habit's category
+    had a completed quest vs days it didn't -- "your mood increases after
+    exercising" style facts, generalized per-habit rather than the
+    combined all-habits version already in /habits/ai-insights."""
+    cards = []
+    try:
+        entries = fetch_all_entries_light()
+        mood_by_date: dict[str, list] = defaultdict(list)
+        for e in entries:
+            mood_by_date[e["created_at"][:10]].append(e["mood"])
+        if not mood_by_date:
+            return cards
+
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+        for p in profiles:
+            dates = set(_habit_quest_dates(p.get("skill_tree", ""), p.get("domain", "")))
+            if not dates:
+                continue
+            with_m, without_m = [], []
+            for date, moods in mood_by_date.items():
+                (with_m if date in dates else without_m).extend(moods)
+            if len(with_m) < min_sample or len(without_m) < min_sample:
+                continue
+            a_with, a_without = sum(with_m) / len(with_m), sum(without_m) / len(without_m)
+            diff = a_with - a_without
+            if abs(diff) < margin:
+                continue
+            direction = "increases" if diff > 0 else "drops"
+            cards.append({
+                "id":       f"mood_after:{p['name']}",
+                "kind":     "mood_after_habit",
+                "icon":     "📈" if diff > 0 else "📉",
+                "title":    f"Your mood {direction} after '{p['name']}'",
+                "detail":   f"Avg mood {round(a_with,1)}/5 on days with it vs {round(a_without,1)}/5 without.",
+                "category": p.get("domain") or p.get("skill_tree") or "Personal Growth",
+            })
+    except Exception as e:
+        logger.exception("_discover_mood_after_habits failed: %s", e)
+    return cards
+
+def _build_discovery_cards() -> list[dict]:
+    cards = []
+    cards += _discover_inactive_habits()
+    cards += _discover_time_of_day_peaks()
+    cards += _discover_category_completion_rates()
+    cards += _discover_mood_after_habits()
+    return cards
+
+@app.get("/discoveries")
+def get_discoveries():
+    """No-button auto-discovery feed: small factual pattern cards computed
+    live from existing habit/entry/quest data, no LLM calls involved.
+    Cached briefly since this is meant to be polled on every page load
+    rather than triggered by user action."""
+    now = datetime.now(timezone.utc)
+    cached_at = _discovery_cache["at"]
+    if _discovery_cache["data"] is not None and cached_at and (now - cached_at).total_seconds() < _DISCOVERY_CACHE_TTL:
+        return {"cards": _discovery_cache["data"]}
+    cards = db_retry(_build_discovery_cards)
+    _discovery_cache["data"] = cards
+    _discovery_cache["at"] = now
+    return {"cards": cards}
 
 # ---------------------------------------------------------------------------
 # Proactive AI coaching

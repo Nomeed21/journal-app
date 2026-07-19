@@ -219,7 +219,7 @@ navItems.forEach(item =>
 // was just loaded a moment ago.
 // ---------------------------------------------------------------------------
 const PAGE_LOADERS = {
-    journal:  () => { loadProactiveCoaching(); loadTodayStatus(); },
+    journal:  () => { loadProactiveCoaching(); loadTodayStatus(); loadDiscoveries(); },
     entries:  () => { loadEntries(); loadPiePlan(); },
     quests:   () => loadQuestBoard(),
     skills:   () => loadSkills(),
@@ -961,6 +961,37 @@ async function loadProactiveCoaching() {
                 ${data.alerts.map(a => `<span class="proactive-chip">${a}</span>`).join("")}
             </div>`;
     } catch (_) {}
+}
+
+// ---------------------------------------------------------------------------
+// Auto-discovery cards -- no button. Populated automatically from
+// GET /discoveries, which computes small factual pattern cards (habit
+// inactivity gaps, time-of-day peaks, quest completion rates, mood deltas
+// around habits) purely from existing data, no LLM involved. Renders on
+// the Journal page next to the Coach Alert; hides itself if nothing
+// currently clears the significance thresholds server-side.
+// ---------------------------------------------------------------------------
+const DISCOVERY_ICON_FALLBACK = "✦";
+
+async function loadDiscoveries() {
+    const el = document.getElementById("discovery-cards");
+    if (!el) return;
+    try {
+        const data  = await (await fetch("/discoveries")).json();
+        const cards = data.cards || [];
+        if (!cards.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+        el.style.display = "";
+        el.innerHTML = cards.map(c => `
+            <div class="discovery-card" data-kind="${_escAttr(c.kind || "")}">
+                <span class="dc-icon">${c.icon || DISCOVERY_ICON_FALLBACK}</span>
+                <div class="dc-body">
+                    <div class="dc-title">${_escHtml(c.title || "")}</div>
+                    ${c.detail ? `<div class="dc-detail">${_escHtml(c.detail)}</div>` : ""}
+                </div>
+            </div>`).join("");
+    } catch (_) {
+        el.style.display = "none";
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3319,6 +3350,7 @@ loadXPHUD();
 loadTodayStatus();
 switchEntryTab("morning");
 loadProactiveCoaching();
+loadDiscoveries();
 
 // Warm up every other tab's data in the background so the first click on
 // any nav item is instant instead of showing a loading spinner. Delayed

@@ -2262,6 +2262,65 @@ body {
 .proactive-chip { font-size: .72rem; background: #fff8e1; color: #e65100; border: 1px solid #ffe082; border-radius: 999px; padding: .2rem .6rem; font-weight: 600; }
 
 /* ============================================================
+   Auto-Discovery Cards — no-button factual pattern feed
+   ============================================================ */
+.discovery-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: .6rem;
+    margin-bottom: 1.25rem;
+}
+
+.discovery-card {
+    display: flex;
+    align-items: flex-start;
+    gap: .65rem;
+    background: var(--paper-soft);
+    border: 1px solid var(--line-strong);
+    border-left: 3px solid var(--accent);
+    border-radius: 12px;
+    padding: .75rem .9rem;
+    transition: box-shadow .15s, transform .15s;
+}
+
+.discovery-card:hover {
+    box-shadow: 0 4px 14px var(--shadow);
+    transform: translateY(-1px);
+}
+
+.dc-icon {
+    font-size: 1.15rem;
+    flex-shrink: 0;
+    line-height: 1.3;
+}
+
+.dc-body { min-width: 0; }
+
+.dc-title {
+    font-size: .87rem;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.35;
+}
+
+.dc-detail {
+    font-size: .74rem;
+    color: var(--ink-faint);
+    margin-top: .2rem;
+    line-height: 1.4;
+}
+
+/* Slight tonal variety per discovery kind so the feed doesn't read as one
+   undifferentiated block -- inactivity gaps lean amber/caution, everything
+   else stays on the neutral accent. */
+.discovery-card[data-kind="habit_inactive"] { border-left-color: #f7a94b; }
+.discovery-card[data-kind="mood_after_habit"] .dc-icon { filter: none; }
+
+@media (max-width: 640px) {
+    .discovery-cards { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
    First-run onboarding — single sequential next-step card
    ============================================================ */
 .onboarding-card {
