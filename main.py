@@ -129,6 +129,20 @@ def local_date_today() -> str:
     """
     return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)).strftime("%Y-%m-%d")
 
+def local_date_from_iso(iso_ts: str) -> str:
+    """
+    Convert a stored UTC ISO timestamp (e.g. a completed_at value) into the
+    local calendar date it falls on, using the same LOCAL_TZ_OFFSET_HOURS
+    offset as local_date_today()/local_hour_now(). Use this instead of
+    `iso_ts[:10]` anywhere a completion's date is bucketed by "which day
+    the user experienced it as" — a quest completed at, say, 11pm-1am
+    local time near midnight should land on the same local day as
+    local_date_today() would report for "today", not get bucketed by its
+    raw UTC calendar date.
+    """
+    dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+    return (dt + timedelta(hours=LOCAL_TZ_OFFSET_HOURS)).strftime("%Y-%m-%d")
+
 def local_day_bounds_utc(days_offset: int = 0) -> tuple[str, str]:
     """
     Return (start_utc_iso, end_utc_iso) marking a local calendar day's
@@ -679,8 +693,8 @@ def predictive_analytics() -> dict:
     - declining_consistency: journal gaps > 3 days in last 14
     - stagnation: mood flat + goal flat for 7+ entries
     """
-    today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today     = local_date_today()
+    yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Streak risk — habits whose skill-tree/category had a quest completed
     # yesterday but not today
@@ -1190,7 +1204,7 @@ def _all_completed_quest_dates_by_category() -> dict[str, list[str]]:
         by_cat: dict[str, set] = defaultdict(set)
         for r in rows:
             if r.get("completed_at"):
-                by_cat[r.get("category") or ""].add(r["completed_at"][:10])
+                by_cat[r.get("category") or ""].add(local_date_from_iso(r["completed_at"]))
         result = {cat: sorted(dates, reverse=True) for cat, dates in by_cat.items()}
     except Exception:
         result = {}
@@ -1423,7 +1437,7 @@ def _compute_streaks_raw() -> dict:
     day on which a quest in its skill tree/category was completed.
     """
     try:
-        today    = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today    = local_date_today()
         profiles = supabase.table("habit_profiles").select("*").execute().data
         out = {}
         for prof in profiles:
@@ -1463,7 +1477,7 @@ def _build_life_balance(streaks: dict) -> list[dict]:
                 continue
             cat = row.get("category") or "Personal Growth"
             dom = cat if cat in DOMAIN_DEFINITIONS else _domain_for_skill_tree(cat)
-            by_domain[dom].add(row["completed_at"][:10])
+            by_domain[dom].add(local_date_from_iso(row["completed_at"]))
     except Exception:
         pass
     all_domains = list(DOMAIN_DEFINITIONS.keys())
@@ -1567,7 +1581,7 @@ def get_life_balance():
 @app.get("/habits/stats/{habit_name}")
 def get_habit_stats(habit_name: str):
     """Full lifetime statistics for one habit."""
-    today      = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today      = local_date_today()
     profile    = _get_or_create_profile(habit_name)
     dates_desc = _habit_quest_dates(profile.get("skill_tree", ""), profile.get("domain", ""))
     snap       = _build_habit_snapshot(habit_name, profile, dates_desc, today)
@@ -2857,11 +2871,11 @@ def _compute_node_habit_progress(category: str, node_id: str) -> float:
         dates = _habit_quest_dates(category)
         if not dates:
             return 0.0
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = local_date_today()
         snap  = _build_habit_snapshot(profiles[0]["name"], {"skill_tree": category}, dates, today)
         rate  = snap["success_rate"]
         last  = datetime.strptime(dates[0], "%Y-%m-%d")
-        days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last).days
+        days_since = (datetime.strptime(today, "%Y-%m-%d") - last).days
         decayed = max(0.0, rate - days_since * 2)  # -2 pts/day of inactivity, floor at 0
         return round(decayed, 1)
     except Exception:
@@ -3662,7 +3676,7 @@ def _discover_inactive_habits(min_established_logs: int = 3, inactive_days: int 
     8 days"), not a same-day nudge."""
     cards = []
     try:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.strptime(local_date_today(), "%Y-%m-%d").date()
         profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
         for p in profiles:
             dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
@@ -4335,8 +4349,8 @@ def detect_triggers(mood: int, content: str) -> dict:
         reasons.append(f"{worst['category']} goals inactive for {worst['oldest_goal_days']}+ days")
         context_parts.append(f"Stale category: {worst['category']} ({worst['completion_rate']}% done)")
     profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute()
-    today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today     = local_date_today()
+    yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     at_risk = []
     for p in (profiles.data or []):
         dates = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
@@ -6219,8 +6233,8 @@ def _gen_habit_recovery_quests() -> list[dict]:
     of them is completed. One card per at-risk category, listing which
     habits it covers, matches how the mechanic actually works.
     """
-    today     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today     = local_date_today()
+    yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
     generated = []
     try:
         profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
@@ -6778,7 +6792,7 @@ def _check_and_apply_synergies() -> list[str]:
     Idempotent: won't re-insert a synergy that's already active (expires_at
     still in the future), so this is safe to call on every quest completion.
     """
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = local_date_today()
     try:
         profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
     except Exception:
