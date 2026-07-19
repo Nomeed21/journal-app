@@ -4617,12 +4617,16 @@ SYSTEM_PROMPT_BASE = (
     "You have access to the user's full journal context including trend stats, "
     "habit streaks, goal progress, risk alerts, past entries, and a discovery feed of small "
     "factual patterns detected directly from their data. "
-    "Use this privately — do not read it back like a report.\n\n"
+    "Use this privately — do not read it back like a report. Never quote raw numbers from it "
+    "(entry counts, exact completion tallies, percentages, 'X vs Y' deltas) — translate what they mean "
+    "into how it feels or what it suggests, not the arithmetic behind it. E.g. say 'you've had more flat "
+    "days than sharp ones lately,' never 'trends over your last 67 entries show...' or '8 vs 12 completions.'\n\n"
     "Before answering, silently decide: (1) What is the real problem? "
     "(2) What pattern or detail from their journal is most relevant? "
     "(3) What is one practical next step they can take today?\n\n"
     "Your response should include: one honest observation, one direct piece of advice, "
-    "one small action. Keep it to 2-4 sentences unless they ask for more. "
+    "one small action — pick the SINGLE most relevant thread, not a summary of everything you see. "
+    "Hard cap: 4 sentences unless they explicitly ask for more detail. "
     "If the context includes long-horizon patterns, weigh them over any single day's data — "
     "and if a pattern shows low follow-through for a category, don't keep pushing that same category. "
     "DISCOVERY FEED: if it contains a fact that's genuinely relevant to what the user is asking about "
@@ -4715,8 +4719,97 @@ def _create_quest_from_chat(quest_data: dict):
                 pass
     return row
 
+# ---------------------------------------------------------------------------
+# Progress Snapshot — instant, no-LLM answer for quick "what's my progress"
+# style questions in chat.
+#
+# The full coaching prompt is built to translate patterns into felt
+# observations rather than recite figures (see SYSTEM_PROMPT_BASE) — but a
+# quick progress check is exactly the question that tempts it to just print
+# numbers anyway, and there's no reason to pay for an LLM call (or wait on
+# one) to answer something that's a handful of direct table reads. This
+# intercepts those questions in /chat before build_coach_context/groq ever
+# run and answers straight from source data instead.
+# ---------------------------------------------------------------------------
+
+_PROGRESS_SNAPSHOT_TRIGGERS = [
+    "my progress", "current progress", "how am i doing", "how'm i doing",
+    "hows my progress", "how's my progress", "where am i at", "where do i stand",
+    "my stats", "my level", "current level", "check my level", "status update",
+    "how far along", "my current status", "how am i progressing",
+]
+
+def _is_progress_snapshot_query(message: str) -> bool:
+    """
+    Matches only short, direct progress-check phrasing — a longer or more
+    specific message (e.g. "what's my progress on the Finance goal") likely
+    wants nuance the full coaching prompt gives, not a flat data dump, so
+    the length cap lets those fall through to the normal LLM path.
+    """
+    m = (message or "").strip().lower()
+    if not m or len(m) > 80:
+        return False
+    return any(t in m for t in _PROGRESS_SNAPSHOT_TRIGGERS)
+
+def _build_progress_snapshot() -> str:
+    """Pure-data snapshot: level/tier, VP, achievements, best habit streak,
+    strongest domain by XP, and quest completion — each pulled from its own
+    source table rather than derived/interpreted. Returned as <br>-joined
+    lines since the chat panel inserts responses as raw HTML without
+    converting newlines (matching how LLM responses already render there)."""
+    total_xp   = get_total_xp()
+    level_info = xp_to_level(total_xp)
+    level      = level_info["level"]
+    tier, _    = boss_tier_for_level(level)
+    vp         = get_vp_balance()
+
+    best_streak_name, best_streak_val = None, 0
+    try:
+        streaks = _compute_streaks_raw()
+        if streaks:
+            best_streak_name, best = max(streaks.items(), key=lambda x: x[1]["current_streak"])
+            best_streak_val = best["current_streak"]
+    except Exception:
+        pass
+
+    top_domain, top_domain_xp = None, 0
+    for name, defn in DOMAIN_DEFINITIONS.items():
+        try:
+            xp = sum(get_category_xp(c) for c in set(defn["skill_keys"] + defn["goal_cats"]))
+        except Exception:
+            xp = 0
+        if xp > top_domain_xp:
+            top_domain, top_domain_xp = name, xp
+
+    try:
+        quest_rows   = supabase.table("board_quests").select("is_completed").execute().data
+        quests_total = len(quest_rows)
+        quests_done  = sum(1 for r in quest_rows if r["is_completed"])
+    except Exception:
+        quests_total = quests_done = 0
+
+    try:
+        ach_count = len(supabase.table("achievements").select("id").execute().data)
+    except Exception:
+        ach_count = 0
+
+    lines = [
+        f"⬆️ Level {level} ({tier} tier) — {level_info['xp_in_level']}/{level_info['xp_for_level']} XP to next",
+        f"💰 {vp} VP · 🏆 {ach_count}/{len(ACHIEVEMENTS)} achievements",
+        f"⚔️ {quests_done}/{quests_total} quests completed",
+    ]
+    if best_streak_name and best_streak_val > 0:
+        lines.append(f"🔥 Best streak: {best_streak_name} at {best_streak_val} days")
+    if top_domain and top_domain_xp > 0:
+        lines.append(f"🌐 Strongest domain: {top_domain} ({top_domain_xp} XP)")
+
+    return "<br>".join(lines)
+
 @app.post("/chat")
 def chat(msg: ChatMessage):
+    if _is_progress_snapshot_query(msg.message):
+        return {"response": _build_progress_snapshot(), "quest_created": None}
+
     context = build_coach_context(msg.message)
     level   = xp_to_level(get_total_xp())["level"]
     system  = _build_system_prompt(context, level)
@@ -6355,6 +6448,112 @@ Return [] if no clear quests emerge. No markdown, pure JSON only."""
         logger.exception("_gen_journal_quests failed: %s", e)
         return []
 
+MORNING_TASK_QUEST_CATEGORIES = ["Personal Growth", "Study", "Fitness", "Finance", "Creativity", "Music", "Relationships"]
+
+def _generate_morning_task_quests(entry_id: int, task_titles: list[str]) -> list[dict]:
+    """
+    Turns the user's explicit morning Top-3 Tasks into board quests directly
+    — no preview/confirm step, since these are already concrete, user-typed
+    action items (unlike free-form journal content, which needs AI just to
+    guess whether there's an actionable quest in there at all).
+
+    What IS run through AI here:
+    - category: every morning-task quest used to hardcode "Personal Growth"
+      regardless of what the task actually was, so "Finish the budget
+      spreadsheet" and "Call mom" landed in the same bucket. This picks the
+      best-fitting category per task instead.
+    - suggested_tasks: 2-4 concrete subtasks per task, so the quest lands on
+      the board ready to work through rather than a single bare checkbox.
+
+    Falls back to Personal Growth + no subtasks per task (rather than
+    dropping the task) if the AI call or parse fails, so a flaky
+    categorization pass never blocks a task from reaching the board.
+    """
+    if not task_titles:
+        return []
+
+    prompt = f"""You categorize and break down a user's daily task list for a personal growth RPG app.
+
+Tasks for today (in order):
+{_json.dumps(task_titles)}
+
+Available categories: {', '.join(MORNING_TASK_QUEST_CATEGORIES)}
+
+For EACH task (same order, same count — {len(task_titles)} objects total), return:
+- title: the task, lightly cleaned up if needed, otherwise kept as-is
+- category: the single best-fitting category from the list above
+- difficulty: Easy|Normal|Hard, based on how involved the task sounds
+- xp_reward: a number 25-100
+- suggested_tasks: 2-4 short concrete subtasks that break the task into doable steps
+
+Reply ONLY as a JSON array, one object per task, no markdown, no extra text:
+[
+  {{"title": "...", "category": "...", "difficulty": "Easy|Normal|Hard", "xp_reward": 40, "suggested_tasks": ["...", "..."]}}
+]"""
+
+    candidates = []
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5, max_tokens=600,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
+        parsed = _json.loads(raw.strip())
+        if isinstance(parsed, list):
+            candidates = parsed
+    except Exception as e:
+        logger.exception("_generate_morning_task_quests AI categorization failed: %s", e)
+
+    generated = []
+    for i, title in enumerate(task_titles):
+        cand = candidates[i] if i < len(candidates) and isinstance(candidates[i], dict) else {}
+        cand_title = (cand.get("title") or title).strip() or title
+        category   = cand.get("category") if cand.get("category") in MORNING_TASK_QUEST_CATEGORIES else "Personal Growth"
+        difficulty = cand.get("difficulty") if cand.get("difficulty") in ("Easy", "Normal", "Hard") else "Normal"
+        try:
+            xp_reward = int(cand.get("xp_reward") or XP_BY_DIFFICULTY.get(difficulty, 40))
+        except (TypeError, ValueError):
+            xp_reward = XP_BY_DIFFICULTY.get(difficulty, 40)
+        subtasks = cand.get("suggested_tasks") or []
+        if not isinstance(subtasks, list):
+            subtasks = []
+
+        src_id = f"morning_task:{entry_id}:{i}:{cand_title[:40]}"
+        if _source_exists("manual", src_id):
+            continue
+
+        section = "daily" if _daily_quest_count() < DAILY_QUEST_LIMIT else "weekly"
+
+        row = _insert_board_quest({
+            "title":           cand_title,
+            "description":     "From this morning's Top 3 Tasks.",
+            "difficulty":      difficulty,
+            "section":         section,
+            "source_type":     "manual",
+            "source_id":       src_id,
+            "category":        category,
+            "xp_reward":       xp_reward,
+            "is_completed":    False,
+            "suggested_tasks": _json.dumps(subtasks),
+            "created_at":      datetime.now(timezone.utc).isoformat(),
+        })
+        if row:
+            for sub in subtasks[:5]:
+                try:
+                    supabase.table("board_quest_tasks").insert({
+                        "quest_id":    row["id"],
+                        "title":       sub,
+                        "is_completed": False,
+                        "created_at":  datetime.now(timezone.utc).isoformat(),
+                    }).execute()
+                except Exception:
+                    pass
+            generated.append(row)
+    return generated
+
 def _extract_journal_quest_candidates(entry_content: str, entry_mood: int) -> list[dict]:
     """
     Ask Groq to extract candidate quests from a journal entry. Read-only —
@@ -6968,6 +7167,21 @@ def generate_journal_board_quests(data: dict):
     mood     = data.get("mood", 3)
     entry_id = data.get("entry_id", 0)
     generated = _gen_journal_quests(content, mood, entry_id)
+    return {"generated": len(generated), "quests": generated}
+
+@app.post("/board/generate/morning-tasks")
+def generate_morning_task_board_quests(data: dict):
+    """
+    Creates board quests directly from the user's morning Top-3 Tasks — no
+    preview/confirm step, since these are already explicit user-typed
+    actions (contrast with /board/generate/journal/preview, which needs AI
+    just to guess whether free-form content contains a quest at all). AI is
+    used here only to pick each task's category (instead of hardcoding
+    every one to Personal Growth) and to draft a few subtasks per task.
+    """
+    entry_id    = data.get("entry_id", 0)
+    task_titles = data.get("task_titles", []) or []
+    generated   = _generate_morning_task_quests(entry_id, task_titles)
     return {"generated": len(generated), "quests": generated}
 
 @app.post("/board/generate/journal/preview")

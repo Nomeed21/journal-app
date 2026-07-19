@@ -670,8 +670,8 @@ entryForm.addEventListener("submit", async (e) => {
         tomorrowPriorityText = gv("night-tomorrow").trim();
         const parts = [
             gv("night-highlight")  ? `Highlight: ${gv("night-highlight")}` : "",
-            gv("night-quests")     ? `Quest progress: ${gv("night-quests")}` : "",
-            gv("night-skills")     ? `Skill growth: ${gv("night-skills")}` : "",
+            gv("night-energizer")  ? `Energizer: ${gv("night-energizer")}` : "",
+            gv("night-drainer")    ? `Drainer: ${gv("night-drainer")}` : "",
             gv("night-challenge")  ? `Challenge: ${gv("night-challenge")}` : "",
             gv("night-response")   ? `Response: ${gv("night-response")}` : "",
             gv("night-lesson")     ? `Lesson: ${gv("night-lesson")}` : "",
@@ -833,23 +833,14 @@ let journalQuestCandidates = [];
 // ---------------------------------------------------------------------------
 async function autoCreateMorningTaskQuests(entryId, taskTitles) {
     if (!taskTitles || !taskTitles.length) return;
-    const quests = taskTitles.map(title => ({
-        title,
-        description: "From this morning's Top 3 Tasks.",
-        difficulty: "Normal",
-        category: "Personal Growth",
-        xp_reward: 40,
-        section: "daily",
-        suggested_tasks: [],
-    }));
     try {
-        const res  = await fetch("/board/generate/journal/confirm", {
+        const res  = await fetch("/board/generate/morning-tasks", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ entry_id: entryId, quests }),
+            body: JSON.stringify({ entry_id: entryId, task_titles: taskTitles }),
         });
         const data = await res.json();
-        if (data.created > 0) {
-            _toast(`⚔️ ${data.created} task${data.created !== 1 ? 's' : ''} from today's plan added to your Quest Board!`, "var(--accent-deep)", 3200);
+        if (data.generated > 0) {
+            _toast(`⚔️ ${data.generated} task${data.generated !== 1 ? 's' : ''} from today's plan added to your Quest Board — categorized with subtasks!`, "var(--accent-deep)", 3500);
             loadPageIfStale("quests", true);
         }
     } catch (_) {
@@ -1228,8 +1219,8 @@ window.editEntry = async function(id, title, content, mood, tags, entryType) {
         const lines = content.split("\\n");
         const get = (p) => (lines.find(l => l.startsWith(p)) || "").replace(p,"");
         document.getElementById("night-highlight").value = get("Highlight: ");
-        document.getElementById("night-quests").value    = get("Quest progress: ");
-        document.getElementById("night-skills").value    = get("Skill growth: ");
+        document.getElementById("night-energizer").value = get("Energizer: ");
+        document.getElementById("night-drainer").value   = get("Drainer: ");
         document.getElementById("night-challenge").value = get("Challenge: ");
         document.getElementById("night-response").value  = get("Response: ");
         document.getElementById("night-lesson").value    = get("Lesson: ");
