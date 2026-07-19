@@ -970,15 +970,170 @@ async function loadProactiveCoaching() {
 // around habits) purely from existing data, no LLM involved. Renders on
 // the Journal page next to the Coach Alert; hides itself if nothing
 // currently clears the significance thresholds server-side.
+//
+// Dismiss/dedup: cards are keyed by a stable id (e.g. "inactive:piano")
+// that stays the same as long as the underlying situation does, even as
+// its numbers change (8 days becomes 15 days). Dismissing a card doesn't
+// blacklist that id forever -- it snoozes it, keyed to a hash of its exact
+// title+detail text. If the hash changes (the fact actually moved: gap
+// grew, rate shifted, a new peak window emerged) the card is treated as
+// new information and resurfaces immediately, regardless of the snooze
+// window. If nothing changed, it stays hidden until DISCOVERY_SNOOZE_DAYS
+// pass, so a still-true fact eventually gets one more look rather than
+// being silenced permanently by one dismissal.
 // ---------------------------------------------------------------------------
 const DISCOVERY_ICON_FALLBACK = "✦";
+const DISCOVERY_SNOOZE_DAYS   = 7;
+const DISCOVERY_DISMISS_KEY   = "liainne-discovery-dismissed";
+const DISCOVERY_PRUNE_DAYS    = 60; // drop dismissal records this old regardless, so storage doesn't grow forever
+
+function _dcHash(s) {
+    let h = 0;
+    const str = String(s || "");
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+    return h.toString(36);
+}
+
+function _getDismissedDiscoveries() {
+    try { return JSON.parse(localStorage.getItem(DISCOVERY_DISMISS_KEY) || "{}"); }
+    catch (_) { return {}; }
+}
+function _saveDismissedDiscoveries(map) {
+    try { localStorage.setItem(DISCOVERY_DISMISS_KEY, JSON.stringify(map)); } catch (_) {}
+}
+function _pruneDismissedDiscoveries(map) {
+    const cutoff = Date.now() - DISCOVERY_PRUNE_DAYS * 86400000;
+    let changed = false;
+    Object.keys(map).forEach(id => {
+        if ((map[id]?.dismissedAt || 0) < cutoff) { delete map[id]; changed = true; }
+    });
+    if (changed) _saveDismissedDiscoveries(map);
+    return map;
+}
+
+window.dismissDiscoveryCard = function(id, hash, btn) {
+    const map = _getDismissedDiscoveries();
+    map[id] = { hash, dismissedAt: Date.now() };
+    _saveDismissedDiscoveries(map);
+    const card = btn.closest(".discovery-card");
+    if (!card) return;
+    card.style.transition = "opacity .2s ease, transform .2s ease";
+    card.style.opacity = "0";
+    card.style.transform = "translateY(-4px)";
+    setTimeout(() => {
+        card.remove();
+        const el = document.getElementById("discovery-cards");
+        if (el && !el.querySelector(".discovery-card")) { el.style.display = "none"; el.innerHTML = ""; }
+    }, 200);
+};
+
+// One-tap actions on discovery cards -- closes the insight -> quest -> XP
+// loop that every other surface in this app already follows (action
+// banner, journal quest suggestions, coach recommendations). Without this,
+// a discovery card was a dead end: read it, nothing happens.
+function _discoveryActionHtml(c) {
+    if (c.kind === "habit_inactive") {
+        const habitName = (c.id || "").replace(/^inactive:/, "");
+        return `<button type="button" class="dc-action"
+            onclick="logDiscoveryHabitNow('${_escAttr(c.id)}','${_escAttr(c.category || "Personal Growth")}','${_escAttr(habitName)}', this)">
+            ✅ Log it now</button>`;
+    }
+    if (c.kind === "category_completion_rate") {
+        return `<button type="button" class="dc-action"
+            onclick="viewDiscoveryCategoryQuests('${_escAttr(c.category || "")}')">
+            ⚔️ View quests</button>`;
+    }
+    return "";
+}
+
+// Creates a lightweight recovery-style quest for a specific inactive habit,
+// one click, no navigation required. source_id is deterministic per
+// card+day so a double-click (or the card re-rendering before the toast
+// clears) doesn't create a duplicate quest -- see the dedup check added to
+// POST /board/quests.
+window.logDiscoveryHabitNow = async function(cardId, category, habitName, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+        const res  = await fetch("/board/quests", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                title:        `Log '${habitName}' today`,
+                description:  `Surfaced from a discovery card — this habit's gone quiet for a while. Completing any ${category} quest today counts for it.`,
+                section:      "recovery",
+                difficulty:   "Easy",
+                category:     category || "Personal Growth",
+                xp_reward:    30,
+                source_type:  "manual",
+                source_id:    `discovery:${cardId}:${today}`,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            _toast(data.detail || "Could not create quest.", "#ef5350");
+            if (btn) { btn.disabled = false; btn.textContent = "✅ Log it now"; }
+            return;
+        }
+        if (data.status === "created") {
+            _toast(`⚔️ Added "${data.quest.title}" to your Quest Board!`, "var(--accent-deep)", 3200);
+            if (btn) btn.textContent = "✓ Added";
+        } else if (btn) {
+            btn.textContent = "✓ Already on board";
+        }
+        loadPageIfStale("quests", true);
+    } catch (_) {
+        _toast("Could not add quest.", "#ef5350");
+        if (btn) { btn.disabled = false; btn.textContent = "✅ Log it now"; }
+    }
+};
+
+// Jumps to the Quest Board and scrolls/pulses the first card in that
+// category into view, so "Programming quests have a 94% completion rate"
+// leads somewhere instead of just being a nice fact.
+window.viewDiscoveryCategoryQuests = async function(category) {
+    showPage("quests");
+    await loadQuestBoard();
+    highlightQuestCategory(category);
+};
+
+function highlightQuestCategory(category) {
+    if (!category) return;
+    const cards = document.querySelectorAll("#quest-board .qb-card");
+    let target = null;
+    cards.forEach(card => {
+        if (target) return;
+        const catChip = card.querySelector(".qb-chip--cat");
+        if (catChip && catChip.textContent.trim() === category) target = card;
+    });
+    if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.classList.add("xp-pulse");
+        setTimeout(() => target.classList.remove("xp-pulse"), 1200);
+    } else {
+        _toast(`No active quests in ${category} right now.`, "var(--ink-soft)", 2500);
+    }
+}
 
 async function loadDiscoveries() {
     const el = document.getElementById("discovery-cards");
     if (!el) return;
     try {
-        const data  = await (await fetch("/discoveries")).json();
-        const cards = data.cards || [];
+        const data = await (await fetch("/discoveries")).json();
+        const all  = data.cards || [];
+
+        const dismissed = _pruneDismissedDiscoveries(_getDismissedDiscoveries());
+        const snoozeMs   = DISCOVERY_SNOOZE_DAYS * 86400000;
+        const now        = Date.now();
+
+        const cards = all.filter(c => {
+            c._hash = _dcHash((c.title || "") + "|" + (c.detail || ""));
+            const d = dismissed[c.id];
+            if (!d) return true;                          // never dismissed
+            if (d.hash !== c._hash) return true;           // the fact itself changed -- new info, show it
+            if (now - d.dismissedAt > snoozeMs) return true; // snooze window elapsed on an unchanged fact
+            return false;                                   // still dismissed, still unchanged, still snoozed
+        });
+
         if (!cards.length) { el.style.display = "none"; el.innerHTML = ""; return; }
         el.style.display = "";
         el.innerHTML = cards.map(c => `
@@ -987,7 +1142,10 @@ async function loadDiscoveries() {
                 <div class="dc-body">
                     <div class="dc-title">${_escHtml(c.title || "")}</div>
                     ${c.detail ? `<div class="dc-detail">${_escHtml(c.detail)}</div>` : ""}
+                    ${_discoveryActionHtml(c)}
                 </div>
+                <button type="button" class="dc-dismiss" title="Dismiss"
+                    onclick="dismissDiscoveryCard('${_escAttr(c.id)}','${_escAttr(c._hash)}', this)">✕</button>
             </div>`).join("");
     } catch (_) {
         el.style.display = "none";

@@ -3632,6 +3632,21 @@ def get_coach_patterns():
 _DISCOVERY_CACHE_TTL = 60  # seconds
 _discovery_cache: dict = {"data": None, "at": None}
 
+def _evidence_strength(n: int) -> str:
+    """
+    Coarse sample-size label so a discovery card can self-report how much
+    to trust its own stat, instead of every card reading with the same
+    unqualified confidence whether it's built on 8 examples or 80. Applied
+    to the correlational cards (completion rate, time-of-day peak, mood
+    delta) -- not the inactivity card, which is a plain count, not a
+    statistic that can be thin or noisy.
+    """
+    if n >= 20:
+        return "well-established"
+    if n >= 10:
+        return "developing pattern"
+    return "early signal"
+
 def _discover_inactive_habits(min_established_logs: int = 3, inactive_days: int = 5) -> list[dict]:
     """Established habits (enough history to mean something) gone quiet for
     inactive_days+. Distinct from the same-day 'streak at risk' alerts
@@ -3660,11 +3675,15 @@ def _discover_inactive_habits(min_established_logs: int = 3, inactive_days: int 
         logger.exception("_discover_inactive_habits failed: %s", e)
     return cards
 
-def _discover_time_of_day_peaks(min_total_entries: int = 10, min_bin_entries: int = 3, margin: float = 0.4) -> list[dict]:
+def _discover_time_of_day_peaks(min_total_entries: int = 15, min_bin_entries: int = 5, margin: float = 0.4) -> list[dict]:
     """Buckets journal entries into 3-hour local-time windows and surfaces
     whichever window beats the overall average by `margin` -- "your focus
     peaks between 9-11am" style facts, purely from mood/energy/focus
-    ratings already attached to every entry."""
+    ratings already attached to every entry. Thresholds deliberately raised
+    above the bare minimum needed to compute anything: a 3-hour window with
+    only 3-4 entries is exactly the kind of thin sample that produces a
+    confident-sounding card off what's really noise, so min_bin_entries
+    requires enough entries in THAT specific window, not just overall."""
     cards = []
     try:
         entries = fetch_all_entries_light()
@@ -3691,14 +3710,14 @@ def _discover_time_of_day_peaks(min_total_entries: int = 10, min_bin_entries: in
         for metric in ("mood", "energy", "focus"):
             if not overall[metric]:
                 continue
-            best_bin, best_avg = None, None
+            best_bin, best_avg, best_n = None, None, 0
             for bin_start, vals in bins.items():
                 vlist = vals[metric]
                 if len(vlist) < min_bin_entries:
                     continue
                 a = sum(vlist) / len(vlist)
                 if best_avg is None or a > best_avg:
-                    best_bin, best_avg = bin_start, a
+                    best_bin, best_avg, best_n = bin_start, a, len(vlist)
             if best_bin is not None and (best_avg - overall[metric]) >= margin:
                 end = (best_bin + 3) % 24
                 cards.append({
@@ -3706,19 +3725,28 @@ def _discover_time_of_day_peaks(min_total_entries: int = 10, min_bin_entries: in
                     "kind":     "time_of_day_peak",
                     "icon":     METRIC_ICON[metric],
                     "title":    f"Your {METRIC_LABEL[metric].lower()} peaks between {best_bin}:00–{end}:00",
-                    "detail":   f"Avg {METRIC_LABEL[metric].lower()} in that window: {round(best_avg,1)}/5 vs {round(overall[metric],1)}/5 overall.",
+                    "detail":   (
+                        f"Avg {METRIC_LABEL[metric].lower()} in that window: {round(best_avg,1)}/5 "
+                        f"vs {round(overall[metric],1)}/5 overall · {best_n} entries in this window "
+                        f"({_evidence_strength(best_n)})."
+                    ),
                     "category": "Personal Growth",
                 })
     except Exception as e:
         logger.exception("_discover_time_of_day_peaks failed: %s", e)
     return cards
 
-def _discover_category_completion_rates(min_total: int = 5, high_threshold: float = 0.7) -> list[dict]:
+def _discover_category_completion_rates(min_total: int = 8, high_threshold: float = 0.7) -> list[dict]:
     """Per-category board-quest completion rate, surfaced only once a
     category has enough sample size (min_total) and clears a high bar --
-    "Programming quests have a 94% completion rate" style facts. Low-rate
-    categories are already covered elsewhere (stale-category warnings), so
-    this stays a positive-signal feed rather than duplicating that."""
+    "Programming quests have a 94% completion rate" style facts. min_total
+    is deliberately above the bare minimum needed to compute a percentage
+    at all: "5/5 completed" and "47/50 completed" both round to numbers
+    that sound equally confident, but only one of them is real evidence --
+    the detail line spells out the sample size and its strength tier so
+    the two don't read the same. Low-rate categories are already covered
+    elsewhere (stale-category warnings), so this stays a positive-signal
+    feed rather than duplicating that."""
     cards = []
     try:
         rows = supabase.table("board_quests").select("category, is_completed").execute().data
@@ -3741,18 +3769,22 @@ def _discover_category_completion_rates(min_total: int = 5, high_threshold: floa
                 "kind":     "category_completion_rate",
                 "icon":     "✅",
                 "title":    f"{cat} quests have a {round(rate*100)}% completion rate",
-                "detail":   f"Based on {total} quests tracked so far.",
+                "detail":   f"Based on {total} quests tracked so far ({_evidence_strength(total)}).",
                 "category": cat,
             })
     except Exception as e:
         logger.exception("_discover_category_completion_rates failed: %s", e)
     return cards
 
-def _discover_mood_after_habits(min_sample: int = 5, margin: float = 0.4) -> list[dict]:
+def _discover_mood_after_habits(min_sample: int = 8, margin: float = 0.4) -> list[dict]:
     """Per-habit mood comparison: average mood on days that habit's category
     had a completed quest vs days it didn't -- "your mood increases after
-    exercising" style facts, generalized per-habit rather than the
-    combined all-habits version already in /habits/ai-insights."""
+    exercising" style facts, generalized per-habit rather than the combined
+    all-habits version already in /habits/ai-insights. min_sample applies
+    to BOTH sides of the comparison (days-with and days-without each need
+    enough entries), and the strength label uses whichever side is
+    smaller -- a lopsided 40-vs-8 split is only as trustworthy as its
+    thinner half, not its bigger one."""
     cards = []
     try:
         entries = fetch_all_entries_light()
@@ -3776,13 +3808,17 @@ def _discover_mood_after_habits(min_sample: int = 5, margin: float = 0.4) -> lis
             diff = a_with - a_without
             if abs(diff) < margin:
                 continue
-            direction = "increases" if diff > 0 else "drops"
+            direction   = "tends to be higher" if diff > 0 else "tends to be lower"
+            weaker_side = min(len(with_m), len(without_m))
             cards.append({
                 "id":       f"mood_after:{p['name']}",
                 "kind":     "mood_after_habit",
                 "icon":     "📈" if diff > 0 else "📉",
-                "title":    f"Your mood {direction} after '{p['name']}'",
-                "detail":   f"Avg mood {round(a_with,1)}/5 on days with it vs {round(a_without,1)}/5 without.",
+                "title":    f"Your mood {direction} on days with '{p['name']}'",
+                "detail":   (
+                    f"Avg mood {round(a_with,1)}/5 on days with it vs {round(a_without,1)}/5 without "
+                    f"· {len(with_m)} vs {len(without_m)} days ({_evidence_strength(weaker_side)})."
+                ),
                 "category": p.get("domain") or p.get("skill_tree") or "Personal Growth",
             })
     except Exception as e:
@@ -6257,7 +6293,23 @@ def get_board_quests():
 
 @app.post("/board/quests")
 def create_board_quest(q: QuestBoardCreate):
-    """Manually create a board quest."""
+    """Manually create a board quest.
+    Callers that pass their own deterministic source_id (e.g. the
+    Discoveries one-tap actions, keyed per card+day) get idempotency for
+    free: a repeat call with the same source_type+source_id returns the
+    existing quest instead of creating a duplicate. Callers that don't pass
+    a source_id (or use the default manual:{timestamp}, which is unique
+    per call) are unaffected."""
+    if q.source_id and _source_exists(q.source_type or "manual", q.source_id):
+        existing = (
+            supabase.table("board_quests")
+            .select("*")
+            .eq("source_type", q.source_type or "manual")
+            .eq("source_id", q.source_id)
+            .execute()
+        )
+        if existing.data:
+            return {"status": "already_exists", "quest": existing.data[0]}
     if q.section == "daily" and _daily_quest_count() >= DAILY_QUEST_LIMIT:
         raise HTTPException(
             400,
