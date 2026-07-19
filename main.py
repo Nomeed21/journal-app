@@ -618,6 +618,14 @@ ACHIEVEMENTS = [
     {"key": "streak_60",     "name": "Unbreakable",        "xp": 600, "tier": "legendary", "check": lambda s: s["best_habit_streak"] >= 60},
     {"key": "entries_100",   "name": "Chronicle Keeper",   "xp": 700, "tier": "legendary", "check": lambda s: s["total_entries"] >= 100},
     {"key": "quests_50",     "name": "Grandmaster",        "xp": 900, "tier": "legendary", "check": lambda s: s["completed_tasks"] >= 50},
+    # "Self-Aware" doesn't fit the snapshot-stat pattern the rest of this
+    # list uses — discovery cards are computed live off existing data, not
+    # stored anywhere, so there's no persisted "have I ever seen one" stat
+    # to check. The check lambda stays permanently False (never fires via
+    # the generic award_achievements() sweep below); it's granted directly
+    # by GET /discoveries the first time _build_discovery_cards() returns
+    # any card at all — see _award_first_discovery_achievement().
+    {"key": "self_aware",    "name": "Self-Aware",         "xp": 50,  "tier": "standard",  "check": lambda s: False},
     {"key": "skill_node_15", "name": "Tree of Mastery",    "xp": 750, "tier": "legendary", "check": lambda s: s["completed_nodes"] >= 15},
 ]
 
@@ -3833,20 +3841,52 @@ def _build_discovery_cards() -> list[dict]:
     cards += _discover_mood_after_habits()
     return cards
 
+def _award_first_discovery_achievement() -> list[dict]:
+    """'Self-Aware' -- awarded the first time any discovery card is ever
+    surfaced. Every other feature in the app (journaling, habits, quests,
+    bosses) feeds the XP ledger; Discoveries was the one exception. Can't
+    route through the generic award_achievements()/snapshot-stat sweep
+    like the rest of ACHIEVEMENTS, since there's no persisted "discoveries
+    seen" counter to check against -- cards are computed live and never
+    stored. Granted directly here instead, guarded by the same "already in
+    the achievements table" idempotency check every other achievement
+    grant uses, so repeated polling of this endpoint is still safe."""
+    try:
+        existing = supabase.table("achievements").select("id").eq("name", "Self-Aware").execute()
+        if existing.data:
+            return []
+        ach = next(a for a in ACHIEVEMENTS if a["key"] == "self_aware")
+        supabase.table("achievements").insert({
+            "user_key":  "default",
+            "name":      ach["name"],
+            "xp_bonus":  ach["xp"],
+            "earned_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+        boosted_xp = ledger_add("achievement", ach["key"], "Personal Growth", ach["xp"])
+        return [{"name": ach["name"], "xp": boosted_xp, "tier": ach.get("tier", "standard")}]
+    except Exception as e:
+        logger.exception("_award_first_discovery_achievement failed: %s", e)
+        return []
+
 @app.get("/discoveries")
 def get_discoveries():
     """No-button auto-discovery feed: small factual pattern cards computed
     live from existing habit/entry/quest data, no LLM calls involved.
     Cached briefly since this is meant to be polled on every page load
-    rather than triggered by user action."""
+    rather than triggered by user action. The first time any card is ever
+    surfaced, grants the one-time "Self-Aware" achievement (+XP) -- see
+    _award_first_discovery_achievement -- so Discoveries feeds the XP
+    ledger like every other system instead of being the sole exception."""
     now = datetime.now(timezone.utc)
     cached_at = _discovery_cache["at"]
     if _discovery_cache["data"] is not None and cached_at and (now - cached_at).total_seconds() < _DISCOVERY_CACHE_TTL:
-        return {"cards": _discovery_cache["data"]}
-    cards = db_retry(_build_discovery_cards)
-    _discovery_cache["data"] = cards
-    _discovery_cache["at"] = now
-    return {"cards": cards}
+        cards = _discovery_cache["data"]
+    else:
+        cards = db_retry(_build_discovery_cards)
+        _discovery_cache["data"] = cards
+        _discovery_cache["at"] = now
+    new_achievements = _award_first_discovery_achievement() if cards else []
+    return {"cards": cards, "new_achievements": new_achievements}
 
 # ---------------------------------------------------------------------------
 # Proactive AI coaching

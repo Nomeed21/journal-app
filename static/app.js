@@ -1121,6 +1121,12 @@ async function loadDiscoveries() {
         const data = await (await fetch("/discoveries")).json();
         const all  = data.cards || [];
 
+        // Self-Aware fires the moment the backend first surfaces any card at
+        // all -- independent of whether that specific card survives the
+        // dismiss/snooze filtering below, so the achievement isn't silently
+        // missed just because, say, every card happens to be freshly dismissed.
+        if (data.new_achievements && data.new_achievements.length) showAchievementToast(data.new_achievements);
+
         const dismissed = _pruneDismissedDiscoveries(_getDismissedDiscoveries());
         const snoozeMs   = DISCOVERY_SNOOZE_DAYS * 86400000;
         const now        = Date.now();
