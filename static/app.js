@@ -2063,6 +2063,97 @@ chatForm.addEventListener("submit", async (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// AI Entry — talk instead of type; automatically writes a journal entry.
+// Deliberately separate state/endpoint from the coaching chat above: this
+// conversation's only job is assembling one entry, and its history should
+// never bleed into (or be polluted by) the coach's own conversation memory.
+// ---------------------------------------------------------------------------
+let aiEntryHistory = [];
+let aiEntryBusy    = false;
+
+const aiEntryMessages = document.getElementById("ai-entry-messages");
+const aiEntryForm     = document.getElementById("ai-entry-form");
+
+window.openAIEntryModal = function() {
+    const modal = document.getElementById("ai-entry-modal");
+    if (!modal) return;
+    modal.style.display = "flex";
+    if (!aiEntryHistory.length) {
+        aiEntryMessages.innerHTML = `<div class="chat-msg assistant">Hey — how'd today go? Just talk it through, I'll take care of the rest.</div>`;
+    }
+    setTimeout(() => document.getElementById("ai-entry-input")?.focus(), 80);
+};
+
+window.closeAIEntryModal = function() {
+    const modal = document.getElementById("ai-entry-modal");
+    if (modal) modal.style.display = "none";
+};
+
+function _resetAIEntryConversation() {
+    aiEntryHistory = [];
+    aiEntryMessages.innerHTML = `<div class="chat-msg assistant">Entry saved! Want to talk through anything else? (Starting fresh — this'll be a new entry.)</div>`;
+}
+
+if (aiEntryForm) {
+    aiEntryForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        if (aiEntryBusy) return;
+        const input   = document.getElementById("ai-entry-input");
+        const message = input.value.trim();
+        if (!message) return;
+        input.value = "";
+        aiEntryBusy = true;
+
+        aiEntryMessages.innerHTML += `<div class="chat-msg user">${_escHtml(message)}</div>`;
+        aiEntryMessages.scrollTop  = aiEntryMessages.scrollHeight;
+
+        const thinkingId = `ai-entry-thinking-${Date.now()}`;
+        aiEntryMessages.innerHTML += `<div class="chat-msg assistant chat-thinking" id="${thinkingId}">✦ listening…</div>`;
+        aiEntryMessages.scrollTop = aiEntryMessages.scrollHeight;
+
+        try {
+            const res  = await fetch("/ai-entry/chat", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message, history: aiEntryHistory }),
+            });
+            const data = await res.json();
+            document.getElementById(thinkingId)?.remove();
+
+            aiEntryHistory.push({ role: "user", content: message });
+            aiEntryHistory.push({ role: "assistant", content: data.response });
+            aiEntryMessages.innerHTML += `<div class="chat-msg assistant">${_escHtml(data.response).replace(/\n/g, "<br>")}</div>`;
+            aiEntryMessages.scrollTop = aiEntryMessages.scrollHeight;
+
+            const result = data.entry_result;
+            if (result?.status === "created") {
+                if (result.new_achievements) showAchievementToast(result.new_achievements);
+                _toast("✅ Journal entry saved!", "#4caf50", 3000);
+                loadTodayStatus();
+                loadXPHUD();
+                loadAIInsight();
+                loadProactiveCoaching();
+                loadPageIfStale("entries", true);
+                // Same auto-quest pipeline a hand-typed entry gets — no
+                // reason talking it out should skip quest suggestions.
+                if (result.entry?.id) {
+                    handleJournalQuestPreview(result.entry.id, result.entry.content || "", result.entry.mood || 3);
+                }
+                setTimeout(_resetAIEntryConversation, 900);
+            } else if (result?.status === "already_exists") {
+                _toast(result.message || "An entry already exists for today.", "#f7a94b", 3500);
+            } else if (result?.status === "error") {
+                _toast(result.message || "Could not save that entry.", "#ef5350", 3500);
+            }
+        } catch (_) {
+            document.getElementById(thinkingId)?.remove();
+            aiEntryMessages.innerHTML += `<div class="chat-msg assistant">Sorry, I couldn't reach the server — try again?</div>`;
+        } finally {
+            aiEntryBusy = false;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Charts
 // ---------------------------------------------------------------------------
 // Chart.js instances are kept here so loadCharts() can destroy the old ones

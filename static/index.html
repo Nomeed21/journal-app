@@ -97,10 +97,13 @@
                 </div>
             </div>
             
-            <div class="entry-tabs">
-                <button class="entry-tab active" data-type="morning">🌅 Morning</button>
-                <button class="entry-tab"         data-type="night">🌙 Night</button>
-                <button class="entry-tab"         data-type="free">📓 Free</button>
+            <div class="entry-tabs-row">
+                <div class="entry-tabs">
+                    <button class="entry-tab active" data-type="morning">🌅 Morning</button>
+                    <button class="entry-tab"         data-type="night">🌙 Night</button>
+                    <button class="entry-tab"         data-type="free">📓 Free</button>
+                </div>
+                <button type="button" class="ai-entry-trigger-btn" onclick="openAIEntryModal()">🎙️ Talk it out instead</button>
             </div>
 
             <form id="entry-form" class="entry-form-card">
@@ -632,7 +635,26 @@
         </div>
     </div>
 </div>
+<!-- AI Entry Modal — talk instead of type; a separate conversation from the
+     coaching chat, whose only job is assembling and saving a journal entry. -->
+<div id="ai-entry-modal" class="hv2-modal-overlay" style="display:none" onclick="if(event.target===this)closeAIEntryModal()">
+    <div class="hv2-modal-box ai-entry-modal-box">
+        <div class="hv2-modal-header">
+            <div class="hv2-modal-title">🎙️ AI Entry</div>
+            <button class="hv2-modal-close" onclick="closeAIEntryModal()">✕</button>
+        </div>
+        <p class="plan-loading" style="margin-bottom:.9rem">
+            Just talk about your day — no form, no sliders. I'll turn it into a journal entry once I have enough.
+        </p>
+        <div id="ai-entry-messages" class="chat-messages ai-entry-messages"></div>
+        <form id="ai-entry-form" class="chat-input-row">
+            <input type="text" id="ai-entry-input" placeholder="Tell me about your day..." required autocomplete="off">
+            <button type="submit">↑</button>
+        </form>
+    </div>
+</div>
 <script>
+
   // Must be global for onclick="toggleTheme()" to work
   function toggleTheme() {
     const current = document.documentElement.getAttribute("data-theme") || "ballerina";

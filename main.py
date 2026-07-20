@@ -176,7 +176,13 @@ class ChatTurn(BaseModel):
 class ChatMessage(BaseModel):
     message: str
     history: list[ChatTurn] = []
-    
+
+class AIEntryMessage(BaseModel):
+    # Reuses ChatTurn for history turns — same shape (role/content), no
+    # reason to duplicate it under a new name.
+    message: str
+    history: list[ChatTurn] = []
+
 class GoalCreate(BaseModel):
     title: str
     category: str
@@ -925,8 +931,15 @@ def today_entry_status():
     done = {row["entry_type"] for row in result.data}
     return {"done": list(done), "morning": "morning" in done, "night": "night" in done, "free": "free" in done}
 
-@app.post("/entries")
-def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
+def _create_journal_entry(entry: EntryCreate, background_tasks: BackgroundTasks) -> dict:
+    """
+    Core entry-creation logic — same duplicate-per-local-day guard, fast
+    insert + background embedding, and XP grant regardless of whether the
+    entry came from the hand-typed form (POST /entries) or was assembled
+    by the AI Entry conversation (POST /ai-entry/chat). Keeping this in one
+    place means an AI-authored entry is indistinguishable from a typed one
+    to every downstream system (streaks, XP, achievements, insights).
+    """
     # Enforce one entry per type per local day (skip check when editing).
     # FIX: this used to bucket on the UTC calendar day, so a morning entry
     # written before ~8am local time (UTC+8) could be misjudged as
@@ -974,6 +987,10 @@ def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
     new_achievements = award_achievements()
 
     return {"status": "created", "entry": saved_row, "new_achievements": new_achievements}
+
+@app.post("/entries")
+def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
+    return _create_journal_entry(entry, background_tasks)
 
 @app.get("/entries")
 def get_entries(tag: Optional[str] = None, keyword: Optional[str] = None,
@@ -4831,6 +4848,103 @@ def chat(msg: ChatMessage):
     clean_response, quest_data = _parse_quest_from_response(raw_response)
     created_quest = _create_quest_from_chat(quest_data) if quest_data else None
     return {"response": clean_response, "quest_created": created_quest}
+
+# ---------------------------------------------------------------------------
+# AI Entry — talk instead of type, and it writes the journal entry for you.
+#
+# Deliberately a separate conversation/endpoint from /chat rather than a
+# mode inside it: /chat's whole context (trend stats, patterns, discovery
+# feed, risk alerts) is about advising on an entry that already exists —
+# here there's no entry yet, the point of the conversation IS building one,
+# and mixing the two would mean either dragging unrelated coaching context
+# into a simple "what happened today" chat, or awkwardly suppressing it.
+# Keeping them separate also means this conversation's history never leaks
+# into the coach's history or vice versa.
+# ---------------------------------------------------------------------------
+
+AI_ENTRY_SYSTEM_PROMPT = (
+    "You are LiAInne's journaling companion. The user is talking through their day out loud instead of "
+    "filling out a form, and your job is to turn the conversation into ONE journal entry once you have "
+    "enough to work with.\n\n"
+    "You need: a short title; the entry content, written as a natural first-person account in THEIR voice "
+    "combining what they've told you across the conversation (not a third-person summary); mood, energy, "
+    "and focus each 1-5; and an entry_type of morning (planning the day ahead), night (reflecting on a day "
+    "that already happened), or free (anything else).\n\n"
+    "Ask ONE short, natural follow-up at a time for whatever's still missing — talk like a friend catching "
+    "up, never a form. Never ask them to state mood/energy/focus as raw numbers; infer those from what they "
+    "say and only ask a lightweight clarifying question if it's genuinely unclear. You do NOT need every "
+    "detail — real content plus a reasonable mood read is enough to proceed; energy and focus can default "
+    "to 3 if never touched on and nothing suggests otherwise.\n\n"
+    "Once you have enough, respond warmly (briefly reflect back what you heard) and end your message with "
+    "this exact marker on its own line:\n"
+    "ENTRY_CREATE: then a JSON object with keys: title, content, mood, energy, focus, entry_type, tags "
+    "(array of short strings, can be empty).\n"
+    "Only include the marker once you're actually ready to save — before that, just talk normally with no "
+    "marker at all. Never include the marker more than once, and never ask the user to confirm first; "
+    "creating it IS the confirmation."
+)
+
+def _parse_entry_from_response(response_text: str):
+    """Split the AI Entry response into (clean_text, entry_data_or_None) —
+    same brace-matching approach as _parse_quest_from_response, since Groq
+    responses can't be trusted to emit clean single-line JSON."""
+    marker = "ENTRY_CREATE:"
+    if marker not in response_text:
+        return response_text, None
+    parts      = response_text.split(marker, 1)
+    clean_text = parts[0].strip()
+    raw_json   = parts[1].strip()
+    depth, end = 0, -1
+    for i, ch in enumerate(raw_json):
+        if ch == "{":   depth += 1
+        elif ch == "}": depth -= 1
+        if depth == 0 and end == -1 and i > 0:
+            end = i + 1
+            break
+    if end == -1:
+        return clean_text, None
+    try:
+        return clean_text, _json.loads(raw_json[:end])
+    except Exception:
+        return clean_text, None
+
+@app.post("/ai-entry/chat")
+def ai_entry_chat(msg: AIEntryMessage, background_tasks: BackgroundTasks):
+    history = [
+        {"role": t.role, "content": t.content}
+        for t in msg.history[-16:]
+        if t.role in ("user", "assistant") and t.content.strip()
+    ]
+    messages = (
+        [{"role": "system", "content": AI_ENTRY_SYSTEM_PROMPT}]
+        + history
+        + [{"role": "user", "content": msg.message}]
+    )
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=messages, temperature=0.7, max_tokens=500,
+    )
+    raw_response = response.choices[0].message.content
+    clean_response, entry_data = _parse_entry_from_response(raw_response)
+
+    entry_result = None
+    if entry_data:
+        try:
+            entry = EntryCreate(
+                title=(entry_data.get("title") or "AI Entry").strip() or "AI Entry",
+                content=entry_data.get("content") or "",
+                mood=safe_rating(entry_data.get("mood"), 3),
+                energy=safe_rating(entry_data.get("energy"), 3),
+                focus=safe_rating(entry_data.get("focus"), 3),
+                entry_type=entry_data.get("entry_type") if entry_data.get("entry_type") in ("morning", "night", "free") else "free",
+                tags=[t for t in (entry_data.get("tags") or []) if isinstance(t, str)][:10],
+            )
+            entry_result = _create_journal_entry(entry, background_tasks)
+        except Exception as e:
+            logger.exception("ai_entry_chat: failed to create entry from %s: %s", entry_data, e)
+            entry_result = {"status": "error", "message": "Could not save that as an entry — try rephrasing."}
+
+    return {"response": clean_response, "entry_result": entry_result}
 
 # ---------------------------------------------------------------------------
 # Insights
