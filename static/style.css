@@ -6600,6 +6600,135 @@ body {
 }
 
 /* ============================================================
+   Verse & Quote Generator (Habits page)
+   ============================================================ */
+
+.vq-panel {
+    background: linear-gradient(135deg, var(--accent-soft) 0%, #fce4ec 100%);
+    border: 1.5px solid var(--line-strong);
+    border-left: 4px solid var(--accent-deep);
+    border-radius: 16px;
+    padding: 1.1rem 1.4rem;
+    margin-bottom: 1.5rem;
+    animation: qbSlideDown .2s ease;
+}
+
+.vq-header {
+    display: flex;
+    align-items: baseline;
+    gap: .6rem;
+    flex-wrap: wrap;
+    margin-bottom: .85rem;
+}
+
+.vq-label {
+    font-size: .8rem;
+    font-weight: 700;
+    color: var(--accent-deep);
+}
+
+.vq-sub {
+    font-size: .78rem;
+    color: var(--ink-soft);
+    font-style: italic;
+}
+
+.vq-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem;
+    margin-bottom: .25rem;
+}
+
+.vq-chip {
+    background: var(--paper);
+    color: var(--ink-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: .4rem .9rem;
+    font-size: .82rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: background .15s, color .15s, border-color .15s, transform .1s;
+}
+
+.vq-chip:hover {
+    background: var(--accent-soft);
+    color: var(--accent-deep);
+    border-color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: none;
+}
+
+.vq-chip.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: 0 2px 8px var(--shadow);
+}
+
+.vq-result {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px dashed var(--line-strong);
+    animation: cqcSlide .25s ease;
+}
+
+.vq-cat-tag {
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--accent-deep);
+    background: var(--paper);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: .2rem .65rem;
+    display: inline-block;
+    margin-bottom: .65rem;
+}
+
+.vq-verse {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 1.02rem;
+    line-height: 1.6;
+    color: var(--ink);
+    margin-bottom: .75rem;
+    padding-left: .85rem;
+    border-left: 3px solid var(--accent);
+}
+
+.vq-quote {
+    font-size: .9rem;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    margin-bottom: .9rem;
+    padding-left: .85rem;
+    border-left: 3px solid var(--line-strong);
+}
+
+.vq-again-btn {
+    background: var(--paper);
+    color: var(--accent-deep);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: .45rem 1rem;
+    font-size: .82rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: background .15s;
+}
+.vq-again-btn:hover { background: var(--accent-soft); border-color: var(--accent); transform: none; box-shadow: none; }
+
+@media (max-width: 640px) {
+    .vq-chips { gap: .3rem; }
+    .vq-chip { padding: .35rem .7rem; font-size: .78rem; }
+}
+
+/* ============================================================
    How This Works — dismissible overlay
    ============================================================ */
 

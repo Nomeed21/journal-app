@@ -388,6 +388,32 @@
             <div class="habits-view-toggle" id="habits-view-toggle">
                 <button type="button" class="hvt-btn active" data-view="streaks" onclick="switchHabitsView('streaks')">🔥 My Habits</button>
                 <button type="button" class="hvt-btn hvt-btn--locked" data-view="domains" id="hvt-domains-btn" onclick="switchHabitsView('domains')">🌐 Domain View</button>
+                <button type="button" class="hvt-btn" id="vq-toggle-btn" onclick="toggleVerseQuotePanel()">📖 Verse &amp; Quote</button>
+            </div>
+
+            <!-- Verse & Quote Generator -->
+            <div id="vq-panel" class="vq-panel" style="display:none">
+                <div class="vq-header">
+                    <span class="vq-label">📖 Verse &amp; Quote Generator</span>
+                    <span class="vq-sub">Pick what you're wrestling with today</span>
+                </div>
+                <div class="vq-chips" id="vq-chips">
+                    <button type="button" class="vq-chip" data-cat="lust">Lust</button>
+                    <button type="button" class="vq-chip" data-cat="greed">Greed</button>
+                    <button type="button" class="vq-chip" data-cat="gluttony">Gluttony</button>
+                    <button type="button" class="vq-chip" data-cat="pride">Pride</button>
+                    <button type="button" class="vq-chip" data-cat="sloth">Sloth</button>
+                    <button type="button" class="vq-chip" data-cat="wrath">Wrath</button>
+                    <button type="button" class="vq-chip" data-cat="envy">Envy</button>
+                    <button type="button" class="vq-chip" data-cat="unmotivated">Unmotivated</button>
+                    <button type="button" class="vq-chip" data-cat="random">🎲 Random</button>
+                </div>
+                <div id="vq-result" class="vq-result" style="display:none">
+                    <div class="vq-cat-tag" id="vq-cat-tag"></div>
+                    <div class="vq-verse" id="vq-verse"></div>
+                    <div class="vq-quote" id="vq-quote"></div>
+                    <button type="button" class="vq-again-btn" id="vq-again-btn" onclick="rerollVerseQuote()">↻ Another one</button>
+                </div>
             </div>
 
             <!-- ═══ Sub-view: Habits (default) ═══ -->

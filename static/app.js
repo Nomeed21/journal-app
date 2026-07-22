@@ -1997,6 +1997,182 @@ function _toast(msg, color = "var(--ink)", duration = 2500) {
 window._loadHabitAIInsight = _loadHabitAIInsight;
 
 // ---------------------------------------------------------------------------
+// Verse & Quote Generator (Habits page)
+// A small self-contained content generator -- no API call, just a curated
+// local set of Bible verses + quotes per struggle category, picked at
+// random on each click. Lives beside the Domain View toggle since it's a
+// "steady yourself" tool in the same spirit as the habits/domains view.
+// ---------------------------------------------------------------------------
+const VQ_CONTENT = {
+    lust: {
+        verses: [
+            "\u201cFlee from sexual immorality... he who sins sexually sins against his own body.\u201d — 1 Corinthians 6:18",
+            "\u201cBlessed are the pure in heart, for they shall see God.\u201d — Matthew 5:8",
+            "\u201cI made a covenant with my eyes not to look lustfully at a girl.\u201d — Job 31:1",
+            "\u201cPut to death, therefore, whatever belongs to your earthly nature: sexual immorality, impurity, lust, evil desires.\u201d — Colossians 3:5",
+        ],
+        quotes: [
+            "Discipline is choosing between what you want now and what you want most. — Abraham Lincoln",
+            "The chains of habit are too weak to be felt until they are too strong to be broken. — Samuel Johnson",
+            "You are what you repeatedly do. Guard your eyes, guard your mind. — Unknown",
+        ],
+    },
+    greed: {
+        verses: [
+            "\u201cFor the love of money is a root of all kinds of evil.\u201d — 1 Timothy 6:10",
+            "\u201cWatch out! Be on your guard against all kinds of greed; life does not consist in an abundance of possessions.\u201d — Luke 12:15",
+            "\u201cWhoever loves money never has enough; whoever loves wealth is never satisfied with their income.\u201d — Ecclesiastes 5:10",
+            "\u201cKeep your lives free from the love of money and be content with what you have.\u201d — Hebrews 13:5",
+        ],
+        quotes: [
+            "He who is not contented with what he has would not be contented with what he would like to have. — Socrates",
+            "Wealth consists not in having great possessions, but in having few wants. — Epictetus",
+            "Enough is a feast. — Buddhist Proverb",
+        ],
+    },
+    gluttony: {
+        verses: [
+            "\u201cWhether you eat or drink or whatever you do, do it all for the glory of God.\u201d — 1 Corinthians 10:31",
+            "\u201cDo you not know that your bodies are temples of the Holy Spirit?\u201d — 1 Corinthians 6:19",
+            "\u201cPut a knife to your throat if you are given to gluttony.\u201d — Proverbs 23:2",
+            "\u201cFor the kingdom of God is not a matter of eating and drinking, but of righteousness, peace and joy.\u201d — Romans 14:17",
+        ],
+        quotes: [
+            "We are what we repeatedly do. Excellence, then, is not an act, but a habit. — Aristotle",
+            "Self-control is strength. Calmness is mastery. — James Allen",
+            "Small disciplines repeated with consistency every day lead to great achievements. — John Maxwell",
+        ],
+    },
+    pride: {
+        verses: [
+            "\u201cPride goes before destruction, a haughty spirit before a fall.\u201d — Proverbs 16:18",
+            "\u201cGod opposes the proud but shows favor to the humble.\u201d — James 4:6",
+            "\u201cHumble yourselves, therefore, under God's mighty hand, that he may lift you up in due time.\u201d — 1 Peter 5:6",
+            "\u201cDo nothing out of selfish ambition or vain conceit, but in humility value others above yourselves.\u201d — Philippians 2:3",
+        ],
+        quotes: [
+            "Humility is not thinking less of yourself, it's thinking of yourself less. — C.S. Lewis",
+            "The higher we are placed, the more humbly we should walk. — Cicero",
+            "It is impossible for a man to be cheated by anyone but himself. — Ralph Waldo Emerson",
+        ],
+    },
+    sloth: {
+        verses: [
+            "\u201cWhatever you do, work at it with all your heart, as working for the Lord.\u201d — Colossians 3:23",
+            "\u201cGo to the ant, you sluggard; consider its ways and be wise.\u201d — Proverbs 6:6",
+            "\u201cIn all toil there is profit, but mere talk tends only to poverty.\u201d — Proverbs 14:23",
+            "\u201cLet us not become weary in doing good, for at the proper time we will reap a harvest.\u201d — Galatians 6:9",
+        ],
+        quotes: [
+            "A river cuts through rock not because of its power, but because of its persistence. — Jim Watkins",
+            "The secret of getting ahead is getting started. — Mark Twain",
+            "Discipline is the bridge between goals and accomplishment. — Jim Rohn",
+        ],
+    },
+    wrath: {
+        verses: [
+            "\u201cEveryone should be quick to listen, slow to speak and slow to become angry.\u201d — James 1:19",
+            "\u201cA gentle answer turns away wrath, but a harsh word stirs up anger.\u201d — Proverbs 15:1",
+            "\u201cIn your anger do not sin: Do not let the sun go down while you are still angry.\u201d — Ephesians 4:26",
+            "\u201cWhoever is slow to anger is better than the mighty.\u201d — Proverbs 16:32",
+        ],
+        quotes: [
+            "For every minute you remain angry, you give up sixty seconds of peace of mind. — Ralph Waldo Emerson",
+            "Anger is an acid that can do more harm to the vessel in which it is stored. — Mark Twain",
+            "Speak when you are angry and you will make the best speech you will ever regret. — Ambrose Bierce",
+        ],
+    },
+    envy: {
+        verses: [
+            "\u201cA heart at peace gives life to the body, but envy rots the bones.\u201d — Proverbs 14:30",
+            "\u201cLet us not become conceited, provoking and envying each other.\u201d — Galatians 5:26",
+            "\u201cFor where you have envy and selfish ambition, there you find disorder and every evil practice.\u201d — James 3:16",
+            "\u201cLove is patient, love is kind. It does not envy, it does not boast, it is not proud.\u201d — 1 Corinthians 13:4",
+        ],
+        quotes: [
+            "Comparison is the thief of joy. — Theodore Roosevelt",
+            "Envy is the art of counting the other fellow's blessings instead of your own. — Harold Coffin",
+            "No man was ever honored for what he received. Honor has been the reward for what he gave. — Calvin Coolidge",
+        ],
+    },
+    unmotivated: {
+        verses: [
+            "\u201cI can do all this through him who gives me strength.\u201d — Philippians 4:13",
+            "\u201cLet us run with perseverance the race marked out for us.\u201d — Hebrews 12:1",
+            "\u201cBe strong and courageous. Do not be afraid; do not be discouraged, for the Lord your God will be with you wherever you go.\u201d — Joshua 1:9",
+            "\u201cBut those who hope in the Lord will renew their strength. They will soar on wings like eagles.\u201d — Isaiah 40:31",
+        ],
+        quotes: [
+            "You don't have to be great to start, but you have to start to be great. — Zig Ziglar",
+            "Motivation is what gets you started. Habit is what keeps you going. — Jim Ryun",
+            "The pain of discipline weighs ounces; the pain of regret weighs tons. — Jim Rohn",
+        ],
+    },
+};
+const VQ_CATEGORIES = Object.keys(VQ_CONTENT);
+let vqLastCategory = null;
+
+function _vqPick(cat) {
+    const bank = VQ_CONTENT[cat];
+    const verse = bank.verses[Math.floor(Math.random() * bank.verses.length)];
+    const quote = bank.quotes[Math.floor(Math.random() * bank.quotes.length)];
+    return { verse, quote };
+}
+
+window.toggleVerseQuotePanel = function() {
+    const panel = document.getElementById("vq-panel");
+    const btn   = document.getElementById("vq-toggle-btn");
+    if (!panel) return;
+    const open = panel.style.display === "none";
+    panel.style.display = open ? "" : "none";
+    if (btn) btn.classList.toggle("active", open);
+};
+
+function _vqRender(cat) {
+    vqLastCategory = cat;
+    const { verse, quote } = _vqPick(cat);
+    const resultEl = document.getElementById("vq-result");
+    const tagEl    = document.getElementById("vq-cat-tag");
+    const verseEl  = document.getElementById("vq-verse");
+    const quoteEl  = document.getElementById("vq-quote");
+    if (!resultEl) return;
+    const label = cat === "random"
+        ? "Random"
+        : cat.charAt(0).toUpperCase() + cat.slice(1);
+    if (tagEl)   tagEl.textContent   = `✦ ${label}`;
+    if (verseEl) verseEl.textContent = verse;
+    if (quoteEl) quoteEl.textContent = quote;
+    resultEl.style.display = "";
+    document.querySelectorAll("#vq-chips .vq-chip").forEach(c =>
+        c.classList.toggle("active", c.dataset.cat === cat));
+}
+
+window.rerollVerseQuote = function() {
+    if (!vqLastCategory) return;
+    const cat = vqLastCategory === "random"
+        ? VQ_CATEGORIES[Math.floor(Math.random() * VQ_CATEGORIES.length)]
+        : vqLastCategory;
+    _vqRender(cat === "random" ? VQ_CATEGORIES[Math.floor(Math.random() * VQ_CATEGORIES.length)] : cat);
+    // Keep "random" selection sticky so rerolling continues surprising
+    // across categories rather than locking onto whichever one was drawn.
+    if (vqLastCategory === "random") vqLastCategory = "random";
+};
+
+document.getElementById("vq-chips")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".vq-chip");
+    if (!btn) return;
+    const cat = btn.dataset.cat;
+    if (cat === "random") {
+        vqLastCategory = "random";
+        _vqRender(VQ_CATEGORIES[Math.floor(Math.random() * VQ_CATEGORIES.length)]);
+        document.querySelectorAll("#vq-chips .vq-chip").forEach(c =>
+            c.classList.toggle("active", c.dataset.cat === "random"));
+    } else {
+        _vqRender(cat);
+    }
+});
+
+// ---------------------------------------------------------------------------
 // Chat
 // ---------------------------------------------------------------------------
 const chatMessages = document.getElementById("chat-messages");

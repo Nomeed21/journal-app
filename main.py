@@ -4257,6 +4257,14 @@ def daily_quest():
     if analytics["stagnating"]:
         risk_note += " User seems stagnant — recommend something that breaks the pattern."
 
+    # Time-of-day context. This is the one prompt whose entire job is
+    # "what should I do RIGHT NOW" — so unlike the other coaching surfaces,
+    # it needs the actual current hour, not just the discovery feed's
+    # historical peak windows. local_hour_now() already existed for exactly
+    # this kind of time-sensitive gameplay logic but had no caller.
+    current_hour = local_hour_now()
+    time_note = f"Current local time: {current_hour}:00."
+
     prompt = f"""You are a quest generator for a personal journal RPG.
 
 Active goals and pending quests:
@@ -4264,8 +4272,17 @@ Active goals and pending quests:
 
 {mood_note}
 {risk_note}
+{time_note}
 
-Pick the single most impactful task the user should do TODAY.
+{build_pattern_context()}
+
+{build_discovery_context()}
+
+Pick the single most impactful task the user should do TODAY, right now.
+Weigh the current hour against any focus/energy/mood peak-window fact above: if it's a low-capacity
+window for a hard task, prefer something easier/shorter now and note that in "why" — don't assign a
+demanding task into a window the data says is weak. If the current hour falls inside a known peak
+window, it's fine to lean into something harder there instead.
 Reply in this exact JSON format (no markdown, no extra text):
 {{
   "task": "exact task name from the list",
@@ -4273,7 +4290,7 @@ Reply in this exact JSON format (no markdown, no extra text):
   "category": "category",
   "difficulty": "Easy|Medium|Hard",
   "time": estimated minutes as a number,
-  "why": "one sentence reason why this task matters most today",
+  "why": "one sentence reason why this task matters most right now",
   "xp": a number between 40 and 150
 }}"""
 
