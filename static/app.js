@@ -2787,6 +2787,7 @@ function buildQuestCard(q, sectionKey) {
     </div>` : "";
 
     // Footer actions
+    const focusBtn = `<button class="qb-focus-btn" onclick="quickStartFocus(${q.id}, '${questTitleEsc}', '${questCategoryEsc}', 25)" title="Start a focus session on this quest">⏱</button>`;
     const footHtml = isCompleted
         ? `<div class="qb-card-foot">
                <div class="qb-completed-badge">✅ ${q.is_repeating ? `Done today +${xp} XP — resets tomorrow` : `Completed +${xp} XP`}</div>
@@ -2796,6 +2797,7 @@ function buildQuestCard(q, sectionKey) {
                <button class="qb-complete-btn" onclick="completeQuestBoard(${q.id}, this)">
                    ⚔️ Complete +${xp} XP
                </button>
+               ${focusBtn}
                <button class="qb-edit-btn" onclick="openQuestEditModal(${q.id}, '${_escAttr(q.title)}', '${_escAttr(q.description||'')}', '${diff}', '${q.section||sectionKey}', ${xp}, ${!!q.is_repeating})">✏️</button>
                <button class="qb-del-btn" onclick="deleteQuestBoard(${q.id}, event)">🗑</button>
            </div>`;
@@ -3810,6 +3812,227 @@ document.addEventListener("click", (e) => {
     if (!panel || !panel.classList.contains("chat-panel--open")) return;
     if (panel.contains(e.target) || (fab && fab.contains(e.target))) return;
     window.toggleChatPanel(false);
+});
+
+// ---------------------------------------------------------------------------
+// Focus Timer — a real Pomodoro-style session instead of static "use the
+// Pomodoro technique" text. Lives at top level (like the chat popup toggle)
+// since it's invoked from inline onclick="" and needs to survive page/tab
+// switches without losing a running countdown.
+// ---------------------------------------------------------------------------
+const FOCUS_STORAGE_KEY = "liainne-focus-session";
+let _focusState = null;      // { sessionId, endTime, totalSeconds, label }
+let _focusTickHandle  = null;
+const FOCUS_RING_CIRCUMFERENCE = 2 * Math.PI * 54;
+
+function _focusSaveState() {
+    if (_focusState) localStorage.setItem(FOCUS_STORAGE_KEY, JSON.stringify(_focusState));
+    else localStorage.removeItem(FOCUS_STORAGE_KEY);
+}
+
+function _focusFormatClock(totalSeconds) {
+    const s = Math.max(0, Math.round(totalSeconds));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+window.toggleFocusPanel = function(force) {
+    const panel = document.getElementById("focus-panel");
+    const fab   = document.getElementById("focus-fab");
+    const icon  = document.getElementById("focus-fab-icon");
+    if (!panel) return;
+    const shouldOpen = typeof force === "boolean" ? force : !panel.classList.contains("chat-panel--open");
+    panel.classList.toggle("chat-panel--open", shouldOpen);
+    if (fab)  fab.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    if (icon) icon.textContent = shouldOpen ? "✕" : "⏱";
+    if (shouldOpen) {
+        _loadFocusTodayStat();
+        if (_focusState) document.getElementById("focus-task-label")?.blur();
+    }
+};
+
+// Prefill + open the panel from anywhere (Bottleneck card, quest card).
+// Doesn't auto-start — the person still confirms duration and hits Start,
+// since jumping straight into a countdown without a beat to breathe first
+// defeats the point of "just sit for it."
+window.quickStartFocus = function(questId, title, category, minutes) {
+    _focusPendingQuestId = questId || null;
+    _focusPendingCategory = category || "Personal Growth";
+    const labelInput = document.getElementById("focus-task-label");
+    if (labelInput) labelInput.value = title && title !== "Focus Session" ? title : "";
+    if (minutes) {
+        document.querySelectorAll("#focus-duration-row .focus-dur-btn").forEach(b =>
+            b.classList.toggle("active", parseInt(b.dataset.min) === minutes));
+    }
+    toggleFocusPanel(true);
+};
+let _focusPendingQuestId  = null;
+let _focusPendingCategory = "Personal Growth";
+
+document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll("#focus-duration-row .focus-dur-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+            document.querySelectorAll("#focus-duration-row .focus-dur-btn").forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+        });
+    });
+});
+
+async function _loadFocusTodayStat() {
+    const el = document.getElementById("focus-today-stat");
+    if (!el) return;
+    try {
+        const data = await (await fetch("/focus/today")).json();
+        el.textContent = data.completed_count
+            ? `Today: ${data.completed_count} session${data.completed_count !== 1 ? "s" : ""} · ${data.total_minutes} min focused`
+            : "No focus sessions logged yet today.";
+    } catch (_) { el.textContent = ""; }
+}
+
+window.startFocusSession = async function() {
+    const label = document.getElementById("focus-task-label")?.value.trim() || "Focus session";
+    const activeBtn = document.querySelector("#focus-duration-row .focus-dur-btn.active");
+    const minutes = parseInt(activeBtn?.dataset.min) || 25;
+
+    const btn = document.querySelector(".focus-start-btn");
+    if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
+    try {
+        const res  = await fetch("/focus/start", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                quest_id: _focusPendingQuestId, task_label: label,
+                duration_minutes: minutes, category: _focusPendingCategory,
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.session) { _toast("Could not start focus session.", "#ef5350"); return; }
+
+        const totalSeconds = minutes * 60;
+        _focusState = {
+            sessionId: data.session.id,
+            endTime: Date.now() + totalSeconds * 1000,
+            totalSeconds, label,
+        };
+        _focusSaveState();
+        _focusPendingQuestId = null;
+        _renderFocusRunning();
+        _focusStartTick();
+    } catch (_) {
+        _toast("Could not start focus session.", "#ef5350");
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "▶ Start Focus Session"; }
+    }
+};
+
+function _renderFocusRunning() {
+    const setup = document.getElementById("focus-setup");
+    if (setup) setup.style.display = "none";
+    const running = document.getElementById("focus-running");
+    if (running) running.style.display = "";
+    const labelEl = document.getElementById("focus-running-label");
+    if (labelEl) labelEl.textContent = _focusState.label;
+    const sub = document.getElementById("focus-panel-sub");
+    if (sub) sub.textContent = "In progress — just stay with it.";
+    toggleFocusPanel(true);
+    _focusTick();
+}
+
+function _renderFocusSetup() {
+    const setup = document.getElementById("focus-setup");
+    const running = document.getElementById("focus-running");
+    if (setup) setup.style.display = "";
+    if (running) running.style.display = "none";
+    const sub = document.getElementById("focus-panel-sub");
+    if (sub) sub.textContent = "Just sit for it.";
+    _loadFocusTodayStat();
+}
+
+function _focusStartTick() {
+    if (_focusTickHandle) clearInterval(_focusTickHandle);
+    _focusTickHandle = setInterval(_focusTick, 1000);
+}
+
+function _focusTick() {
+    if (!_focusState) return;
+    const remainingMs = _focusState.endTime - Date.now();
+    const remainingSeconds = remainingMs / 1000;
+
+    if (remainingSeconds <= 0) {
+        clearInterval(_focusTickHandle);
+        _focusTickHandle = null;
+        _completeFocusSession();
+        return;
+    }
+
+    const label = document.getElementById("focus-time-label");
+    if (label) label.textContent = _focusFormatClock(remainingSeconds);
+
+    const ring = document.getElementById("focus-ring-progress");
+    if (ring) {
+        const fractionRemaining = Math.max(0, remainingSeconds / _focusState.totalSeconds);
+        const offset = FOCUS_RING_CIRCUMFERENCE * (1 - fractionRemaining);
+        ring.style.strokeDasharray  = `${FOCUS_RING_CIRCUMFERENCE}`;
+        ring.style.strokeDashoffset = `${offset}`;
+    }
+}
+
+async function _completeFocusSession() {
+    if (!_focusState) return;
+    const sessionId = _focusState.sessionId;
+    const totalMinutes = Math.round(_focusState.totalSeconds / 60);
+    _focusState = null;
+    _focusSaveState();
+    _renderFocusSetup();
+    try {
+        const data = await (await fetch(`/focus/${sessionId}/complete`, { method: "POST" })).json();
+        if (data.xp_earned) {
+            showXPFlash(data.xp_earned, "Focus Session");
+            _toast(`⏱ ${totalMinutes}-min focus session complete — +${data.xp_earned} XP`, "var(--accent-deep)", 3800);
+        }
+        if (data.new_achievements) showAchievementToast(data.new_achievements);
+    } catch (_) {
+        _toast("Session finished, but couldn't record it — check your connection.", "#ef5350");
+    }
+    _loadFocusTodayStat();
+}
+
+window.cancelFocusSession = async function() {
+    if (!_focusState) return;
+    if (!confirm("Give up on this focus session? No XP will be earned.")) return;
+    const sessionId = _focusState.sessionId;
+    if (_focusTickHandle) { clearInterval(_focusTickHandle); _focusTickHandle = null; }
+    _focusState = null;
+    _focusSaveState();
+    _renderFocusSetup();
+    try { await fetch(`/focus/${sessionId}/cancel`, { method: "POST" }); } catch (_) {}
+};
+
+// Resume a session already in progress after a page reload/tab switch, or
+// auto-complete one whose time has already elapsed while the tab was away.
+(function _resumeFocusSessionIfAny() {
+    let saved;
+    try { saved = JSON.parse(localStorage.getItem(FOCUS_STORAGE_KEY) || "null"); } catch (_) { saved = null; }
+    if (!saved || !saved.sessionId) return;
+    _focusState = saved;
+    if (Date.now() >= saved.endTime) {
+        document.addEventListener("DOMContentLoaded", () => _completeFocusSession());
+    } else {
+        document.addEventListener("DOMContentLoaded", () => {
+            _renderFocusRunning();
+            _focusStartTick();
+            toggleFocusPanel(false); // resumed silently in the background; open on demand
+        });
+    }
+})();
+
+// Close the focus popup when clicking outside it, same pattern as chat.
+document.addEventListener("click", (e) => {
+    const panel = document.getElementById("focus-panel");
+    const fab   = document.getElementById("focus-fab");
+    if (!panel || !panel.classList.contains("chat-panel--open")) return;
+    if (panel.contains(e.target) || (fab && fab.contains(e.target))) return;
+    window.toggleFocusPanel(false);
 });
 
 // ---------------------------------------------------------------------------

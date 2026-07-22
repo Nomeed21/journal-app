@@ -6729,6 +6729,192 @@ body {
 }
 
 /* ============================================================
+   Focus Timer — floating popup (mirrors the chat popup pattern,
+   positioned on the opposite/left side so the two don't collide)
+   ============================================================ */
+
+.focus-fab {
+    position: fixed;
+    left: 1.5rem;
+    bottom: 1.5rem;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--accent-deep);
+    color: #fff;
+    font-size: 1.3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 8px 22px var(--shadow);
+    z-index: 1201;
+    transition: background .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+.focus-fab:hover { background: var(--accent); transform: translateY(-2px) scale(1.05); box-shadow: 0 10px 26px var(--shadow); }
+.focus-fab:active { transform: translateY(0) scale(.97); }
+
+.focus-panel {
+    position: fixed;
+    left: 1.5rem;
+    bottom: 5.75rem;
+    width: 300px;
+    flex-shrink: 0;
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 18px;
+    box-shadow: 0 16px 44px rgba(0,0,0,.2);
+    display: flex;
+    flex-direction: column;
+    z-index: 1200;
+    opacity: 0;
+    transform: translateY(14px) scale(.97);
+    pointer-events: none;
+    transition: opacity .18s ease, transform .18s ease;
+    overflow: hidden;
+}
+
+.focus-panel.chat-panel--open {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+.focus-panel-body {
+    padding: 1rem 1.1rem 1.25rem;
+}
+
+#focus-task-label {
+    margin-bottom: 0;
+}
+
+.focus-duration-row {
+    display: flex;
+    gap: .4rem;
+    margin: .4rem 0 .9rem;
+}
+
+.focus-dur-btn {
+    flex: 1;
+    background: var(--paper-soft);
+    color: var(--ink-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: .45rem .5rem;
+    font-size: .85rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: background .12s, color .12s, border-color .12s;
+}
+.focus-dur-btn:hover { background: var(--accent-soft); color: var(--accent-deep); transform: none; box-shadow: none; }
+.focus-dur-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: 0 2px 8px var(--shadow);
+}
+
+.focus-start-btn {
+    width: 100%;
+    background: var(--accent-deep);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: .65rem 1rem;
+    font-size: .9rem;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 2px 8px var(--shadow);
+    transition: background .15s;
+}
+.focus-start-btn:hover { background: var(--accent); transform: none; }
+.focus-start-btn:disabled { opacity: .6; cursor: not-allowed; }
+
+.focus-today-stat {
+    margin-top: .75rem;
+    font-size: .74rem;
+    color: var(--ink-faint);
+    text-align: center;
+    line-height: 1.4;
+}
+
+.focus-ring-wrap {
+    position: relative;
+    width: 150px;
+    height: 150px;
+    margin: .25rem auto .9rem;
+}
+
+.focus-ring-progress {
+    transform: rotate(-90deg);
+    transform-origin: 60px 60px;
+    transition: stroke-dashoffset 1s linear;
+}
+
+.focus-time-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--font-display);
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.focus-running-label {
+    text-align: center;
+    font-size: .85rem;
+    color: var(--ink-soft);
+    margin-bottom: .9rem;
+    line-height: 1.4;
+    padding: 0 .5rem;
+}
+
+.focus-cancel-btn {
+    width: 100%;
+    background: none;
+    color: var(--ink-faint);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    padding: .5rem 1rem;
+    font-size: .82rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: background .12s, color .12s, border-color .12s;
+}
+.focus-cancel-btn:hover { background: #ffebee; color: #c62828; border-color: #ef9a9a; transform: none; box-shadow: none; }
+
+/* Quick-start button on quest cards */
+.qb-focus-btn {
+    background: var(--paper-soft);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: .45rem .6rem;
+    font-size: .9rem;
+    cursor: pointer;
+    color: var(--accent-deep);
+    box-shadow: none;
+    transition: background .1s;
+    flex-shrink: 0;
+}
+.qb-focus-btn:hover { background: var(--accent-soft); border-color: var(--accent); transform: none; box-shadow: none; }
+
+@media (max-width: 900px) {
+    .focus-panel {
+        left: .75rem;
+        right: .75rem;
+        width: auto;
+        bottom: 5rem;
+    }
+    .focus-fab { left: 1rem; bottom: 1rem; }
+}
+
+/* ============================================================
    How This Works — dismissible overlay
    ============================================================ */
 

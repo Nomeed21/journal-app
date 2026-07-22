@@ -469,7 +469,10 @@
                 <div class="bottleneck-card" id="bottleneck-card">
                     <div class="btn-header">
                         <span class="btn-label">🔍 Why Am I Stuck?</span>
-                        <button class="btn-ghost btn-sm" onclick="loadBottleneck()">Analyze</button>
+                        <div style="display:flex;gap:.4rem">
+                            <button class="btn-ghost btn-sm" onclick="quickStartFocus(null,'Focus Session','Personal Growth',25)">⏱ Start Focus</button>
+                            <button class="btn-ghost btn-sm" onclick="loadBottleneck()">Analyze</button>
+                        </div>
                     </div>
                     <div id="bottleneck-content" class="btn-body">Click Analyze to detect your primary bottleneck.</div>
                 </div>
@@ -559,6 +562,45 @@
     <!-- Floating chat toggle button -->
     <button type="button" id="chat-fab" class="chat-fab" onclick="toggleChatPanel()" title="Chat with LiAInne" aria-expanded="false">
         <span id="chat-fab-icon">💬</span>
+    </button>
+
+    <!-- Focus Timer popup + toggle -->
+    <aside class="focus-panel" id="focus-panel">
+        <div class="chat-panel-header">
+            <div class="chat-panel-header-text">
+                <span class="chat-panel-title">⏱ Focus Timer</span>
+                <span class="chat-panel-sub" id="focus-panel-sub">Just sit for it.</span>
+            </div>
+            <button type="button" class="chat-panel-close" onclick="toggleFocusPanel(false)" title="Close">✕</button>
+        </div>
+        <div class="focus-panel-body">
+            <div id="focus-setup">
+                <label class="field-label">What are you focusing on?</label>
+                <input type="text" id="focus-task-label" placeholder="e.g. Study quest, or just &quot;focus&quot;">
+                <label class="field-label" style="margin-top:.5rem">Duration</label>
+                <div class="focus-duration-row" id="focus-duration-row">
+                    <button type="button" class="focus-dur-btn" data-min="5">5m</button>
+                    <button type="button" class="focus-dur-btn active" data-min="25">25m</button>
+                    <button type="button" class="focus-dur-btn" data-min="50">50m</button>
+                </div>
+                <button type="button" class="focus-start-btn" onclick="startFocusSession()">▶ Start Focus Session</button>
+                <div class="focus-today-stat" id="focus-today-stat"></div>
+            </div>
+            <div id="focus-running" style="display:none">
+                <div class="focus-ring-wrap">
+                    <svg viewBox="0 0 120 120" width="150" height="150">
+                        <circle cx="60" cy="60" r="54" fill="none" stroke="var(--line-strong)" stroke-width="8"/>
+                        <circle id="focus-ring-progress" class="focus-ring-progress" cx="60" cy="60" r="54" fill="none" stroke="var(--accent)" stroke-width="8" stroke-linecap="round"/>
+                    </svg>
+                    <div class="focus-time-label" id="focus-time-label">25:00</div>
+                </div>
+                <div class="focus-running-label" id="focus-running-label"></div>
+                <button type="button" class="focus-cancel-btn" onclick="cancelFocusSession()">Give up</button>
+            </div>
+        </div>
+    </aside>
+    <button type="button" id="focus-fab" class="focus-fab" onclick="toggleFocusPanel()" title="Focus Timer" aria-expanded="false">
+        <span id="focus-fab-icon">⏱</span>
     </button>
     <!-- How This Works overlay -->
     <div id="how-it-works-overlay" class="hiw-overlay" style="display:none" onclick="if(event.target===this)closeHowItWorks()">

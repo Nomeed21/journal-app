@@ -6906,6 +6906,115 @@ def _build_recommended_section(all_quests: list[dict]) -> list[dict]:
     return ranked
 
 # ---------------------------------------------------------------------------
+# Focus Timer — a real Pomodoro-style session, not just static AI advice.
+#
+# The Bottleneck Detector used to just tell people "use the Pomodoro
+# technique: 25 min work, 5 min break" as inert text — nothing to click,
+# nothing tracked. This gives it a real mechanism: start a session (against
+# a quest or just standalone), count down, and log + reward it on
+# completion. Every other reward in the app fires on finishing a quest;
+# procrastination is mostly about the pain of *starting*, so this rewards
+# sitting through a session on its own terms — separate XP, no VP (VP stays
+# scarce and quest-completion-only per the existing design), completely
+# independent of whether the linked quest itself ever gets completed.
+# ---------------------------------------------------------------------------
+
+class FocusSessionStart(BaseModel):
+    quest_id: Optional[int] = None
+    task_label: str = "Focus session"
+    duration_minutes: int = 25
+    category: str = "Personal Growth"
+
+FOCUS_XP_PER_MINUTE = 0.6
+FOCUS_XP_MINIMUM    = 10
+
+def _focus_xp_for_duration(minutes: int) -> int:
+    """XP for completing a focus session, scaled gently by length — a 5-minute
+    session still earns something (the point is rewarding starting), a
+    50-minute one earns meaningfully more, but this is deliberately modest
+    next to quest XP so it can't be farmed as a shortcut around actually
+    doing the work."""
+    return max(FOCUS_XP_MINIMUM, round(minutes * FOCUS_XP_PER_MINUTE))
+
+@app.post("/focus/start")
+def start_focus_session(req: FocusSessionStart):
+    duration = max(1, min(req.duration_minutes, 180))
+    label    = (req.task_label or "Focus session").strip()[:200] or "Focus session"
+    row = supabase.table("focus_sessions").insert({
+        "quest_id":         req.quest_id,
+        "task_label":       label,
+        "category":         req.category or "Personal Growth",
+        "duration_minutes": duration,
+        "started_at":       datetime.now(timezone.utc).isoformat(),
+        "is_completed":     False,
+        "abandoned":        False,
+        "xp_earned":        0,
+    }).execute()
+    if not row.data:
+        raise HTTPException(500, "Could not start focus session")
+    return {"status": "started", "session": row.data[0]}
+
+@app.post("/focus/{session_id}/complete")
+def complete_focus_session(session_id: int):
+    """Marks a session complete and grants XP. Idempotent — a duplicate
+    completion call (e.g. a retried request after the client's timer hit
+    zero) just returns the already-recorded amount rather than double-paying."""
+    existing = supabase.table("focus_sessions").select("*").eq("id", session_id).execute()
+    if not existing.data:
+        raise HTTPException(404, "Focus session not found")
+    s = existing.data[0]
+    if s.get("is_completed"):
+        return {"status": "already_completed", "xp_earned": s.get("xp_earned", 0), "category": s.get("category")}
+
+    xp = _focus_xp_for_duration(s["duration_minutes"])
+    boosted_xp = ledger_add("focus_session", str(session_id), s.get("category", "Personal Growth"), xp)
+    supabase.table("focus_sessions").update({
+        "is_completed": True,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "xp_earned":    boosted_xp,
+    }).eq("id", session_id).execute()
+    new_achievements = award_achievements()
+    return {
+        "status":           "completed",
+        "xp_earned":        boosted_xp,
+        "category":         s.get("category", "Personal Growth"),
+        "duration_minutes": s.get("duration_minutes"),
+        "new_achievements": new_achievements,
+    }
+
+@app.post("/focus/{session_id}/cancel")
+def cancel_focus_session(session_id: int):
+    """Ends a session early without XP — 'gave up' is a real, honest outcome
+    worth recording (so a later 'sessions started vs. finished' stat is
+    possible), not something to silently delete."""
+    result = supabase.table("focus_sessions").update({
+        "abandoned":    True,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", session_id).execute()
+    if not result.data:
+        raise HTTPException(404, "Focus session not found")
+    return {"status": "cancelled"}
+
+@app.get("/focus/today")
+def focus_today():
+    start_utc, end_utc = local_day_bounds_utc()
+    rows = (
+        supabase.table("focus_sessions")
+        .select("*")
+        .gte("started_at", start_utc)
+        .lt("started_at", end_utc)
+        .order("started_at", desc=True)
+        .execute()
+        .data
+    )
+    completed = [r for r in rows if r.get("is_completed")]
+    return {
+        "sessions":        rows,
+        "completed_count": len(completed),
+        "total_minutes":   sum(r["duration_minutes"] for r in completed),
+    }
+
+# ---------------------------------------------------------------------------
 # Quest Board endpoints
 # ---------------------------------------------------------------------------
 
