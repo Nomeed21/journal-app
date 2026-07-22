@@ -490,6 +490,17 @@ create table if not exists discoveries (
 create index if not exists idx_discoveries_id_time on discoveries(discovery_id, recorded_at desc);
 create index if not exists idx_discoveries_recorded_at on discoveries(recorded_at);
 
+-- Migration: track when a quest is actually started, not just created/completed.
+-- Run this in the Supabase SQL editor.
+
+ALTER TABLE board_quests
+    ADD COLUMN IF NOT EXISTS started_at timestamptz;
+
+-- Helpful for the procrastination-lag discovery query (grouping completed
+-- quests by category and reading created_at/started_at together).
+CREATE INDEX IF NOT EXISTS idx_board_quests_category_started
+    ON board_quests (category, started_at);
+
 -- No RLS: matches xp_ledger, board_quests, coach_recommendations,
 -- coach_patterns, stated_intents, etc. — every table added since the
 -- service-role-only backend was in place skips RLS entirely, since
@@ -497,6 +508,8 @@ create index if not exists idx_discoveries_recorded_at on discoveries(recorded_a
 -- predate that pattern (quests, habit_profiles, habit_recovery_tokens_v2,
 -- habit_synergies) have it enabled, and only because it was already
 -- turned on before anyone noticed it doesn't do anything for this app.
+
+
 
 notify pgrst, 'reload schema';
 -- ────────────────────────────────────────────────────────────

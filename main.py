@@ -3998,12 +3998,93 @@ def _get_discoveries_for_month(y: int, m: int) -> list[dict]:
         logger.exception("_get_discoveries_for_month failed: %s", e)
         return []
 
+def _discover_procrastination_lag(min_total: int = 5, min_lag_days: float = 1.0) -> list[dict]:
+    """
+    Per-category gap between created_at and started_at on completed
+    quests — "Study quests sit for 6 days before you touch them" style
+    facts. This is the one thing completion-rate cards can't show: a
+    category can have a great completion rate while still being the one
+    you consistently put off starting. min_total gates on sample size the
+    same way _discover_category_completion_rates does; min_lag_days keeps
+    genuinely same-day categories (lag near zero) out of the feed, since
+    "no meaningful delay" isn't a discovery worth a card.
+    """
+    cards = []
+    try:
+        rows = (
+            supabase.table("board_quests")
+            .select("category, created_at, started_at")
+            .eq("is_completed", True)
+            .not_.is_("started_at", "null")
+            .execute()
+            .data
+        )
+        by_cat: dict[str, list] = defaultdict(list)
+        for r in rows:
+            if not r.get("created_at") or not r.get("started_at"):
+                continue
+            try:
+                created = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                started = datetime.fromisoformat(r["started_at"].replace("Z", "+00:00"))
+            except Exception:
+                continue
+            lag_days = (started - created).total_seconds() / 86400
+            by_cat[r.get("category") or "Personal Growth"].append(max(0.0, lag_days))
+
+        ranked = [
+            (cat, sum(lags) / len(lags), len(lags))
+            for cat, lags in by_cat.items() if len(lags) >= min_total
+        ]
+        # Worst (slowest-to-start) categories are the useful signal here —
+        # a fast-starting category isn't procrastination, it's just fine.
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        for cat, avg_lag, n in ranked[:2]:
+            if avg_lag < min_lag_days:
+                continue
+            cards.append({
+                "id":       f"procrastination_lag:{cat}",
+                "kind":     "procrastination_lag",
+                "icon":     "⏳",
+                "title":    f"{cat} quests sit for {round(avg_lag, 1)} day{'s' if round(avg_lag,1) != 1 else ''} before you start them",
+                "detail":   f"Average gap between creating and first touching a {cat} quest, based on {n} completed quests ({_evidence_strength(n)}).",
+                "category": cat,
+                # Trackable value -- the average lag itself, so a later run
+                # can say it grew or shrank (see _discovery_delta).
+                "value":    round(avg_lag, 2),
+            })
+
+        # A same-day counterpart is worth surfacing too, but only when it's
+        # a genuinely different category from the worst offender above --
+        # otherwise a single category with a small sample would show up
+        # twice under two different framings.
+        fastest = sorted(
+            [(cat, sum(lags) / len(lags), len(lags)) for cat, lags in by_cat.items() if len(lags) >= min_total],
+            key=lambda x: x[1]
+        )
+        worst_cats = {c["category"] for c in cards}
+        if fastest and fastest[0][1] < min_lag_days and fastest[0][0] not in worst_cats:
+            cat, avg_lag, n = fastest[0]
+            cards.append({
+                "id":       f"procrastination_lag_fast:{cat}",
+                "kind":     "procrastination_lag_fast",
+                "icon":     "⚡",
+                "title":    f"{cat} quests get started the same day, almost every time",
+                "detail":   f"Average gap of {round(avg_lag, 1)} days between creating and starting, based on {n} completed quests ({_evidence_strength(n)}).",
+                "category": cat,
+                "value":    round(avg_lag, 2),
+            })
+    except Exception as e:
+        logger.exception("_discover_procrastination_lag failed: %s", e)
+    return cards
+
+
 def _build_discovery_cards() -> list[dict]:
     cards = []
     cards += _discover_inactive_habits()
     cards += _discover_time_of_day_peaks()
     cards += _discover_category_completion_rates()
     cards += _discover_mood_after_habits()
+    cards += _discover_procrastination_lag()
 
     # Persist + enrich with trend deltas. This runs at most as often as
     # GET /discoveries itself is allowed to recompute (throttled by
@@ -7196,6 +7277,15 @@ def _complete_board_quest_internal(quest_id: int) -> Optional[dict]:
         "is_completed": True,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
+    # started_at should already be set the moment any task on this quest was
+    # first touched (see _mark_board_task_completed). If it's still null here
+    # — no tasks at all, or the quest was completed directly via the
+    # "Complete" button without ever checking a task — there's no earlier
+    # "began working on it" signal to use, so started_at = completed_at.
+    # That's a real, honest data point (zero lag: created and finished in
+    # one motion), not a guess.
+    if not q.get("started_at"):
+        update_data["started_at"] = update_data["completed_at"]
     if is_repeating:
         update_data["last_completed_date"] = today
         # section deliberately NOT changed — stays "daily" so it keeps showing
@@ -7250,6 +7340,11 @@ def _mark_board_task_completed(task: dict, auto: bool = False) -> dict:
     Centralized task-completion side effects: marks the task done, checks whether
     its parent quest is now fully done, and — if so — runs it through the same
     completion pipeline as a manually-completed quest (XP, achievements, unlocks).
+
+    Also stamps the quest's started_at the first time ANY of its tasks gets
+    touched — this is the "when did you actually begin" signal that
+    created_at/completed_at alone can't give you. Only set once (first task
+    completed on a quest); never overwritten afterward.
     """
     task_id  = task["id"]
     quest_id = task["quest_id"]
@@ -7257,6 +7352,15 @@ def _mark_board_task_completed(task: dict, auto: bool = False) -> dict:
     if auto:
         update["auto_completed"] = True
     supabase.table("board_quest_tasks").update(update).eq("id", task_id).execute()
+
+    try:
+        quest_row = supabase.table("board_quests").select("started_at").eq("id", quest_id).single().execute().data
+        if quest_row and not quest_row.get("started_at"):
+            supabase.table("board_quests").update(
+                {"started_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", quest_id).execute()
+    except Exception as e:
+        logger.exception("_mark_board_task_completed: failed to stamp started_at for quest %s: %s", quest_id, e)
 
     all_tasks = supabase.table("board_quest_tasks").select("is_completed").eq("quest_id", quest_id).execute().data
     all_done  = all(t["is_completed"] for t in all_tasks) if all_tasks else False
