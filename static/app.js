@@ -221,7 +221,7 @@ navItems.forEach(item =>
 const PAGE_LOADERS = {
     journal:  () => { loadProactiveCoaching(); loadTodayStatus(); loadDiscoveries(); },
     entries:  () => { loadEntries(); loadRoutineToday(); },
-    quests:   () => loadQuestBoard(),
+    quests:   () => { loadQuestBoard(); loadBooks(); },
     skills:   () => loadSkills(),
     // Domains used to be its own tab; it's now a drill-down view inside
     // Habits (see switchHabitsView), so both load together under one key.
@@ -3075,6 +3075,202 @@ function _escHtml(s) {
 }
 function _escAttr(s) {
     return String(s || "").replace(/'/g, "\\'").replace(/"/g,"&quot;");
+}
+
+// ---------------------------------------------------------------------------
+// Reading List — lives inside the Quest Board page. Three tabs mirror the
+// backend's three states (want_to_read / reading / finished). Starting and
+// finishing both hit XP-granting endpoints, same feedback pattern (flyXP +
+// showXPFlash + achievement toasts) as quests and habits.
+// ---------------------------------------------------------------------------
+let bookData = { reading: [], want_to_read: [], finished: [] };
+let currentBookTab = "reading";
+
+async function loadBooks() {
+    const el = document.getElementById("book-list-body");
+    if (!el) return;
+    try {
+        bookData = await (await fetch("/books")).json();
+        renderBookList();
+    } catch (_) {
+        el.innerHTML = `<p class="plan-loading">Could not load your reading list.</p>`;
+    }
+}
+
+window.switchBookTab = function(tab) {
+    currentBookTab = tab;
+    document.querySelectorAll(".book-tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+    renderBookList();
+};
+
+window.toggleBookCreatePanel = function() {
+    const panel = document.getElementById("book-create-panel");
+    if (!panel) return;
+    const open = panel.style.display === "none";
+    panel.style.display = open ? "" : "none";
+    if (open) document.getElementById("bk-title")?.focus();
+};
+
+window.createBook = async function() {
+    const title = document.getElementById("bk-title")?.value.trim();
+    if (!title) { _toast("Give the book a title.", "#ef5350"); return; }
+    const author = document.getElementById("bk-author")?.value.trim() || "";
+    const pagesRaw = document.getElementById("bk-pages")?.value;
+    const total_pages = pagesRaw ? parseInt(pagesRaw) : null;
+
+    const res = await fetch("/books", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, author, total_pages }),
+    });
+    if (!res.ok) { _toast("Could not add book.", "#ef5350"); return; }
+
+    ["bk-title", "bk-author", "bk-pages"].forEach(id => { const e = document.getElementById(id); if (e) e.value = ""; });
+    document.getElementById("book-create-panel").style.display = "none";
+    _toast("📚 Added to your Want to Read list!", "var(--accent-deep)", 2500);
+    switchBookTab("want_to_read");
+    loadBooks();
+};
+
+window.startBook = async function(id, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
+    try {
+        const data = await (await fetch(`/books/${id}/start`, { method: "POST" })).json();
+        if (data.xp_earned) { flyXP(btn, data.xp_earned); showXPFlash(data.xp_earned, "Reading"); }
+        if (data.new_achievements) showAchievementToast(data.new_achievements);
+        _toast(`📖 Started "${data.book.title}"!`, "var(--accent-deep)", 2500);
+        switchBookTab("reading");
+        loadBooks();
+    } catch (_) {
+        _toast("Could not start book.", "#ef5350");
+        if (btn) { btn.disabled = false; btn.textContent = "▶ Start Reading"; }
+    }
+};
+
+window.saveBookProgress = async function(id, input) {
+    const page = parseInt(input.value);
+    if (isNaN(page) || page < 0) return;
+    try {
+        await fetch(`/books/${id}/progress`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ current_page: page }),
+        });
+        const book = bookData.reading.find(b => b.id === id);
+        if (book) book.current_page = page;
+        if (book?.total_pages) {
+            const pct = Math.min(100, Math.round(page / book.total_pages * 100));
+            const bar = document.getElementById(`book-prog-fill-${id}`);
+            const label = document.getElementById(`book-prog-label-${id}`);
+            if (bar) bar.style.width = `${pct}%`;
+            if (label) label.textContent = `${pct}%`;
+        }
+    } catch (_) { _toast("Could not save progress.", "#ef5350"); }
+};
+
+window.toggleFinishForm = function(id) {
+    const form = document.getElementById(`book-finish-form-${id}`);
+    if (!form) return;
+    form.style.display = form.style.display === "none" ? "" : "none";
+};
+
+window.submitFinishBook = async function(id, btn) {
+    const summary    = document.getElementById(`book-summary-${id}`)?.value.trim() || "";
+    const reflection = document.getElementById(`book-reflection-${id}`)?.value.trim() || "";
+    if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
+    try {
+        const res  = await fetch(`/books/${id}/finish`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ summary, reflection }),
+        });
+        const data = await res.json();
+        if (data.xp_earned) { flyXP(btn, data.xp_earned); showXPFlash(data.xp_earned, "Reading"); }
+        if (data.new_achievements) showAchievementToast(data.new_achievements);
+        _toast(`🎉 Finished "${data.book.title}"! Great work.`, "#2e7d32", 3500);
+        switchBookTab("finished");
+        loadBooks();
+    } catch (_) {
+        _toast("Could not save. Try again.", "#ef5350");
+        if (btn) { btn.disabled = false; btn.textContent = "✓ Mark Finished"; }
+    }
+};
+
+window.deleteBook = async function(id) {
+    if (!confirm("Remove this book from your list?")) return;
+    await fetch(`/books/${id}`, { method: "DELETE" });
+    loadBooks();
+};
+
+function _bookProgressPct(b) {
+    if (!b.total_pages) return null;
+    return Math.min(100, Math.round((b.current_page || 0) / b.total_pages * 100));
+}
+
+function buildBookCard(b) {
+    if (b.status === "want_to_read") {
+        return `<div class="book-card">
+            <div class="book-card-title">${_escHtml(b.title)}</div>
+            ${b.author ? `<div class="book-card-author">by ${_escHtml(b.author)}</div>` : ""}
+            <div class="book-card-actions">
+                <button class="book-start-btn" onclick="startBook(${b.id}, this)">▶ Start Reading</button>
+                <button class="book-del-btn" onclick="deleteBook(${b.id})" title="Remove">🗑</button>
+            </div>
+        </div>`;
+    }
+    if (b.status === "reading") {
+        const pct = _bookProgressPct(b);
+        return `<div class="book-card book-card--reading">
+            <div class="book-card-title">${_escHtml(b.title)}</div>
+            ${b.author ? `<div class="book-card-author">by ${_escHtml(b.author)}</div>` : ""}
+            ${b.total_pages ? `
+                <div class="book-progress-row">
+                    <div class="book-progress-bar"><div class="book-progress-fill" id="book-prog-fill-${b.id}" style="width:${pct}%"></div></div>
+                    <span class="book-progress-label" id="book-prog-label-${b.id}">${pct}%</span>
+                </div>` : ""}
+            <div class="book-page-row">
+                <label>Page</label>
+                <input type="number" min="0" ${b.total_pages ? `max="${b.total_pages}"` : ""} value="${b.current_page || 0}"
+                    class="book-page-input" onchange="saveBookProgress(${b.id}, this)">
+                ${b.total_pages ? `<span>/ ${b.total_pages}</span>` : ""}
+            </div>
+            <div class="book-card-actions">
+                <button class="book-finish-btn" onclick="toggleFinishForm(${b.id})">✓ Mark Finished</button>
+                <button class="book-del-btn" onclick="deleteBook(${b.id})" title="Remove">🗑</button>
+            </div>
+            <div class="book-finish-form" id="book-finish-form-${b.id}" style="display:none">
+                <label class="field-label">Summary</label>
+                <textarea id="book-summary-${b.id}" rows="2" placeholder="What was this book about?"></textarea>
+                <label class="field-label">Reflection</label>
+                <textarea id="book-reflection-${b.id}" rows="2" placeholder="What did you take away from it?"></textarea>
+                <button class="book-finish-submit-btn" onclick="submitFinishBook(${b.id}, this)">✓ Mark Finished</button>
+            </div>
+        </div>`;
+    }
+    // finished
+    return `<div class="book-card book-card--finished">
+        <div class="book-card-title">${_escHtml(b.title)} <span class="book-done-check">✓</span></div>
+        ${b.author ? `<div class="book-card-author">by ${_escHtml(b.author)}</div>` : ""}
+        ${b.finished_at ? `<div class="book-finished-date">Finished ${b.finished_at.slice(0,10)}</div>` : ""}
+        ${b.summary ? `<div class="book-summary"><strong>Summary:</strong> ${_escHtml(b.summary)}</div>` : ""}
+        ${b.reflection ? `<div class="book-reflection"><strong>Reflection:</strong> ${_escHtml(b.reflection)}</div>` : ""}
+        <div class="book-card-actions">
+            <button class="book-del-btn" onclick="deleteBook(${b.id})" title="Remove">🗑</button>
+        </div>
+    </div>`;
+}
+
+function renderBookList() {
+    const el = document.getElementById("book-list-body");
+    if (!el) return;
+    const list = bookData[currentBookTab] || [];
+    if (!list.length) {
+        const emptyMsgs = {
+            reading:      "Nothing in progress — start a book from Want to Read, or add a new one.",
+            want_to_read: "Your to-read pile is empty. Add a book to get started.",
+            finished:     "No finished books yet — they'll show up here with your summary and reflection.",
+        };
+        el.innerHTML = `<p class="plan-loading">${emptyMsgs[currentBookTab] || "Nothing here yet."}</p>`;
+        return;
+    }
+    el.innerHTML = list.map(b => buildBookCard(b)).join("");
 }
 
 // ---------------------------------------------------------------------------
