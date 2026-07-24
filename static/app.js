@@ -220,7 +220,7 @@ navItems.forEach(item =>
 // ---------------------------------------------------------------------------
 const PAGE_LOADERS = {
     journal:  () => { loadProactiveCoaching(); loadTodayStatus(); loadDiscoveries(); },
-    entries:  () => { loadEntries(); loadPiePlan(); },
+    entries:  () => { loadEntries(); loadRoutineToday(); },
     quests:   () => loadQuestBoard(),
     skills:   () => loadSkills(),
     // Domains used to be its own tab; it's now a drill-down view inside
@@ -1258,103 +1258,130 @@ document.getElementById("clear-btn").addEventListener("click", () => {
 // day server-side (see /pie-plan/today), so it naturally resets each day
 // without needing its own expiry sweep.
 // ---------------------------------------------------------------------------
-let piePlanSlices        = [];
-let piePlanChartInstance = null;
+let routineCategories = [];
+let routineChartInstance = null;
 
-const PIE_PLAN_COLORS = ["#d98aa0","#82b366","#6c8ebf","#d6a73a","#9c70c4","#e57373","#4db6ac","#f7a94b"];
-
-async function loadPiePlan() {
+async function loadRoutineToday() {
     try {
-        const data = await (await fetch("/pie-plan/today")).json();
-        piePlanSlices = data.slices || [];
-    } catch (_) {
-        piePlanSlices = [];
-    }
-    renderPiePlan();
+        const data = await (await fetch("/routine/today")).json();
+        routineCategories = data.categories || [];
+        renderRoutineToday(data);
+    } catch (_) {}
 }
 
-function renderPiePlan() {
+function renderRoutineToday(data) {
     const totalEl = document.getElementById("pie-planner-total");
     const listEl  = document.getElementById("pie-planner-list");
     const emptyEl = document.getElementById("pie-planner-empty");
     const canvas  = document.getElementById("pie-planner-chart");
+    const alertEl = document.getElementById("routine-procrastination-alert");
     if (!listEl || !canvas) return;
 
-    const total = piePlanSlices.reduce((sum, s) => sum + (parseFloat(s.hours) || 0), 0);
-    if (totalEl) {
-        const totalLabel = Number.isInteger(total) ? total : Math.round(total * 100) / 100;
-        totalEl.textContent = `${totalLabel}h / 24h`;
-        totalEl.classList.toggle("pie-planner-total--over", total > 24);
+    if (alertEl) {
+        if (data.procrastination_alert) {
+            alertEl.style.display = "";
+            alertEl.innerHTML = `<div class="proactive-label">🔮 Procrastination Signal</div>
+                <div class="proactive-nudge">${_escHtml(data.procrastination_alert)}</div>`;
+        } else {
+            alertEl.style.display = "none";
+        }
     }
 
-    listEl.innerHTML = piePlanSlices.map((s, i) => `
-        <div class="pie-planner-item">
-            <span class="pie-planner-swatch" style="background:${s.color || PIE_PLAN_COLORS[i % PIE_PLAN_COLORS.length]}"></span>
-            <span class="pie-planner-item-label" title="${_escHtml(s.label)}">${_escHtml(s.label)}</span>
-            <span class="pie-planner-item-hours">${s.hours}h</span>
-            <button type="button" class="pie-planner-del" onclick="removePieSlice(${i})" title="Remove">✕</button>
-        </div>`).join("");
+    const totalRemaining = routineCategories.reduce((s, c) => s + c.remaining_hours, 0);
+    if (totalEl) totalEl.textContent = `${totalRemaining.toFixed(1)}h remaining · ${data.day_pace_pct}% of day gone`;
 
-    if (emptyEl) emptyEl.style.display = piePlanSlices.length ? "none" : "flex";
+    listEl.innerHTML = routineCategories.map(c => {
+        const badge = c.overtime
+            ? `<span class="risk-badge">+${c.overtime_hours}h over</span>`
+            : c.behind_pace
+                ? `<span class="risk-badge" style="background:#fff8e1;color:#e65100">behind pace</span>`
+                : "";
+        return `<div class="pie-planner-item">
+            <span class="pie-planner-swatch" style="background:${c.color}"></span>
+            <span class="pie-planner-item-label">${_escHtml(c.label)}</span>
+            <span class="pie-planner-item-hours">${c.remaining_hours}h left / ${c.planned_hours}h</span>
+            ${badge}
+            <button type="button" class="pie-planner-del" onclick="logRoutineTime(${c.id}, 0.25)" title="+15m">+15m</button>
+            <button type="button" class="pie-planner-del" onclick="logRoutineTime(${c.id}, 1)" title="+1h">+1h</button>
+        </div>`;
+    }).join("") || "";
 
-    if (piePlanChartInstance) { piePlanChartInstance.destroy(); piePlanChartInstance = null; }
-    if (!piePlanSlices.length) return;
+    if (emptyEl) emptyEl.style.display = routineCategories.length ? "none" : "flex";
 
-    piePlanChartInstance = new Chart(canvas.getContext("2d"), {
+    if (routineChartInstance) { routineChartInstance.destroy(); routineChartInstance = null; }
+    if (!routineCategories.length) return;
+
+    // Chart shows remaining hours; overtime categories show as 0 (visually "spent")
+    routineChartInstance = new Chart(canvas.getContext("2d"), {
         type: "pie",
         data: {
-            labels: piePlanSlices.map(s => s.label),
+            labels: routineCategories.map(c => c.label),
             datasets: [{
-                data: piePlanSlices.map(s => parseFloat(s.hours) || 0),
-                backgroundColor: piePlanSlices.map((s, i) => s.color || PIE_PLAN_COLORS[i % PIE_PLAN_COLORS.length]),
-                borderColor: "var(--paper-soft)",
-                borderWidth: 2,
+                data: routineCategories.map(c => c.remaining_hours || 0.01),
+                backgroundColor: routineCategories.map(c => c.overtime ? "#ef5350" : c.color),
+                borderColor: "var(--paper-soft)", borderWidth: 2,
             }],
         },
         options: {
             responsive: true, maintainAspectRatio: false,
             plugins: {
                 legend: { display: false },
-                tooltip: { callbacks: { label: (ctx) => ` ${ctx.label}: ${ctx.parsed}h` } },
+                tooltip: { callbacks: { label: (ctx) => {
+                    const c = routineCategories[ctx.dataIndex];
+                    return ` ${c.label}: ${c.remaining_hours}h left (${c.used_hours}h used of ${c.planned_hours}h)`;
+                }}},
             },
         },
     });
 }
 
-async function savePiePlan() {
-    try {
-        await fetch("/pie-plan/today", {
-            method: "PUT", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ slices: piePlanSlices }),
-        });
-    } catch (_) {}
-}
-
-window.removePieSlice = function(idx) {
-    piePlanSlices.splice(idx, 1);
-    renderPiePlan();
-    savePiePlan();
+window.logRoutineTime = async function(categoryId, hours) {
+    await fetch("/routine/log", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category_id: categoryId, hours }),
+    });
+    loadRoutineToday();
 };
 
-const piePlannerForm = document.getElementById("pie-planner-form");
-if (piePlannerForm) {
-    piePlannerForm.addEventListener("submit", (e) => {
-        e.preventDefault();
-        const labelEl = document.getElementById("pp-label");
-        const hoursEl = document.getElementById("pp-hours");
-        const colorEl = document.getElementById("pp-color");
-        const label = labelEl.value.trim();
-        const hours = parseFloat(hoursEl.value);
-        if (!label || !hours || hours <= 0) return;
-        piePlanSlices.push({ label, hours, color: colorEl.value });
-        labelEl.value = "";
-        hoursEl.value = "";
-        renderPiePlan();
-        savePiePlan();
-        labelEl.focus();
-    });
+window.toggleRoutineSetup = function() {
+    const panel = document.getElementById("routine-setup-panel");
+    const open = panel.style.display === "none";
+    panel.style.display = open ? "" : "none";
+    if (open) renderRoutineSetupList();
+};
+
+function renderRoutineSetupList() {
+    const el = document.getElementById("routine-setup-list");
+    el.innerHTML = routineCategories.map(c => `
+        <div class="pie-planner-item">
+            <span class="pie-planner-swatch" style="background:${c.color}"></span>
+            <span class="pie-planner-item-label">${_escHtml(c.label)}</span>
+            <span class="pie-planner-item-hours">${c.planned_hours}h/day</span>
+            <button type="button" class="pie-planner-del" onclick="deleteRoutineCategory(${c.id})">✕</button>
+        </div>`).join("") || "<p class='plan-loading'>No categories yet — add your first below.</p>";
 }
 
+window.deleteRoutineCategory = async function(id) {
+    if (!confirm("Remove this category from your daily routine?")) return;
+    await fetch(`/routine/categories/${id}`, { method: "DELETE" });
+    loadRoutineToday();
+    renderRoutineSetupList();
+};
+
+document.getElementById("routine-add-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const label  = document.getElementById("rt-label").value.trim();
+    const hours  = parseFloat(document.getElementById("rt-hours").value);
+    const color  = document.getElementById("rt-color").value;
+    if (!label || !hours) return;
+    await fetch("/routine/categories", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ label, planned_hours: hours, color }),
+    });
+    e.target.reset();
+    loadRoutineToday();
+    renderRoutineSetupList();
+});
 
 // ============================================================
 // HABITS V2 — Core Gameplay System

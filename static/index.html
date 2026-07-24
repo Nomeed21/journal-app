@@ -77,23 +77,29 @@
             <!-- Daily Pie Chart Planner -->
             <div class="pie-planner-card" id="pie-planner-card">
                 <div class="pie-planner-header">
-                    <span class="pie-planner-label">📊 Today's Plan</span>
-                    <span class="pie-planner-total" id="pie-planner-total">0h / 24h</span>
+                    <span class="pie-planner-label">⏳ Remaining Time Today</span>
+                    <span class="pie-planner-total" id="pie-planner-total">—</span>
                 </div>
+                <div id="routine-procrastination-alert" class="proactive-coaching" style="display:none"></div>
                 <div class="pie-planner-body">
                     <div class="pie-planner-chart-wrap">
                         <canvas id="pie-planner-chart"></canvas>
-                        <div class="pie-planner-empty" id="pie-planner-empty">Add a block below to plan your day.</div>
+                        <div class="pie-planner-empty" id="pie-planner-empty">Set up your daily routine below.</div>
                     </div>
                     <div class="pie-planner-list-wrap">
                         <div class="pie-planner-list" id="pie-planner-list"></div>
-                        <form id="pie-planner-form" class="pie-planner-add-row">
-                            <input type="text" id="pp-label" placeholder="Block (e.g. Deep Work)" maxlength="40" required>
-                            <input type="number" id="pp-hours" placeholder="Hrs" min="0.25" max="24" step="0.25" required>
-                            <input type="color" id="pp-color" value="#d98aa0" title="Slice color">
-                            <button type="submit">+ Add</button>
-                        </form>
+                        <button type="button" class="btn-ghost btn-sm" onclick="toggleRoutineSetup()">⚙️ Edit Routine</button>
                     </div>
+                </div>
+                <div id="routine-setup-panel" class="qb-create-panel" style="display:none">
+                    <div class="qb-create-title">Daily Routine (repeats every day)</div>
+                    <div id="routine-setup-list"></div>
+                    <form id="routine-add-form" class="pie-planner-add-row">
+                        <input type="text" id="rt-label" placeholder="Category (e.g. Study)" maxlength="30" required>
+                        <input type="number" id="rt-hours" placeholder="Planned hrs" min="0.25" max="24" step="0.25" required>
+                        <input type="color" id="rt-color" value="#d98aa0">
+                        <button type="submit">+ Add</button>
+                    </form>
                 </div>
             </div>
             

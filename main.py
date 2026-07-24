@@ -7867,4 +7867,97 @@ def clear_demo_data():
         except Exception:
             pass
     return {"status": "cleared", "removed": dict(removed)}
+
+class RoutineCategoryCreate(BaseModel):
+    label: str
+    planned_hours: float
+    color: str = "#d98aa0"
+
+class RoutineLogAdd(BaseModel):
+    category_id: int
+    hours: float  # can be negative to undo
+
+@app.get("/routine/categories")
+def list_routine_categories():
+    return supabase.table("routine_categories").select("*").order("id").execute().data
+
+@app.post("/routine/categories")
+def create_routine_category(c: RoutineCategoryCreate):
+    row = supabase.table("routine_categories").insert({
+        "label": c.label.strip(), "planned_hours": max(c.planned_hours, 0.25),
+        "color": c.color, "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return row.data[0]
+
+@app.put("/routine/categories/{cat_id}")
+def update_routine_category(cat_id: int, c: RoutineCategoryCreate):
+    row = supabase.table("routine_categories").update({
+        "label": c.label.strip(), "planned_hours": max(c.planned_hours, 0.25), "color": c.color,
+    }).eq("id", cat_id).execute()
+    if not row.data:
+        raise HTTPException(404, "Category not found")
+    return row.data[0]
+
+@app.delete("/routine/categories/{cat_id}")
+def delete_routine_category(cat_id: int):
+    supabase.table("routine_logs").delete().eq("category_id", cat_id).execute()
+    supabase.table("routine_categories").delete().eq("id", cat_id).execute()
+    return {"status": "deleted"}
+
+@app.post("/routine/log")
+def add_routine_log(entry: RoutineLogAdd):
+    today = local_date_today()
+    existing = (supabase.table("routine_logs").select("*")
+        .eq("category_id", entry.category_id).eq("log_date", today).execute().data)
+    if existing:
+        new_hours = max(0, existing[0]["hours_used"] + entry.hours)
+        supabase.table("routine_logs").update({"hours_used": new_hours}).eq("id", existing[0]["id"]).execute()
+    else:
+        new_hours = max(0, entry.hours)
+        supabase.table("routine_logs").insert({
+            "category_id": entry.category_id, "log_date": today, "hours_used": new_hours,
+        }).execute()
+    return {"status": "logged", "hours_used": new_hours}
+
+@app.get("/routine/today")
+def get_routine_today():
+    today = local_date_today()
+    cats = supabase.table("routine_categories").select("*").order("id").execute().data
+    logs = supabase.table("routine_logs").select("*").eq("log_date", today).execute().data
+    used_by_cat = {l["category_id"]: l["hours_used"] for l in logs}
+
+    current_hour = local_hour_now()
+    day_pace = current_hour / 24  # expected fraction of the day elapsed
+
+    result = []
+    for c in cats:
+        used = used_by_cat.get(c["id"], 0)
+        planned = c["planned_hours"]
+        remaining = max(planned - used, 0)
+        overtime_hours = max(used - planned, 0)
+        pace_pct = (used / planned) if planned else 0
+        result.append({
+            **c, "used_hours": round(used, 2), "remaining_hours": round(remaining, 2),
+            "overtime": overtime_hours > 0, "overtime_hours": round(overtime_hours, 2),
+            "pace_pct": round(pace_pct * 100),
+            "behind_pace": planned > 0 and pace_pct < day_pace - 0.15,  # meaningfully behind expected progress
+        })
+
+    # Procrastination heuristic: any category overtime + any category meaningfully behind pace
+    overtime_cats = [r["label"] for r in result if r["overtime"]]
+    behind_cats   = [r for r in result if r["behind_pace"]]
+    procrastination_alert = None
+    if overtime_cats and behind_cats:
+        worst = min(behind_cats, key=lambda r: r["pace_pct"])
+        procrastination_alert = (
+            f"{', '.join(overtime_cats)} running over today — likely why "
+            f"'{worst['label']}' is behind pace ({worst['pace_pct']}% of its planned time used, "
+            f"{round(day_pace*100)}% of the day gone)."
+        )
+
+    return {
+        "date": today, "categories": result, "current_hour": current_hour,
+        "day_pace_pct": round(day_pace * 100), "procrastination_alert": procrastination_alert,
+    }
+    
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
