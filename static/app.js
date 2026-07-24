@@ -3952,15 +3952,47 @@ window.startFocusSession = async function() {
     }
 };
 
+// Start a plain break countdown -- no server call, no XP, just a timer.
+// Reuses the same running-state UI (ring, label, cancel button) as a focus
+// session so the two feel like one continuous flow instead of separate tools.
+window.startBreak = function(minutes) {
+    if (_focusTickHandle) { clearInterval(_focusTickHandle); _focusTickHandle = null; }
+    const totalSeconds = minutes * 60;
+    _focusState = {
+        sessionId: null,
+        isBreak: true,
+        endTime: Date.now() + totalSeconds * 1000,
+        totalSeconds,
+        label: minutes >= 15 ? "🌿 Long break" : "☕ Short break",
+    };
+    _focusSaveState();
+    _renderFocusRunning();
+    _focusStartTick();
+};
+
 function _renderFocusRunning() {
     const setup = document.getElementById("focus-setup");
     if (setup) setup.style.display = "none";
     const running = document.getElementById("focus-running");
     if (running) running.style.display = "";
+    const isBreak = !!_focusState.isBreak;
+
     const labelEl = document.getElementById("focus-running-label");
-    if (labelEl) labelEl.textContent = _focusState.label;
+    if (labelEl) {
+        labelEl.textContent = _focusState.label;
+        labelEl.classList.toggle("focus-running-label--break", isBreak);
+    }
+    const ring = document.getElementById("focus-ring-progress");
+    if (ring) ring.classList.toggle("focus-ring-progress--break", isBreak);
+
+    const cancelBtn = document.getElementById("focus-cancel-btn");
+    if (cancelBtn) cancelBtn.textContent = isBreak ? "Skip break" : "Give up";
+
+    const breakRow = document.getElementById("focus-break-row-running");
+    if (breakRow) breakRow.style.display = isBreak ? "none" : "";
+
     const sub = document.getElementById("focus-panel-sub");
-    if (sub) sub.textContent = "In progress — just stay with it.";
+    if (sub) sub.textContent = isBreak ? "Step away for a bit." : "In progress — just stay with it.";
     toggleFocusPanel(true);
     _focusTick();
 }
@@ -4006,6 +4038,17 @@ function _focusTick() {
 
 async function _completeFocusSession() {
     if (!_focusState) return;
+
+    // Break countdowns are purely client-side -- no session id, no XP, no
+    // server round-trip. Just reset to setup and nudge back to work.
+    if (_focusState.isBreak) {
+        _focusState = null;
+        _focusSaveState();
+        _renderFocusSetup();
+        _toast("☕ Break's over — ready when you are.", "var(--accent-deep)", 3200);
+        return;
+    }
+
     const sessionId = _focusState.sessionId;
     const totalMinutes = Math.round(_focusState.totalSeconds / 60);
     _focusState = null;
@@ -4021,11 +4064,23 @@ async function _completeFocusSession() {
     } catch (_) {
         _toast("Session finished, but couldn't record it — check your connection.", "#ef5350");
     }
+    // Offer a break right after finishing a real focus session -- the
+    // classic Pomodoro rhythm -- without forcing it on the person.
+    _toast("Want a break? Open the timer to start one.", "var(--ink-soft)", 3200);
     _loadFocusTodayStat();
 }
 
 window.cancelFocusSession = async function() {
     if (!_focusState) return;
+
+    if (_focusState.isBreak) {
+        if (_focusTickHandle) { clearInterval(_focusTickHandle); _focusTickHandle = null; }
+        _focusState = null;
+        _focusSaveState();
+        _renderFocusSetup();
+        return;
+    }
+
     if (!confirm("Give up on this focus session? No XP will be earned.")) return;
     const sessionId = _focusState.sessionId;
     if (_focusTickHandle) { clearInterval(_focusTickHandle); _focusTickHandle = null; }

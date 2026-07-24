@@ -509,7 +509,43 @@ CREATE INDEX IF NOT EXISTS idx_board_quests_category_started
 -- habit_synergies) have it enabled, and only because it was already
 -- turned on before anyone noticed it doesn't do anything for this app.
 
+-- ============================================================
+-- Reading List feature — `books` table
+-- Run this in the Supabase SQL Editor (Project -> SQL Editor -> New query)
+-- ============================================================
 
+create table if not exists public.books (
+    id            bigint generated always as identity primary key,
+    title         text not null,
+    author        text default '',
+    total_pages   integer,
+    current_page  integer default 0,
+    status        text not null default 'want_to_read'
+                  check (status in ('want_to_read', 'reading', 'finished')),
+    summary       text default '',
+    reflection    text default '',
+    created_at    timestamptz not null default now(),
+    started_at    timestamptz,
+    finished_at   timestamptz
+);
+
+-- Speeds up GET /books, which filters/sorts by status and finished_at
+create index if not exists idx_books_status on public.books (status);
+create index if not exists idx_books_finished_at on public.books (finished_at desc);
+
+-- Enable Row Level Security. Since this is a single-user app using the
+-- service-role key (already true for the rest of your tables like
+-- journal_entries, goals, etc.), a permissive policy keeps behavior
+-- consistent with the rest of the schema. Tighten this if you ever add
+-- multi-user auth.
+alter table public.books enable row level security;
+
+create policy "Allow all access to books"
+    on public.books
+    for all
+    using (true)
+    with check (true);
+    
 
 notify pgrst, 'reload schema';
 -- ────────────────────────────────────────────────────────────

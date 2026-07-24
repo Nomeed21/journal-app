@@ -590,6 +590,11 @@
                     <button type="button" class="focus-dur-btn" data-min="50">50m</button>
                 </div>
                 <button type="button" class="focus-start-btn" onclick="startFocusSession()">▶ Start Focus Session</button>
+                <div class="focus-break-row">
+                    <span class="focus-break-label">Need a break instead?</span>
+                    <button type="button" class="focus-break-btn" onclick="startBreak(5)">☕ 5m</button>
+                    <button type="button" class="focus-break-btn" onclick="startBreak(15)">🌿 15m</button>
+                </div>
                 <div class="focus-today-stat" id="focus-today-stat"></div>
             </div>
             <div id="focus-running" style="display:none">
@@ -601,7 +606,11 @@
                     <div class="focus-time-label" id="focus-time-label">25:00</div>
                 </div>
                 <div class="focus-running-label" id="focus-running-label"></div>
-                <button type="button" class="focus-cancel-btn" onclick="cancelFocusSession()">Give up</button>
+                <div class="focus-break-row" id="focus-break-row-running" style="display:none">
+                    <button type="button" class="focus-break-btn" onclick="startBreak(5)">☕ 5m break</button>
+                    <button type="button" class="focus-break-btn" onclick="startBreak(15)">🌿 15m break</button>
+                </div>
+                <button type="button" class="focus-cancel-btn" id="focus-cancel-btn" onclick="cancelFocusSession()">Give up</button>
             </div>
         </div>
     </aside>

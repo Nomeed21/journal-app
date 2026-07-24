@@ -6840,6 +6840,52 @@ body {
     line-height: 1.4;
 }
 
+.focus-break-row {
+    display: flex;
+    align-items: center;
+    gap: .4rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: .7rem;
+}
+
+.focus-break-label {
+    font-size: .74rem;
+    color: var(--ink-faint);
+    width: 100%;
+    text-align: center;
+    margin-bottom: .1rem;
+}
+
+.focus-break-btn {
+    background: var(--paper-soft);
+    color: var(--accent-deep);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: .35rem .8rem;
+    font-size: .8rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: none;
+    transition: background .12s, border-color .12s, transform .1s;
+}
+.focus-break-btn:hover {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: none;
+}
+
+/* Break-mode ring/label read visually distinct from a focus session --
+   calmer green instead of the accent color used for focused work. */
+.focus-ring-progress--break {
+    stroke: #66bb6a;
+}
+.focus-running-label--break {
+    color: #2e7d32;
+    font-weight: 600;
+}
+
 .focus-ring-wrap {
     position: relative;
     width: 150px;
