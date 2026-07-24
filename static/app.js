@@ -3302,6 +3302,8 @@ async function loadSkills() {
             complete every task → the node is automatically mastered → XP is awarded → new nodes unlock.
         </div>`;
 
+    const currentSkillsEntries = [];
+
     trees.forEach(tree => {
         const treeEl = document.createElement("div");
         treeEl.className = "skt-tree";
@@ -3325,8 +3327,18 @@ async function loadSkills() {
                 nodesEl.appendChild(header);
             }
             nodesEl.appendChild(buildNodeCard(node, tree));
+
+            // Currently-in-progress nodes (an active Goal was started for
+            // them but not yet completed) power the sidebar list -- a
+            // compact "what am I actively working on right now" view
+            // alongside the full trees.
+            if (node.active_goal && !node.completed) {
+                currentSkillsEntries.push({ node, tree });
+            }
         });
     });
+
+    renderCurrentSkillsSidebar(currentSkillsEntries);
 
     // Achievements — legendary tier sorts first and gets a distinct
     // gold/prestige card instead of blending in with standard badges.
@@ -3352,6 +3364,41 @@ async function loadSkills() {
     }
 }
 
+// Compact list of skills currently in progress (an active Goal started but
+// not yet completed), shown in the narrow sidebar next to the full skill
+// trees so "what am I actively working on" doesn't require scanning every
+// tree looking for the active-state cards.
+function renderCurrentSkillsSidebar(entries) {
+    const el = document.getElementById("skills-current-list");
+    if (!el) return;
+    if (!entries.length) {
+        el.innerHTML = `<p class="scl-empty">Nothing in progress yet — click <strong>Start Learning</strong> on any available node to begin.</p>`;
+        return;
+    }
+    el.innerHTML = entries.map(({ node, tree }) => {
+        const ag = node.active_goal;
+        const pct = ag?.progress ?? 0;
+        const color = tree.color || "var(--accent)";
+        return `<button type="button" class="scl-item" style="--scl-color:${color}"
+                onclick="scrollToSkillNode('${tree.category}', '${node.id}')">
+            <div class="scl-item-title">${_escHtml(node.name)}</div>
+            <div class="scl-item-tree">${tree.icon || ""} ${_escHtml(tree.label || tree.category)}</div>
+            <div class="scl-item-bar-wrap"><div class="scl-item-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+            <span class="scl-item-pct">${ag?.completed_tasks ?? 0}/${ag?.total_tasks ?? 0} tasks · ${pct}%</span>
+        </button>`;
+    }).join("");
+}
+
+// Jumps from a sidebar entry to its full card in the main tree column and
+// pulses it, reusing the same pulse styling XP gains already use elsewhere.
+window.scrollToSkillNode = function(category, nodeId) {
+    const el = document.getElementById(`sktnode-${category}-${nodeId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("xp-pulse");
+    setTimeout(() => el.classList.remove("xp-pulse"), 900);
+};
+
 function buildNodeCard(node, tree) {
     const el = document.createElement("div");
 
@@ -3365,6 +3412,7 @@ function buildNodeCard(node, tree) {
 
     el.className = `skt-node skt-node--${state}`;
     el.dataset.nodeId = node.id;
+    el.id = `sktnode-${tree.category}-${node.id}`;
 
     // Prerequisites display
     const prereqNames = (node.prerequisites || []).map(pid => {
