@@ -260,12 +260,13 @@ async function loadXPHUD() {
         const info = data.level_info;
         const el   = document.getElementById("xp-hud");
         if (!el) return;
+        const hudPct = Math.round(info.xp_in_level / info.xp_for_level * 100);
         el.innerHTML = `
             <div class="xp-hud-level">Lv ${info.level}</div>
             <div class="xp-hud-bar-wrap">
-                <div class="xp-hud-bar-fill" style="width:${Math.round(info.xp_in_level/5)}%"></div>
+                <div class="xp-hud-bar-fill" style="width:${hudPct}%"></div>
             </div>
-            <div class="xp-hud-text">${info.xp_in_level} / 500 XP</div>
+            <div class="xp-hud-text">${info.xp_in_level} / ${info.xp_for_level} XP</div>
             <div class="vp-hud-text">💰 ${data.vp_balance ?? 0} VP</div>`;
     } catch (_) {}
     loadProgressionStatus();
@@ -3288,13 +3289,14 @@ async function loadSkills() {
     const container = document.getElementById("skill-trees");
     const info = achData.level_info;
 
+    const slbPct = Math.round(info.xp_in_level / info.xp_for_level * 100);
     container.innerHTML = `
         <div class="skill-level-banner">
             <div class="slb-level">Level ${info.level}</div>
             <div class="slb-xp-bar-wrap">
-                <div class="slb-xp-bar-fill" style="width:${Math.round(info.xp_in_level / 5)}%"></div>
+                <div class="slb-xp-bar-fill" style="width:${slbPct}%"></div>
             </div>
-            <div class="slb-xp-text">${info.xp_in_level} / 500 XP · ${info.xp_to_next} to next level</div>
+            <div class="slb-xp-text">${info.xp_in_level} / ${info.xp_for_level} XP · ${info.xp_to_next} to next level</div>
         </div>
         <div class="skill-how-it-works">
             <strong>How it works:</strong>
