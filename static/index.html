@@ -22,6 +22,7 @@
             <li><a href="#" class="nav-item" data-page="quests"><span class="nav-icon">⚔️</span><span class="nav-label">Quests</span></a></li>
             <li><a href="#" class="nav-item" data-page="skills"><span class="nav-icon">🌳</span><span class="nav-label">Skills</span></a></li>
             <li><a href="#" class="nav-item" data-page="habits"><span class="nav-icon">🔥</span><span class="nav-label">Habits</span></a></li>
+            <li><a href="#" class="nav-item" data-page="resume"><span class="nav-icon">🧾</span><span class="nav-label">Resume</span></a></li>
             <li><a href="#" class="nav-item" data-page="insights"><span class="nav-icon">📊</span><span class="nav-label">Insights</span></a></li>
             <li><a href="#" class="nav-item" data-page="review"><span class="nav-icon">🗓️</span><span class="nav-label">Review</span></a></li>
         </ul>
@@ -550,6 +551,87 @@
                     <h2 class="section-h2">🌐 Domain Overview</h2>
                 </div>
                 <div id="domain-cards" class="domain-grid">Loading…</div>
+            </div>
+        </section>
+
+        <!-- PAGE: Resume Skills -->
+        <section class="page" id="page-resume">
+            <div class="page-header">
+                <h1>Resume Skills</h1>
+                <p class="page-sub">Skills you can confidently claim — backed by evidence, ready to paste into a resume</p>
+            </div>
+
+            <div class="resume-toolbar">
+                <button class="btn-ghost btn-sm" onclick="loadResumeSuggestions()">✨ Suggest from my progress</button>
+                <button class="btn-ghost btn-sm" onclick="copyResumeText()">📋 Copy as text</button>
+            </div>
+
+            <div id="resume-suggestions" class="resume-suggestions" style="display:none"></div>
+
+            <div class="resume-columns">
+                <div class="resume-col">
+                    <div class="resume-col-header">
+                        <h2 class="section-h2">🛠️ Hard Skills</h2>
+                        <button class="btn-ghost btn-sm" onclick="toggleResumeCreatePanel('hard')">+ Add</button>
+                    </div>
+                    <div id="resume-create-hard" class="qb-create-panel" style="display:none">
+                        <div class="qb-create-title">Add Hard Skill</div>
+                        <div class="qb-create-form">
+                            <input type="text" id="rsk-hard-name" placeholder="Skill (e.g. Python, SQL, Figma)…" class="qbc-input">
+                            <input type="text" id="rsk-hard-category" placeholder="Category (e.g. Programming) — optional" class="qbc-input">
+                            <textarea id="rsk-hard-evidence" placeholder="Evidence — what makes you confident you can claim this?" rows="2" class="qbc-textarea"></textarea>
+                            <div class="qbc-field">
+                                <label class="qbc-label">Confidence</label>
+                                <select id="rsk-hard-confidence" class="qbc-select">
+                                    <option value="1">★☆☆☆☆ Just starting</option>
+                                    <option value="2">★★☆☆☆ Some exposure</option>
+                                    <option value="3" selected>★★★☆☆ Comfortable</option>
+                                    <option value="4">★★★★☆ Strong</option>
+                                    <option value="5">★★★★★ Confident expert</option>
+                                </select>
+                            </div>
+                            <div class="qbc-actions">
+                                <button onclick="createResumeSkill('hard')" class="qbc-submit">Add Skill</button>
+                                <button onclick="toggleResumeCreatePanel('hard')" class="btn-ghost btn-sm">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="resume-list-hard" class="resume-list">
+                        <p class="plan-loading">Loading…</p>
+                    </div>
+                </div>
+
+                <div class="resume-col">
+                    <div class="resume-col-header">
+                        <h2 class="section-h2">🤝 Soft Skills</h2>
+                        <button class="btn-ghost btn-sm" onclick="toggleResumeCreatePanel('soft')">+ Add</button>
+                    </div>
+                    <div id="resume-create-soft" class="qb-create-panel" style="display:none">
+                        <div class="qb-create-title">Add Soft Skill</div>
+                        <div class="qb-create-form">
+                            <input type="text" id="rsk-soft-name" placeholder="Skill (e.g. Communication, Discipline)…" class="qbc-input">
+                            <input type="text" id="rsk-soft-category" placeholder="Category (e.g. Leadership) — optional" class="qbc-input">
+                            <textarea id="rsk-soft-evidence" placeholder="Evidence — a specific example, not just a claim" rows="2" class="qbc-textarea"></textarea>
+                            <div class="qbc-field">
+                                <label class="qbc-label">Confidence</label>
+                                <select id="rsk-soft-confidence" class="qbc-select">
+                                    <option value="1">★☆☆☆☆ Just starting</option>
+                                    <option value="2">★★☆☆☆ Some exposure</option>
+                                    <option value="3" selected>★★★☆☆ Comfortable</option>
+                                    <option value="4">★★★★☆ Strong</option>
+                                    <option value="5">★★★★★ Confident expert</option>
+                                </select>
+                            </div>
+                            <div class="qbc-actions">
+                                <button onclick="createResumeSkill('soft')" class="qbc-submit">Add Skill</button>
+                                <button onclick="toggleResumeCreatePanel('soft')" class="btn-ghost btn-sm">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="resume-list-soft" class="resume-list">
+                        <p class="plan-loading">Loading…</p>
+                    </div>
+                </div>
             </div>
         </section>
 

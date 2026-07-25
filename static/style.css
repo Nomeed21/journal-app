@@ -7444,3 +7444,184 @@ body {
 @media (max-width: 640px) {
     .hiw-card { grid-template-columns: 1fr; grid-template-areas: "icon" "title" "body"; }
 }
+/* ============================================================
+   Resume Skills — hard/soft skills list backed by evidence
+   ============================================================ */
+
+.resume-toolbar {
+    display: flex;
+    gap: .6rem;
+    margin-bottom: 1.1rem;
+    flex-wrap: wrap;
+}
+
+.resume-suggestions {
+    background: linear-gradient(135deg, var(--accent-soft) 0%, #fce4ec 100%);
+    border: 1.5px solid var(--line-strong);
+    border-left: 4px solid var(--accent-deep);
+    border-radius: 14px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+}
+
+.resume-suggestions-header {
+    font-size: .75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--accent-deep);
+    margin-bottom: .75rem;
+}
+
+.resume-suggestions-empty {
+    font-size: .88rem;
+    color: var(--ink-soft);
+    font-style: italic;
+    line-height: 1.5;
+}
+
+.resume-suggestions-list {
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+}
+
+.resume-suggestion-chip {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    background: var(--paper);
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    padding: .65rem .9rem;
+}
+
+.rsc-body { flex: 1; min-width: 0; }
+
+.rsc-name {
+    font-weight: 700;
+    font-size: .9rem;
+    color: var(--ink);
+    margin-right: .4rem;
+}
+
+.rsc-type-tag {
+    font-size: .62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    border-radius: 999px;
+    padding: .1rem .5rem;
+}
+
+.rsc-type-tag--hard { background: #e3f2fd; color: #1565c0; }
+.rsc-type-tag--soft { background: #f3e8ff; color: #5b21b6; }
+
+.rsc-evidence {
+    font-size: .78rem;
+    color: var(--ink-soft);
+    line-height: 1.4;
+    margin-top: .2rem;
+}
+
+.rsc-add-btn {
+    flex-shrink: 0;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: .4rem .85rem;
+    font-size: .8rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 5px var(--shadow);
+    transition: background .15s;
+}
+.rsc-add-btn:hover { background: var(--accent-deep); transform: none; box-shadow: none; }
+.rsc-add-btn:disabled { opacity: .6; cursor: not-allowed; }
+
+.resume-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+}
+
+.resume-col-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: .75rem;
+}
+
+.resume-list {
+    display: flex;
+    flex-direction: column;
+    gap: .65rem;
+}
+
+.resume-skill-card {
+    background: var(--paper);
+    border: 1.5px solid var(--line-strong);
+    border-left: 4px solid var(--accent);
+    border-radius: 12px;
+    padding: .85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+    transition: box-shadow .15s, transform .15s;
+}
+.resume-skill-card:hover { box-shadow: 0 4px 14px var(--shadow); transform: translateY(-1px); }
+
+.resume-skill-card--editing {
+    border-style: dashed;
+    gap: .5rem;
+}
+.resume-skill-card--editing input,
+.resume-skill-card--editing textarea,
+.resume-skill-card--editing select {
+    margin: 0;
+}
+
+.resume-skill-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: .5rem;
+}
+
+.resume-skill-name {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--ink);
+}
+
+.resume-skill-stars {
+    font-size: .78rem;
+    color: #d6a73a;
+    white-space: nowrap;
+    flex-shrink: 0;
+    letter-spacing: .05em;
+}
+
+.resume-skill-cat {
+    font-size: .74rem;
+    color: var(--accent-deep);
+    font-weight: 600;
+}
+
+.resume-skill-evidence {
+    font-size: .84rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+}
+
+.resume-skill-actions {
+    display: flex;
+    gap: .4rem;
+    margin-top: .3rem;
+}
+
+@media (max-width: 800px) {
+    .resume-columns { grid-template-columns: 1fr; }
+}

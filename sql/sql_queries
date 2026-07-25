@@ -546,6 +546,17 @@ create policy "Allow all access to books"
     using (true)
     with check (true);
     
+create table resume_skills (
+  id bigint generated always as identity primary key,
+  name text not null,
+  skill_type text not null check (skill_type in ('hard','soft')),
+  category text default '',
+  evidence text default '',
+  confidence int default 3,
+  source_type text default 'manual',
+  source_id text,
+  created_at timestamptz default now()
+);
 
 notify pgrst, 'reload schema';
 -- ────────────────────────────────────────────────────────────

@@ -33,7 +33,7 @@ const navItems = document.querySelectorAll(".nav-item");
 // they've done enough for the other tabs to be meaningful, instead of 8
 // nav items (Domains, Insights, Review...) all showing empty states at once.
 // ---------------------------------------------------------------------------
-const ALWAYS_UNLOCKED = ["journal", "quests"];
+const ALWAYS_UNLOCKED = ["journal", "quests", "resume"];
 
 const UNLOCK_RULES = {
     entries:  (p) => p.entries >= 1,
@@ -226,6 +226,7 @@ const PAGE_LOADERS = {
     // Domains used to be its own tab; it's now a drill-down view inside
     // Habits (see switchHabitsView), so both load together under one key.
     habits:   () => { loadStreaks(); loadDomains(); },
+    resume:   () => loadResumeSkills(),
     insights: () => { loadCharts(); loadInsights(); loadCoachPatterns(); },
     review:   () => renderReviewCalendar(),
 };
@@ -247,7 +248,7 @@ function loadPageIfStale(pageId, force = false) {
 // instead) since Chart.js can't size a canvas correctly while its page is
 // still hidden -- everything else is plain HTML and safe to preload.
 function preloadAllPages() {
-    ["entries", "quests", "skills", "habits", "review"].forEach(p => loadPageIfStale(p, true));
+    ["entries", "quests", "skills", "habits", "resume", "review"].forEach(p => loadPageIfStale(p, true));
     loadInsights();
 }
 
@@ -3273,6 +3274,231 @@ function renderBookList() {
     }
     el.innerHTML = list.map(b => buildBookCard(b)).join("");
 }
+
+// ---------------------------------------------------------------------------
+// Resume Skills — a hard/soft skills list backed by evidence, meant to be
+// pasted straight into a resume. Kept deliberately separate from the Skill
+// Trees: a tree node isn't itself a resume line, and a resume needs soft
+// skills no tree tracks at all. Suggestions are one-click-add so accepting
+// evidence-backed patterns (streaks, achievements, level) doesn't require
+// retyping them.
+// ---------------------------------------------------------------------------
+let resumeData = { hard: [], soft: [] };
+let resumeEditingId = null; // id currently being edited inline, or null
+
+async function loadResumeSkills() {
+    try {
+        resumeData = await (await fetch("/resume/skills")).json();
+    } catch (_) {
+        resumeData = { hard: [], soft: [] };
+    }
+    renderResumeList("hard");
+    renderResumeList("soft");
+}
+
+function _resumeStars(confidence) {
+    const n = Math.max(1, Math.min(5, confidence || 3));
+    return "★".repeat(n) + "☆".repeat(5 - n);
+}
+
+function renderResumeList(type) {
+    const el = document.getElementById(`resume-list-${type}`);
+    if (!el) return;
+    const list = resumeData[type] || [];
+    if (!list.length) {
+        el.innerHTML = `<p class="plan-loading">No ${type} skills added yet. Add one, or check suggestions above.</p>`;
+        return;
+    }
+    el.innerHTML = list.map(s => buildResumeSkillCard(s, type)).join("");
+}
+
+function buildResumeSkillCard(s, type) {
+    if (resumeEditingId === s.id) return buildResumeSkillEditForm(s, type);
+    return `<div class="resume-skill-card" id="rsk-card-${s.id}">
+        <div class="resume-skill-head">
+            <span class="resume-skill-name">${_escHtml(s.name)}</span>
+            <span class="resume-skill-stars" title="Confidence">${_resumeStars(s.confidence)}</span>
+        </div>
+        ${s.category ? `<div class="resume-skill-cat">${_escHtml(s.category)}</div>` : ""}
+        ${s.evidence ? `<div class="resume-skill-evidence">${_escHtml(s.evidence)}</div>` : ""}
+        <div class="resume-skill-actions">
+            <button class="btn-ghost btn-sm" onclick="startResumeSkillEdit(${s.id}, '${type}')">✏️ Edit</button>
+            <button class="btn-ghost btn-sm" onclick="deleteResumeSkill(${s.id}, '${type}')">🗑</button>
+        </div>
+    </div>`;
+}
+
+function buildResumeSkillEditForm(s, type) {
+    return `<div class="resume-skill-card resume-skill-card--editing" id="rsk-card-${s.id}">
+        <input type="text" id="rsk-edit-name-${s.id}" class="qbc-input" value="${_escAttr(s.name)}" placeholder="Skill name">
+        <input type="text" id="rsk-edit-cat-${s.id}" class="qbc-input" value="${_escAttr(s.category || "")}" placeholder="Category (optional)">
+        <textarea id="rsk-edit-evidence-${s.id}" class="qbc-textarea" rows="2" placeholder="Evidence">${_escHtml(s.evidence || "")}</textarea>
+        <select id="rsk-edit-confidence-${s.id}" class="qbc-select">
+            <option value="1" ${s.confidence===1?"selected":""}>★☆☆☆☆ Just starting</option>
+            <option value="2" ${s.confidence===2?"selected":""}>★★☆☆☆ Some exposure</option>
+            <option value="3" ${(!s.confidence||s.confidence===3)?"selected":""}>★★★☆☆ Comfortable</option>
+            <option value="4" ${s.confidence===4?"selected":""}>★★★★☆ Strong</option>
+            <option value="5" ${s.confidence===5?"selected":""}>★★★★★ Confident expert</option>
+        </select>
+        <div class="resume-skill-actions">
+            <button class="qbc-submit" style="padding:.4rem .9rem;font-size:.82rem" onclick="saveResumeSkillEdit(${s.id}, '${type}')">Save</button>
+            <button class="btn-ghost btn-sm" onclick="cancelResumeSkillEdit('${type}')">Cancel</button>
+        </div>
+    </div>`;
+}
+
+window.startResumeSkillEdit = function(id, type) {
+    resumeEditingId = id;
+    renderResumeList(type);
+};
+
+window.cancelResumeSkillEdit = function(type) {
+    resumeEditingId = null;
+    renderResumeList(type);
+};
+
+window.saveResumeSkillEdit = async function(id, type) {
+    const name       = document.getElementById(`rsk-edit-name-${id}`)?.value.trim();
+    const category   = document.getElementById(`rsk-edit-cat-${id}`)?.value.trim() || "";
+    const evidence   = document.getElementById(`rsk-edit-evidence-${id}`)?.value.trim() || "";
+    const confidence = parseInt(document.getElementById(`rsk-edit-confidence-${id}`)?.value) || 3;
+    if (!name) { _toast("Skill name can't be empty.", "#ef5350"); return; }
+    try {
+        const res = await fetch(`/resume/skills/${id}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, category, evidence, confidence }),
+        });
+        if (!res.ok) { _toast("Could not save changes.", "#ef5350"); return; }
+        resumeEditingId = null;
+        _toast("✓ Skill updated", "#4caf50", 2200);
+        loadResumeSkills();
+    } catch (_) {
+        _toast("Could not save changes.", "#ef5350");
+    }
+};
+
+window.deleteResumeSkill = async function(id, type) {
+    if (!confirm("Remove this skill from your resume list?")) return;
+    try {
+        await fetch(`/resume/skills/${id}`, { method: "DELETE" });
+        loadResumeSkills();
+    } catch (_) {
+        _toast("Could not delete skill.", "#ef5350");
+    }
+};
+
+window.toggleResumeCreatePanel = function(type) {
+    const panel = document.getElementById(`resume-create-${type}`);
+    if (!panel) return;
+    const open = panel.style.display === "none";
+    panel.style.display = open ? "" : "none";
+    if (open) document.getElementById(`rsk-${type}-name`)?.focus();
+};
+
+window.createResumeSkill = async function(type) {
+    const name       = document.getElementById(`rsk-${type}-name`)?.value.trim();
+    if (!name) { _toast("Skill name is required.", "#ef5350"); return; }
+    const category   = document.getElementById(`rsk-${type}-category`)?.value.trim() || "";
+    const evidence   = document.getElementById(`rsk-${type}-evidence`)?.value.trim() || "";
+    const confidence = parseInt(document.getElementById(`rsk-${type}-confidence`)?.value) || 3;
+
+    try {
+        const res = await fetch("/resume/skills", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, skill_type: type, category, evidence, confidence }),
+        });
+        if (!res.ok) { _toast("Could not add skill.", "#ef5350"); return; }
+        ["name", "category", "evidence"].forEach(f => {
+            const el = document.getElementById(`rsk-${type}-${f}`);
+            if (el) el.value = "";
+        });
+        document.getElementById(`resume-create-${type}`).style.display = "none";
+        _toast(`✓ "${name}" added to your ${type} skills.`, "#4caf50", 2500);
+        loadResumeSkills();
+    } catch (_) {
+        _toast("Could not add skill.", "#ef5350");
+    }
+};
+
+// ── Suggestions ──────────────────────────────────────────────
+async function loadResumeSuggestions() {
+    const el = document.getElementById("resume-suggestions");
+    if (!el) return;
+    el.style.display = "";
+    el.innerHTML = `<p class="plan-loading">Looking at your progress for evidence-backed suggestions…</p>`;
+    try {
+        const data = await (await fetch("/resume/suggestions")).json();
+        const all = [...(data.hard || []).map(s => ({...s, type: "hard"})),
+                     ...(data.soft || []).map(s => ({...s, type: "soft"}))];
+        if (!all.length) {
+            el.innerHTML = `<div class="resume-suggestions-empty">No new suggestions right now — keep completing skill nodes, building streaks, and finishing quests, and evidence-backed suggestions will show up here.</div>`;
+            return;
+        }
+        el.innerHTML = `
+            <div class="resume-suggestions-header">✨ Suggested from your actual progress — tap to add</div>
+            <div class="resume-suggestions-list">
+                ${all.map((s, i) => `
+                    <div class="resume-suggestion-chip">
+                        <div class="rsc-body">
+                            <span class="rsc-name">${_escHtml(s.name)}</span>
+                            <span class="rsc-type-tag rsc-type-tag--${s.type}">${s.type}</span>
+                            <div class="rsc-evidence">${_escHtml(s.evidence)}</div>
+                        </div>
+                        <button class="rsc-add-btn" onclick="acceptResumeSuggestion(${i}, this)">+ Add</button>
+                    </div>`).join("")}
+            </div>`;
+        window._resumeSuggestionCache = all;
+    } catch (_) {
+        el.innerHTML = `<div class="resume-suggestions-empty">Could not load suggestions.</div>`;
+    }
+}
+window.loadResumeSuggestions = loadResumeSuggestions;
+
+window.acceptResumeSuggestion = async function(idx, btn) {
+    const s = (window._resumeSuggestionCache || [])[idx];
+    if (!s) return;
+    btn.disabled = true;
+    btn.textContent = "Adding…";
+    try {
+        const res = await fetch("/resume/skills", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                name: s.name, skill_type: s.type, category: s.category || "",
+                evidence: s.evidence || "", confidence: 3,
+            }),
+        });
+        if (!res.ok) { btn.textContent = "Failed"; btn.disabled = false; return; }
+        btn.textContent = "✓ Added";
+        _toast(`✓ "${s.name}" added to your ${s.type} skills.`, "#4caf50", 2500);
+        loadResumeSkills();
+    } catch (_) {
+        btn.textContent = "Failed"; btn.disabled = false;
+    }
+};
+
+// ── Copy as text ─────────────────────────────────────────────
+window.copyResumeText = async function() {
+    const fmt = (list) => list.map(s => {
+        const cat = s.category ? ` (${s.category})` : "";
+        const ev  = s.evidence ? ` — ${s.evidence}` : "";
+        return `- ${s.name}${cat}${ev}`;
+    }).join("\n");
+
+    const hard = resumeData.hard || [], soft = resumeData.soft || [];
+    if (!hard.length && !soft.length) { _toast("No skills to copy yet — add some first.", "#f7a94b"); return; }
+
+    let text = "";
+    if (hard.length) text += "HARD SKILLS\n" + fmt(hard) + "\n\n";
+    if (soft.length) text += "SOFT SKILLS\n" + fmt(soft) + "\n";
+    text = text.trim();
+
+    try {
+        await navigator.clipboard.writeText(text);
+        _toast("📋 Copied to clipboard — paste it straight into your resume.", "var(--accent-deep)", 3000);
+    } catch (_) {
+        _toast("Could not access clipboard. Select and copy manually.", "#ef5350");
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Skills — Skill-Driven Quest System
