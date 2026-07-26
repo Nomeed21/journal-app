@@ -1295,9 +1295,11 @@ function renderRoutineToday(data) {
     listEl.innerHTML = routineCategories.map(c => {
         const badge = c.overtime
             ? `<span class="risk-badge">+${c.overtime_hours}h over</span>`
-            : c.behind_pace
-                ? `<span class="risk-badge" style="background:#fff8e1;color:#e65100">behind pace</span>`
-                : "";
+            : c.overrun_predicted
+                ? `<span class="risk-badge" style="background:#fff3e0;color:#e65100">⚠ often runs over (${c.historical_overrun_rate}%)</span>`
+                : c.behind_pace
+                    ? `<span class="risk-badge" style="background:#fff8e1;color:#e65100">behind pace</span>`
+                    : "";
         return `<div class="pie-planner-item">
             <span class="pie-planner-swatch" style="background:${c.color}"></span>
             <span class="pie-planner-item-label">${_escHtml(c.label)}</span>

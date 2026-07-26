@@ -1,4 +1,5 @@
 import os
+import re
 import json as _json
 import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -3451,6 +3452,63 @@ def _followthrough_by_category(lookback_days: int = 60) -> dict:
         for cat, v in by_cat.items()
     }
 
+# ---------------------------------------------------------------------------
+# Long-horizon memory: stated-intention mining
+#
+# Lightweight regex/keyword approach (no embeddings) -- looks for "I need
+# to / want to / should / have to / plan to ..." phrasing in journal
+# entries, clusters similar phrases by their significant words, and (in
+# _mine_weekly_patterns below) flags clusters repeated across multiple
+# entries with no matching quest or habit completion afterward. This is
+# what lets the coach eventually say "you've said you want to start
+# exercising again 4 times this month" instead of only ever seeing
+# today's entry in isolation.
+# ---------------------------------------------------------------------------
+
+INTENTION_TRIGGER_RE = re.compile(
+    r"\bi\s*(?:'m|\sam)?\s*(?:really\s+)?"
+    r"(?:need to|want to|should|have to|gotta|got to|plan to|planning to|"
+    r"going to|gonna|intend to|trying to|hoping to)\s+"
+    r"([a-z][a-z '\-]{2,60}?)(?=[.!?\n]|$)",
+    re.IGNORECASE,
+)
+
+# Filler words stripped when clustering intention phrases together (not a
+# general stopword list -- just the words common enough in this specific
+# trigger phrasing to otherwise dilute the clustering key).
+INTENTION_FILLER_WORDS = {
+    "again", "soon", "more", "some", "a", "bit", "little", "really",
+    "just", "back", "up", "down", "out", "into", "the", "my", "this",
+    "week", "today", "tomorrow", "eventually", "finally", "properly",
+    "with", "for", "and", "that", "them", "him", "her", "them", "then",
+}
+
+def _extract_stated_intentions(text: str) -> list[str]:
+    """Pull candidate 'I want/need/should/plan to ...' phrases out of a
+    block of journal text. Deliberately permissive at extraction time --
+    the clustering step (_intention_key) is what filters noise, so a
+    stray false-positive match here just fails to cluster with anything
+    and never surfaces."""
+    if not text:
+        return []
+    out = []
+    for m in INTENTION_TRIGGER_RE.finditer(text):
+        phrase = m.group(1).strip().strip(".,!? ").lower()
+        if 3 <= len(phrase) <= 60:
+            out.append(phrase)
+    return out
+
+def _intention_key(phrase: str) -> tuple:
+    """Canonical clustering key for an intention phrase: its significant
+    words (filler stripped, order-independent), capped at 5. Two phrases
+    like 'start exercising again' and 'get back into exercising' should
+    land on the same key via their shared significant word ('exercising')
+    -- this keeps the key generous rather than requiring near-exact
+    phrasing to cluster."""
+    words = re.findall(r"[a-z']+", phrase.lower())
+    sig = [w for w in words if w not in INTENTION_FILLER_WORDS and len(w) > 2]
+    return tuple(sorted(set(sig[:5])))
+
 def _mine_weekly_patterns():
     """
     Scans several weeks of history and writes/refreshes durable rows in
@@ -3567,6 +3625,183 @@ def _mine_weekly_patterns():
                 "description": f"Coaching nudges toward {cat} land well — followed {v['rate']}% of the time ({v['followed']}/{v['suggested']}).",
                 "confidence":  0.6,
             })
+
+    # 5. Repeated stated intentions with no follow-through — journal
+    # entries over the last MEMORY_WINDOW_DAYS, clustered by the
+    # significant words in the intention phrase (see _extract_stated_
+    # intentions / _intention_key above). A cluster needs to recur in 3+
+    # distinct entries spanning 2+ weeks before it's worth flagging — a
+    # single "I should exercise more" is a passing thought, not a pattern.
+    # Follow-through is checked against completed quests and habit names
+    # since the first mention; if nothing matching ever landed, the loop
+    # gets surfaced.
+    try:
+        MEMORY_WINDOW_DAYS = 90
+        mem_start = (now - timedelta(days=MEMORY_WINDOW_DAYS)).isoformat()
+        mem_rows = (
+            supabase.table("journal_entries")
+            .select("title, content, created_at")
+            .gte("created_at", mem_start)
+            .order("created_at")
+            .execute()
+            .data
+        )
+        by_key: dict[tuple, list[dict]] = defaultdict(list)
+        for r in mem_rows:
+            text = f"{r.get('title','')}. {r.get('content','')}"
+            for phrase in _extract_stated_intentions(text):
+                key = _intention_key(phrase)
+                if key:
+                    by_key[key].append({"phrase": phrase, "date": r["created_at"]})
+
+        completed_quests = (
+            supabase.table("board_quests")
+            .select("title, description, completed_at")
+            .eq("is_completed", True)
+            .not_.is_("completed_at", "null")
+            .execute()
+            .data
+        )
+        habit_names = [h["name"] for h in supabase.table("habit_profiles").select("name").execute().data]
+
+        for key, mentions in by_key.items():
+            if len(mentions) < 3:
+                continue
+            dates_sorted = sorted(mentions, key=lambda m: m["date"])
+            first_dt  = datetime.fromisoformat(dates_sorted[0]["date"].replace("Z", "+00:00"))
+            last_dt   = datetime.fromisoformat(dates_sorted[-1]["date"].replace("Z", "+00:00"))
+            span_days = (last_dt - first_dt).days
+            if span_days < 14:
+                continue
+
+            key_words = set(key)
+            followed_through = False
+            for q in completed_quests:
+                qtext = f"{q.get('title','')} {q.get('description','')}".lower()
+                try:
+                    q_dt = datetime.fromisoformat(q["completed_at"].replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if q_dt >= first_dt and any(w in qtext for w in key_words):
+                    followed_through = True
+                    break
+            if not followed_through:
+                followed_through = any(
+                    any(w in hname.lower() for w in key_words) for hname in habit_names
+                )
+            if followed_through:
+                continue
+
+            representative = dates_sorted[-1]["phrase"]
+            patterns.append({
+                "pattern_key": "intention_loop:" + "_".join(key),
+                "category":    None,
+                "description": (
+                    f'You\'ve written about wanting to "{representative}" {len(mentions)} times '
+                    f"over the past {span_days} days, with no matching quest or habit showing up "
+                    f"since the first mention."
+                ),
+                "confidence": min(0.45 + len(mentions) * 0.08, 0.9),
+            })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns intention loops failed: %s", e)
+
+    # 6. Habit abandonment cycles — a habit that has repeatedly built a
+    # real streak (3+ consecutive days) and then broken it, more than
+    # once, points at "restarting from scratch" being the actual pattern
+    # rather than a single lapse. The most recent segment is excluded from
+    # the count if it's still plausibly ongoing (last activity within 4
+    # days), so an active streak-in-progress never gets counted as
+    # "broken."
+    try:
+        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
+        today_d  = datetime.strptime(local_date_today(), "%Y-%m-%d").date()
+        for p in profiles:
+            dates = sorted(_habit_quest_dates(p.get("skill_tree", ""), p.get("domain", "")))
+            if len(dates) < 6:
+                continue
+            date_objs = [datetime.strptime(d, "%Y-%m-%d").date() for d in dates]
+            segments, seg = [], [date_objs[0]]
+            for d in date_objs[1:]:
+                if (d - seg[-1]).days == 1:
+                    seg.append(d)
+                else:
+                    segments.append(seg)
+                    seg = [d]
+            segments.append(seg)
+
+            broken = 0
+            for i, s in enumerate(segments):
+                is_last = i == len(segments) - 1
+                if is_last and (today_d - s[-1]).days < 4:
+                    continue  # still plausibly ongoing -- don't count as broken
+                if len(s) >= 3:
+                    broken += 1
+
+            if broken >= 2:
+                patterns.append({
+                    "pattern_key": f"habit_abandonment:{p['name']}",
+                    "category":    p.get("domain") or p.get("skill_tree"),
+                    "description": (
+                        f"'{p['name']}' has built a 3+ day streak and then broken it {broken} separate "
+                        f"times — restarting from scratch each time may be the real obstacle, not motivation."
+                    ),
+                    "confidence": min(0.4 + broken * 0.12, 0.85),
+                })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns habit abandonment failed: %s", e)
+
+    # 7. Keyword-correlated mood dips — words that show up disproportion-
+    # ately in low-mood journal entries. Requires a real sample size on
+    # both sides of the with/without comparison, so a single rough day
+    # doesn't get blamed on whatever word happened to appear in it.
+    try:
+        start90 = (now - timedelta(days=90)).isoformat()
+        mood_rows = (
+            supabase.table("journal_entries")
+            .select("content, mood, created_at")
+            .gte("created_at", start90)
+            .execute()
+            .data
+        )
+        if len(mood_rows) >= 15:
+            word_moods: dict[str, list] = defaultdict(list)
+            all_moods = []
+            for r in mood_rows:
+                mood = safe_rating(r.get("mood"), None)
+                if mood is None:
+                    continue
+                all_moods.append(mood)
+                words = {
+                    w for w in re.findall(r"[a-z']{4,}", (r.get("content") or "").lower())
+                    if w not in INTENTION_FILLER_WORDS
+                }
+                for w in words:
+                    word_moods[w].append(mood)
+
+            candidates = []
+            for w, moods in word_moods.items():
+                n_with, n_without = len(moods), len(all_moods) - len(moods)
+                if n_with < 5 or n_without < 5:
+                    continue
+                avg_with    = sum(moods) / n_with
+                avg_without = (sum(all_moods) - sum(moods)) / n_without
+                diff = avg_with - avg_without
+                if diff <= -0.6:
+                    candidates.append((w, avg_with, avg_without, n_with, diff))
+            candidates.sort(key=lambda x: x[4])  # most negative first
+            for w, avg_with, avg_without, n_with, diff in candidates[:2]:
+                patterns.append({
+                    "pattern_key": f"keyword_mood_dip:{w}",
+                    "category":    None,
+                    "description": (
+                        f'Entries mentioning "{w}" average {round(avg_with,1)}/5 mood vs '
+                        f"{round(avg_without,1)}/5 otherwise, across {n_with} entries."
+                    ),
+                    "confidence": min(0.4 + abs(diff) * 0.3, 0.85),
+                })
+    except Exception as e:
+        logger.exception("_mine_weekly_patterns keyword mood dip failed: %s", e)
 
     for p in patterns:
         try:
@@ -8255,6 +8490,25 @@ def get_routine_today():
     current_hour = local_hour_now()
     day_pace = current_hour / 24  # expected fraction of the day elapsed
 
+    # Historical overrun frequency per category (last 14 days, excluding
+    # today) — batched in a single query rather than one query per
+    # category. This is what makes the procrastination signal genuinely
+    # *predictive*: a category can be flagged as likely to run over today
+    # based on its own track record, before it has actually gone over,
+    # instead of the alert only ever firing reactively after the fact.
+    hist_start = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    hist_rows = (
+        supabase.table("routine_logs")
+        .select("category_id, hours_used, log_date")
+        .gte("log_date", hist_start)
+        .lt("log_date", today)
+        .execute()
+        .data
+    )
+    hist_by_cat: dict[int, list] = defaultdict(list)
+    for r in hist_rows:
+        hist_by_cat[r["category_id"]].append(r.get("hours_used") or 0)
+
     result = []
     for c in cats:
         used = used_by_cat.get(c["id"], 0)
@@ -8262,16 +8516,34 @@ def get_routine_today():
         remaining = max(planned - used, 0)
         overtime_hours = max(used - planned, 0)
         pace_pct = (used / planned) if planned else 0
+
+        hist_vals = hist_by_cat.get(c["id"], [])
+        hist_overrun_rate = (
+            round(sum(1 for v in hist_vals if v > planned) / len(hist_vals), 2)
+            if hist_vals and planned else 0.0
+        )
+        # Predicted (not-yet-actual) overrun: hasn't gone over today, but
+        # has already burned a large share of its budget AND historically
+        # runs over more often than not -- worth a heads-up before it
+        # happens rather than only after.
+        overrun_predicted = overtime_hours == 0 and hist_overrun_rate >= 0.5 and pace_pct >= 0.6
+
         result.append({
             **c, "used_hours": round(used, 2), "remaining_hours": round(remaining, 2),
             "overtime": overtime_hours > 0, "overtime_hours": round(overtime_hours, 2),
             "pace_pct": round(pace_pct * 100),
             "behind_pace": planned > 0 and pace_pct < day_pace - 0.15,  # meaningfully behind expected progress
+            "historical_overrun_rate": round(hist_overrun_rate * 100),
+            "overrun_predicted": overrun_predicted,
         })
 
-    # Procrastination heuristic: any category overtime + any category meaningfully behind pace
-    overtime_cats = [r["label"] for r in result if r["overtime"]]
-    behind_cats   = [r for r in result if r["behind_pace"]]
+    # Procrastination heuristic: any category overtime + any category
+    # meaningfully behind pace (reactive), OR -- if nothing has actually
+    # gone over yet -- any category predicted to based on its history
+    # (predictive), so the alert isn't only ever a postmortem.
+    overtime_cats  = [r["label"] for r in result if r["overtime"]]
+    behind_cats    = [r for r in result if r["behind_pace"]]
+    predicted_cats = [r["label"] for r in result if r["overrun_predicted"]]
     procrastination_alert = None
     if overtime_cats and behind_cats:
         worst = min(behind_cats, key=lambda r: r["pace_pct"])
@@ -8279,6 +8551,11 @@ def get_routine_today():
             f"{', '.join(overtime_cats)} running over today — likely why "
             f"'{worst['label']}' is behind pace ({worst['pace_pct']}% of its planned time used, "
             f"{round(day_pace*100)}% of the day gone)."
+        )
+    elif predicted_cats:
+        procrastination_alert = (
+            f"{', '.join(predicted_cats)} {'usually run' if len(predicted_cats) > 1 else 'usually runs'} "
+            f"over budget — based on the last 2 weeks, today looks headed that way too."
         )
 
     return {
