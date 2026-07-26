@@ -558,6 +558,8 @@ create table resume_skills (
   created_at timestamptz default now()
 );
 
+ALTER TABLE weekly_bosses ADD COLUMN tier text;
+
 notify pgrst, 'reload schema';
 -- ────────────────────────────────────────────────────────────
 notify pgrst, 'reload schema';
