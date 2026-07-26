@@ -23,12 +23,21 @@ from groq import Groq
 load_dotenv()
 
 embedding_model = None
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global embedding_model
-    embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    # Prefer the locally cached model. This keeps normal starts fast and
+    # independent of a live Hugging Face connection, which matters when the
+    # app is being demonstrated. A first-ever setup can still download it.
+    try:
+        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, local_files_only=True)
+        logger.info("Loaded local semantic-search model")
+    except Exception:
+        logger.info("Semantic-search model is not cached; downloading it once")
+        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     yield
 
 

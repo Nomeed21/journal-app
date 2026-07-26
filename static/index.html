@@ -28,17 +28,17 @@
         </ul>
         <div class="sidebar-footer">
             <div id="xp-hud" class="xp-hud"></div>
-            <button class="theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch theme">
+            <button type="button" class="theme-toggle" id="theme-toggle-btn" onclick="toggleTheme()" title="Switch theme" aria-pressed="false">
                 <div class="theme-toggle-track" id="theme-track">
                     <div class="theme-toggle-thumb"></div>
                 </div>
-                <button class="how-it-works-btn" onclick="openHowItWorks()">
-                    <span>ℹ️</span> How this works
-                </button>
                 <div class="theme-toggle-label">
                     <span id="theme-label">Ballerina</span>
                     <span>Toggle theme</span>
                 </div>
+            </button>
+            <button type="button" class="how-it-works-btn" onclick="openHowItWorks()">
+                <span>ℹ️</span> How this works
             </button>
             <span class="sidebar-version">Study Coach</span>
         </div>
@@ -864,13 +864,17 @@
     localStorage.setItem("liainne-theme", next);
     const track = document.getElementById("theme-track");
     const label = document.getElementById("theme-label");
+    const button = document.getElementById("theme-toggle-btn");
     if (track) track.classList.toggle("active", next === "gray");
     if (label) label.textContent = next === "gray" ? "Gray" : "Ballerina";
+    if (button) button.setAttribute("aria-pressed", String(next === "gray"));
   }
   // Apply on load before paint
   (function() {
     const saved = localStorage.getItem("liainne-theme") || "ballerina";
     document.documentElement.setAttribute("data-theme", saved);
+    const button = document.getElementById("theme-toggle-btn");
+    if (button) button.setAttribute("aria-pressed", String(saved === "gray"));
   })();
 </script>
 
