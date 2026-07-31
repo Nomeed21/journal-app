@@ -93,13 +93,28 @@
                     </div>
                 </div>
                 <div id="routine-setup-panel" class="qb-create-panel" style="display:none">
-                    <div class="qb-create-title">Daily Routine (repeats every day)</div>
+                    <div class="qb-create-title">Weekly Routine (set different hours per weekday)</div>
                     <div id="routine-setup-list"></div>
-                    <form id="routine-add-form" class="pie-planner-add-row">
-                        <input type="text" id="rt-label" placeholder="Category (e.g. Study)" maxlength="30" required>
-                        <input type="number" id="rt-hours" placeholder="Planned hrs" min="0.25" max="24" step="0.25" required>
-                        <input type="color" id="rt-color" value="#d98aa0">
-                        <button type="submit">+ Add</button>
+                    <form id="routine-add-form" class="pie-planner-add-form">
+                        <input type="hidden" id="rt-edit-id" value="">
+                        <div class="pie-planner-add-row">
+                            <input type="text" id="rt-label" placeholder="Category (e.g. Study)" maxlength="30" required>
+                            <input type="color" id="rt-color" value="#d98aa0">
+                        </div>
+                        <div class="pie-planner-day-hours">
+                            <label>Mon<input type="number" class="rt-day-hours" data-day="mon" min="0" max="24" step="0.25" value="1"></label>
+                            <label>Tue<input type="number" class="rt-day-hours" data-day="tue" min="0" max="24" step="0.25" value="1"></label>
+                            <label>Wed<input type="number" class="rt-day-hours" data-day="wed" min="0" max="24" step="0.25" value="1"></label>
+                            <label>Thu<input type="number" class="rt-day-hours" data-day="thu" min="0" max="24" step="0.25" value="1"></label>
+                            <label>Fri<input type="number" class="rt-day-hours" data-day="fri" min="0" max="24" step="0.25" value="1"></label>
+                            <label>Sat<input type="number" class="rt-day-hours" data-day="sat" min="0" max="24" step="0.25" value="0"></label>
+                            <label>Sun<input type="number" class="rt-day-hours" data-day="sun" min="0" max="24" step="0.25" value="0"></label>
+                        </div>
+                        <div class="pie-planner-add-actions">
+                            <button type="button" id="rt-same-all" class="btn-ghost btn-sm">Copy Mon to all days</button>
+                            <button type="submit" id="rt-submit-btn">+ Add</button>
+                            <button type="button" id="rt-cancel-edit" class="btn-ghost btn-sm" style="display:none">Cancel</button>
+                        </div>
                     </form>
                 </div>
             </div>

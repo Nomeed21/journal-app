@@ -6351,6 +6351,56 @@ body {
     flex-shrink: 0;
 }
 
+.pie-planner-add-form {
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+
+.pie-planner-day-hours {
+    display: flex;
+    gap: .4rem;
+    flex-wrap: wrap;
+}
+
+.pie-planner-day-hours label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: .2rem;
+    font-size: .68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--ink-faint);
+}
+
+.pie-planner-day-hours input[type="number"] {
+    width: 54px;
+    margin: 0;
+    background: var(--paper-soft);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: .4rem .3rem;
+    font-family: var(--font-body);
+    font-size: .85rem;
+    text-align: center;
+    color: var(--ink);
+    outline: none;
+}
+
+.pie-planner-add-actions {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.pie-planner-add-actions button[type="submit"] {
+    padding: .5rem 1rem;
+    font-size: .85rem;
+}
+
 @media (max-width: 640px) {
     .pie-planner-body { grid-template-columns: 1fr; }
     .pie-planner-chart-wrap { width: 100%; max-width: 220px; margin: 0 auto; }

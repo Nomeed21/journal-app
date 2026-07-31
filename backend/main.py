@@ -8008,9 +8008,40 @@ def clear_demo_data():
             pass
     return {"status": "cleared", "removed": dict(removed)}
 
+# Weekday keys, Monday-first to match datetime.weekday() (Mon=0..Sun=6).
+WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+def _normalize_planned_hours(ph: dict) -> dict:
+    """Coerce a per-weekday planned-hours payload into a clean dict with all
+    7 keys present, each clamped to a sane [0, 24] range. Days simply
+    default to 0 (a rest day) when omitted, rather than forcing a nonzero
+    minimum -- unlike the old single-value field, "no time planned that day"
+    is now a legitimate, expressible schedule."""
+    out = {}
+    for d in WEEKDAYS:
+        try:
+            v = float(ph.get(d, 0) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        out[d] = min(max(v, 0), 24)
+    return out
+
+def _resolve_planned_hours(raw) -> dict:
+    """Back-compat shim: older rows may still have a single float in
+    planned_hours (from before per-weekday schedules existed). Treat that
+    as the same value repeated on every day; newer rows already store a
+    dict and just get normalized."""
+    if isinstance(raw, dict):
+        return _normalize_planned_hours(raw)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        v = 0.0
+    return {d: v for d in WEEKDAYS}
+
 class RoutineCategoryCreate(BaseModel):
     label: str
-    planned_hours: float
+    planned_hours: dict[str, float]  # per-weekday hours, keys from WEEKDAYS
     color: str = "#d98aa0"
 
 class RoutineLogAdd(BaseModel):
@@ -8019,12 +8050,15 @@ class RoutineLogAdd(BaseModel):
 
 @app.get("/routine/categories")
 def list_routine_categories():
-    return supabase.table("routine_categories").select("*").order("id").execute().data
+    cats = supabase.table("routine_categories").select("*").order("id").execute().data
+    for c in cats:
+        c["planned_hours"] = _resolve_planned_hours(c.get("planned_hours"))
+    return cats
 
 @app.post("/routine/categories")
 def create_routine_category(c: RoutineCategoryCreate):
     row = supabase.table("routine_categories").insert({
-        "label": c.label.strip(), "planned_hours": max(c.planned_hours, 0.25),
+        "label": c.label.strip(), "planned_hours": _normalize_planned_hours(c.planned_hours),
         "color": c.color, "created_at": datetime.now(timezone.utc).isoformat(),
     }).execute()
     return row.data[0]
@@ -8032,7 +8066,7 @@ def create_routine_category(c: RoutineCategoryCreate):
 @app.put("/routine/categories/{cat_id}")
 def update_routine_category(cat_id: int, c: RoutineCategoryCreate):
     row = supabase.table("routine_categories").update({
-        "label": c.label.strip(), "planned_hours": max(c.planned_hours, 0.25), "color": c.color,
+        "label": c.label.strip(), "planned_hours": _normalize_planned_hours(c.planned_hours), "color": c.color,
     }).eq("id", cat_id).execute()
     if not row.data:
         raise HTTPException(404, "Category not found")
@@ -8062,6 +8096,7 @@ def add_routine_log(entry: RoutineLogAdd):
 @app.get("/routine/today")
 def get_routine_today():
     today = local_date_today()
+    today_weekday = WEEKDAYS[datetime.strptime(today, "%Y-%m-%d").weekday()]
     cats = supabase.table("routine_categories").select("*").order("id").execute().data
     logs = supabase.table("routine_logs").select("*").eq("log_date", today).execute().data
     used_by_cat = {l["category_id"]: l["hours_used"] for l in logs}
@@ -8086,21 +8121,33 @@ def get_routine_today():
     )
     hist_by_cat: dict[int, list] = defaultdict(list)
     for r in hist_rows:
-        hist_by_cat[r["category_id"]].append(r.get("hours_used") or 0)
+        hist_by_cat[r["category_id"]].append(r)
 
     result = []
     for c in cats:
+        planned_by_day = _resolve_planned_hours(c.get("planned_hours"))
+        planned = planned_by_day.get(today_weekday, 0)
+
         used = used_by_cat.get(c["id"], 0)
-        planned = c["planned_hours"]
         remaining = max(planned - used, 0)
         overtime_hours = max(used - planned, 0)
         pace_pct = (used / planned) if planned else 0
 
-        hist_vals = hist_by_cat.get(c["id"], [])
-        hist_overrun_rate = (
-            round(sum(1 for v in hist_vals if v > planned) / len(hist_vals), 2)
-            if hist_vals and planned else 0.0
-        )
+        # Compare each historical day's usage against *that day's own*
+        # planned hours (not today's), since schedules now differ by
+        # weekday -- a Saturday with 0 planned hours shouldn't count as an
+        # "overrun" just because a weekday category has a bigger budget.
+        hist_rows_c = hist_by_cat.get(c["id"], [])
+        overrun_count = 0
+        comparable = 0
+        for r in hist_rows_c:
+            day_key = WEEKDAYS[datetime.strptime(r["log_date"], "%Y-%m-%d").weekday()]
+            day_planned = planned_by_day.get(day_key, 0)
+            if day_planned:
+                comparable += 1
+                if (r.get("hours_used") or 0) > day_planned:
+                    overrun_count += 1
+        hist_overrun_rate = round(overrun_count / comparable, 2) if comparable else 0.0
         # Predicted (not-yet-actual) overrun: hasn't gone over today, but
         # has already burned a large share of its budget AND historically
         # runs over more often than not -- worth a heads-up before it
@@ -8108,7 +8155,8 @@ def get_routine_today():
         overrun_predicted = overtime_hours == 0 and hist_overrun_rate >= 0.5 and pace_pct >= 0.6
 
         result.append({
-            **c, "used_hours": round(used, 2), "remaining_hours": round(remaining, 2),
+            **c, "planned_hours": round(planned, 2), "planned_hours_by_day": planned_by_day,
+            "used_hours": round(used, 2), "remaining_hours": round(remaining, 2),
             "overtime": overtime_hours > 0, "overtime_hours": round(overtime_hours, 2),
             "pace_pct": round(pace_pct * 100),
             "behind_pace": planned > 0 and pace_pct < day_pace - 0.15,  # meaningfully behind expected progress

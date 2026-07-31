@@ -1338,14 +1338,27 @@ window.toggleRoutineSetup = function() {
     if (open) renderRoutineSetupList();
 };
 
+const RT_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const RT_WEEKDAY_LABELS = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+
+function _summarizeWeekHours(byDay) {
+    // Compact display like "1h Mon–Fri, 0h Sat–Sun" when a run of
+    // consecutive days share the same value, else falls back to listing
+    // per-day abbreviations so uneven schedules are still readable.
+    const vals = RT_WEEKDAYS.map(d => byDay?.[d] ?? 0);
+    if (vals.every(v => v === vals[0])) return `${vals[0]}h/day`;
+    return RT_WEEKDAYS.map(d => `${RT_WEEKDAY_LABELS[d]} ${byDay?.[d] ?? 0}h`).join(", ");
+}
+
 function renderRoutineSetupList() {
     const el = document.getElementById("routine-setup-list");
     el.innerHTML = routineCategories.map(c => `
         <div class="pie-planner-item">
             <span class="pie-planner-swatch" style="background:${c.color}"></span>
             <span class="pie-planner-item-label">${_escHtml(c.label)}</span>
-            <span class="pie-planner-item-hours">${c.planned_hours}h/day</span>
-            <button type="button" class="pie-planner-del" onclick="deleteRoutineCategory(${c.id})">✕</button>
+            <span class="pie-planner-item-hours">${_escHtml(_summarizeWeekHours(c.planned_hours_by_day))}</span>
+            <button type="button" class="pie-planner-del" onclick="editRoutineCategory(${c.id})" title="Edit">✎</button>
+            <button type="button" class="pie-planner-del" onclick="deleteRoutineCategory(${c.id})" title="Delete">✕</button>
         </div>`).join("") || "<p class='plan-loading'>No categories yet — add your first below.</p>";
 }
 
@@ -1356,17 +1369,62 @@ window.deleteRoutineCategory = async function(id) {
     renderRoutineSetupList();
 };
 
+function _resetRoutineForm() {
+    const form = document.getElementById("routine-add-form");
+    form.reset();
+    document.getElementById("rt-edit-id").value = "";
+    document.getElementById("rt-submit-btn").textContent = "+ Add";
+    document.getElementById("rt-cancel-edit").style.display = "none";
+}
+
+window.editRoutineCategory = function(id) {
+    const c = routineCategories.find(x => x.id === id);
+    if (!c) return;
+    document.getElementById("rt-edit-id").value = id;
+    document.getElementById("rt-label").value = c.label;
+    document.getElementById("rt-color").value = c.color;
+    RT_WEEKDAYS.forEach(d => {
+        const input = document.querySelector(`.rt-day-hours[data-day="${d}"]`);
+        if (input) input.value = c.planned_hours_by_day?.[d] ?? 0;
+    });
+    document.getElementById("rt-submit-btn").textContent = "Update";
+    document.getElementById("rt-cancel-edit").style.display = "";
+    document.getElementById("rt-label").scrollIntoView({ behavior: "smooth", block: "nearest" });
+};
+
+document.getElementById("rt-cancel-edit")?.addEventListener("click", _resetRoutineForm);
+
+document.getElementById("rt-same-all")?.addEventListener("click", () => {
+    const monVal = document.querySelector('.rt-day-hours[data-day="mon"]').value;
+    RT_WEEKDAYS.forEach(d => {
+        const input = document.querySelector(`.rt-day-hours[data-day="${d}"]`);
+        if (input) input.value = monVal;
+    });
+});
+
 document.getElementById("routine-add-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const label  = document.getElementById("rt-label").value.trim();
-    const hours  = parseFloat(document.getElementById("rt-hours").value);
     const color  = document.getElementById("rt-color").value;
-    if (!label || !hours) return;
-    await fetch("/routine/categories", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label, planned_hours: hours, color }),
+    const editId = document.getElementById("rt-edit-id").value;
+    const planned_hours = {};
+    RT_WEEKDAYS.forEach(d => {
+        planned_hours[d] = parseFloat(document.querySelector(`.rt-day-hours[data-day="${d}"]`).value) || 0;
     });
-    e.target.reset();
+    if (!label || RT_WEEKDAYS.every(d => !planned_hours[d])) return;
+
+    if (editId) {
+        await fetch(`/routine/categories/${editId}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label, planned_hours, color }),
+        });
+    } else {
+        await fetch("/routine/categories", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ label, planned_hours, color }),
+        });
+    }
+    _resetRoutineForm();
     loadRoutineToday();
     renderRoutineSetupList();
 });
