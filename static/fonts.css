@@ -1,0 +1,13 @@
+@font-face { font-family: 'DM Sans'; font-weight: 100 1000; font-display: swap; src: url('fonts/DMSans-opsz-wght.ttf') format('truetype'); }
+@font-face { font-family: 'Playfair Display'; font-weight: 400 900; font-display: swap; src: url('fonts/PlayfairDisplay-wght.ttf') format('truetype'); }
+@font-face { font-family: 'DM Mono'; font-weight: 400; font-display: swap; src: url('fonts/DMMono-Regular.ttf') format('truetype'); }
+@font-face { font-family: 'DM Mono'; font-weight: 500; font-display: swap; src: url('fonts/DMMono-Medium.ttf') format('truetype'); }
+:root {
+    --font-heading: 'Playfair Display', Georgia, serif;
+    --font-body: 'DM Sans', system-ui, sans-serif;
+    --font-mono: 'DM Mono', ui-monospace, monospace;
+}
+body { font-family: var(--font-body); line-height: 1.6; }
+h1,h2,h3,h4,h5,h6,.brand,.brand-name { font-family: var(--font-heading); letter-spacing: -.015em; }
+button,input,textarea,select,option,::placeholder { font-family: inherit; }
+time,.entry-metadata,[class$="-section-label"],.eyebrow,.field-label,.lp-label,.sidebar-status,.journal-streak small { font-family: var(--font-mono); letter-spacing: .025em; }

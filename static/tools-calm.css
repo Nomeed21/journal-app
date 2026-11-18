@@ -1,0 +1,51 @@
+body { display: block; margin: 0; }
+.app-shell {
+    display: grid;
+    grid-template-columns: clamp(175px, 17vw, 230px) minmax(0, 1fr);
+    width: 100%;
+    height: 100dvh;
+    overflow: hidden;
+}
+.sidebar {
+    display: flex;
+    flex-direction: column;
+    width: auto;
+    min-width: 0;
+    overflow-y: auto;
+    background: #fff;
+    padding: 1rem 0 5.5rem;
+}
+.sidebar-back {
+    display: block;
+    margin: 0 .75rem .75rem;
+    padding: .65rem .8rem;
+    color: var(--ink);
+    border-radius: 10px;
+    text-decoration: none;
+}
+.sidebar-back:hover { background: var(--paper-soft); }
+.sidebar .sidebar-brand { display: flex; }
+.sidebar .brand-name, .sidebar .nav-label { display: inline; }
+.sidebar .nav-links { flex-direction: column; }
+.sidebar-footer { padding-top: .8rem; }
+.sidebar-status { display: block; margin-top: .75rem; color: var(--ink-soft); font-size: .72rem; }
+.main-content { min-width: 0; width: 100%; overflow: auto; }
+.focus-fab { left: max(1rem, env(safe-area-inset-left)); bottom: max(1rem, env(safe-area-inset-bottom)); }
+.ai-coach-card,.ai-entry-trigger-btn,#proactive-coaching,#discovery-cards,#routine-procrastination-alert,#xp-hud,.quick-checkin-trigger-btn,.chat-fab,#chat-panel,#bottleneck-card,button[onclick="generateBosses()"],.hv2-token-btn,.how-it-works-btn { display: none !important; }
+.nav-item--locked { display:flex !important; pointer-events:auto !important; opacity:1 !important; }
+*:focus-visible { outline:3px solid #795197; outline-offset:3px; }
+.journal-streak { background:var(--paper); border:1px solid var(--line); border-radius:14px; padding:1rem 1.3rem; margin-bottom:1.25rem; }
+.journal-streak h2 { font-size:1rem; }
+#journal-streak-count { margin:.3rem 0; font-size:1.65rem; font-weight:600; }
+@media (max-width: 760px) {
+    .app-shell { display:block; height:auto; min-height:100dvh; overflow:visible; }
+    .sidebar { padding:.5rem .75rem; overflow:visible; border-right:0; border-bottom:1px solid var(--line); }
+    .sidebar-back { align-self:flex-start; margin:0; }
+    .sidebar .sidebar-brand { display:none; }
+    .sidebar .nav-links { display:flex; flex-direction:row; flex-wrap:wrap; gap:.15rem; padding:0; }
+    .sidebar .nav-item { padding:.45rem .65rem; min-height:44px; }
+    .sidebar .nav-icon { display:none; }
+    .sidebar-footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.5rem; margin:.4rem 0 0; padding:.4rem 0 0; }
+    .sidebar-status { margin:0; }
+    .main-content { overflow:visible; padding:1rem 1rem 5rem; }
+}

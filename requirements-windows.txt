@@ -1,0 +1,7 @@
+# Runtime dependencies for Windows. The disabled legacy embedding feature does
+# not need sentence-transformers or its large PyTorch/model downloads.
+fastapi==0.136.3
+uvicorn==0.34.0
+supabase==2.31.0
+groq==1.4.0
+python-dotenv==1.1.0
