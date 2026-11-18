@@ -1,0 +1,1029 @@
+{
+  "achievements": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "user_key": {
+      "type": "text",
+      "default": "default"
+    },
+    "name": {
+      "type": "text",
+      "required": true
+    },
+    "xp_bonus": {
+      "type": "integer",
+      "default": 0
+    },
+    "earned_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "board_quest_tasks": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "quest_id": {
+      "type": "bigint",
+      "required": true,
+      "references": [
+        "board_quests",
+        "id"
+      ]
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "is_completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "linked_habit_name": {
+      "type": "text"
+    },
+    "required_logs": {
+      "type": "integer",
+      "default": 1
+    },
+    "current_logs": {
+      "type": "integer",
+      "default": 0
+    },
+    "auto_completed": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "board_quests": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "description": {
+      "type": "text",
+      "default": ""
+    },
+    "difficulty": {
+      "type": "text",
+      "default": "Normal"
+    },
+    "section": {
+      "type": "text",
+      "default": "daily"
+    },
+    "source_type": {
+      "type": "text",
+      "default": "manual"
+    },
+    "source_id": {
+      "type": "text",
+      "default": ""
+    },
+    "category": {
+      "type": "text",
+      "default": "Personal Growth"
+    },
+    "xp_reward": {
+      "type": "integer",
+      "default": 50
+    },
+    "is_completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "completed_at": {
+      "type": "timestamp with time zone"
+    },
+    "due_date": {
+      "type": "date"
+    },
+    "parent_quest_id": {
+      "type": "bigint",
+      "references": [
+        "board_quests",
+        "id"
+      ]
+    },
+    "goal_id": {
+      "type": "bigint",
+      "references": [
+        "goals",
+        "id"
+      ]
+    },
+    "milestone_id": {
+      "type": "bigint",
+      "references": [
+        "goal_milestones",
+        "id"
+      ]
+    },
+    "suggested_tasks": {
+      "type": "text",
+      "default": "[]"
+    },
+    "unlocked_at": {
+      "type": "timestamp with time zone"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "is_repeating": {
+      "type": "boolean",
+      "required": true,
+      "default": false
+    },
+    "last_completed_date": {
+      "type": "date"
+    },
+    "started_at": {
+      "type": "timestamp with time zone"
+    }
+  },
+  "books": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "author": {
+      "type": "text",
+      "default": ""
+    },
+    "total_pages": {
+      "type": "integer"
+    },
+    "current_page": {
+      "type": "integer",
+      "default": 0
+    },
+    "status": {
+      "type": "text",
+      "required": true,
+      "default": "want_to_read"
+    },
+    "summary": {
+      "type": "text",
+      "default": ""
+    },
+    "reflection": {
+      "type": "text",
+      "default": ""
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "required": true,
+      "default": "now()"
+    },
+    "started_at": {
+      "type": "timestamp with time zone"
+    },
+    "finished_at": {
+      "type": "timestamp with time zone"
+    }
+  },
+  "boss_completions": {
+    "id": {
+      "type": "integer",
+      "pk": true,
+      "required": true
+    },
+    "boss_id": {
+      "type": "integer",
+      "references": [
+        "weekly_bosses",
+        "id"
+      ]
+    },
+    "completed_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "xp_earned": {
+      "type": "integer",
+      "default": 0
+    }
+  },
+  "coach_patterns": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "pattern_key": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text"
+    },
+    "description": {
+      "type": "text",
+      "required": true
+    },
+    "confidence": {
+      "type": "numeric",
+      "required": true,
+      "default": 0.5
+    },
+    "last_updated": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "coach_recommendations": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "source": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text",
+      "required": true,
+      "default": "Personal Growth"
+    },
+    "recommendation_text": {
+      "type": "text",
+      "required": true,
+      "default": ""
+    },
+    "trigger_type": {
+      "type": "text",
+      "default": ""
+    },
+    "followed": {
+      "type": "boolean"
+    },
+    "resolved_at": {
+      "type": "timestamp with time zone"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "daily_pie_plans": {
+    "plan_date": {
+      "type": "date",
+      "pk": true,
+      "required": true
+    },
+    "slices": {
+      "type": "jsonb",
+      "required": true
+    },
+    "updated_at": {
+      "type": "timestamp with time zone",
+      "required": true,
+      "default": "now()"
+    }
+  },
+  "daily_plans": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "plan_date": {
+      "type": "date",
+      "required": true
+    },
+    "main_goal": {
+      "type": "text"
+    },
+    "tasks": {
+      "type": "jsonb"
+    },
+    "reflection_note": {
+      "type": "text"
+    },
+    "reflection_at": {
+      "type": "timestamp with time zone"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "discoveries": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "discovery_id": {
+      "type": "text",
+      "required": true
+    },
+    "kind": {
+      "type": "text",
+      "required": true,
+      "default": ""
+    },
+    "category": {
+      "type": "text",
+      "required": true,
+      "default": ""
+    },
+    "value": {
+      "type": "numeric",
+      "required": true
+    },
+    "snapshot": {
+      "type": "jsonb"
+    },
+    "recorded_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "focus_sessions": {
+    "id": {
+      "type": "integer",
+      "pk": true,
+      "required": true
+    },
+    "quest_id": {
+      "type": "integer",
+      "references": [
+        "board_quests",
+        "id"
+      ]
+    },
+    "task_label": {
+      "type": "text",
+      "required": true,
+      "default": "Focus session"
+    },
+    "category": {
+      "type": "text",
+      "required": true,
+      "default": "Personal Growth"
+    },
+    "duration_minutes": {
+      "type": "integer",
+      "required": true,
+      "default": 25
+    },
+    "started_at": {
+      "type": "timestamp with time zone",
+      "required": true,
+      "default": "now()"
+    },
+    "completed_at": {
+      "type": "timestamp with time zone"
+    },
+    "is_completed": {
+      "type": "boolean",
+      "required": true,
+      "default": false
+    },
+    "abandoned": {
+      "type": "boolean",
+      "required": true,
+      "default": false
+    },
+    "xp_earned": {
+      "type": "integer",
+      "required": true,
+      "default": 0
+    }
+  },
+  "goal_dependencies": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "goal_id": {
+      "type": "bigint",
+      "references": [
+        "goals",
+        "id"
+      ]
+    },
+    "depends_on_goal_id": {
+      "type": "bigint",
+      "references": [
+        "goals",
+        "id"
+      ]
+    }
+  },
+  "goal_milestones": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "goal_id": {
+      "type": "bigint",
+      "references": [
+        "goals",
+        "id"
+      ]
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "target_date": {
+      "type": "text"
+    },
+    "is_completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "goal_tasks": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "goal_id": {
+      "type": "bigint",
+      "references": [
+        "goals",
+        "id"
+      ]
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "is_completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "quest_id": {
+      "type": "bigint",
+      "references": [
+        "quests",
+        "id"
+      ]
+    }
+  },
+  "goals": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text",
+      "required": true
+    },
+    "is_completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "habit_profiles": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "name": {
+      "type": "text",
+      "required": true
+    },
+    "skill_node_id": {
+      "type": "text",
+      "required": true,
+      "default": ""
+    },
+    "skill_tree": {
+      "type": "text",
+      "required": true,
+      "default": ""
+    },
+    "domain": {
+      "type": "text",
+      "required": true,
+      "default": ""
+    },
+    "evolution_stage": {
+      "type": "integer",
+      "required": true,
+      "default": 1
+    },
+    "evolution_stages": {
+      "type": "jsonb",
+      "required": true
+    },
+    "pending_evolution": {
+      "type": "boolean",
+      "required": true,
+      "default": false
+    },
+    "base_xp": {
+      "type": "integer",
+      "required": true,
+      "default": 10
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "updated_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "habit_recovery_tokens_v2": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "habit_name": {
+      "type": "text",
+      "required": true
+    },
+    "token_type": {
+      "type": "text",
+      "required": true,
+      "default": "restore"
+    },
+    "meta": {
+      "type": "jsonb"
+    },
+    "used_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "habit_synergies": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "synergy_key": {
+      "type": "text",
+      "required": true
+    },
+    "name": {
+      "type": "text",
+      "required": true
+    },
+    "bonus_desc": {
+      "type": "text",
+      "required": true
+    },
+    "habits_involved": {
+      "type": "text[]",
+      "required": true
+    },
+    "earned_at": {
+      "type": "date",
+      "required": true,
+      "default": "CURRENT_DATE"
+    },
+    "expires_at": {
+      "type": "date",
+      "required": true
+    }
+  },
+  "habits": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "name": {
+      "type": "text",
+      "required": true
+    },
+    "completed_at": {
+      "type": "date",
+      "required": true
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "xp_earned": {
+      "type": "integer",
+      "default": 10
+    },
+    "xp_modifiers": {
+      "type": "jsonb"
+    },
+    "is_recovered": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "journal_entries": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "title": {
+      "type": "text"
+    },
+    "content": {
+      "type": "text"
+    },
+    "mood": {
+      "type": "integer"
+    },
+    "goal_progress": {
+      "type": "integer"
+    },
+    "embedding": {
+      "type": "extensions.vector(384)"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "tags": {
+      "type": "text[]"
+    },
+    "entry_type": {
+      "type": "text",
+      "required": true,
+      "default": "free"
+    },
+    "energy": {
+      "type": "integer",
+      "required": true,
+      "default": 3
+    },
+    "focus": {
+      "type": "integer",
+      "required": true,
+      "default": 3
+    }
+  },
+  "monthly_reviews": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "month_key": {
+      "type": "text",
+      "required": true
+    },
+    "review": {
+      "type": "text",
+      "required": true
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "quests": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "goal_id": {
+      "type": "bigint",
+      "required": true,
+      "references": [
+        "goals",
+        "id"
+      ]
+    },
+    "milestone_id": {
+      "type": "bigint",
+      "references": [
+        "goal_milestones",
+        "id"
+      ]
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "description": {
+      "type": "text",
+      "default": ""
+    },
+    "difficulty": {
+      "type": "text",
+      "default": "Normal"
+    },
+    "is_completed": {
+      "type": "boolean",
+      "default": false
+    },
+    "tags": {
+      "type": "jsonb"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "resume_skills": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "name": {
+      "type": "text",
+      "required": true
+    },
+    "skill_type": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text",
+      "default": ""
+    },
+    "evidence": {
+      "type": "text",
+      "default": ""
+    },
+    "confidence": {
+      "type": "integer",
+      "default": 3
+    },
+    "source_type": {
+      "type": "text",
+      "default": "manual"
+    },
+    "source_id": {
+      "type": "text"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "routine_categories": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "label": {
+      "type": "text",
+      "required": true
+    },
+    "color": {
+      "type": "text",
+      "required": true
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "planned_hours": {
+      "type": "jsonb",
+      "required": true
+    }
+  },
+  "routine_logs": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "category_id": {
+      "type": "bigint",
+      "references": [
+        "routine_categories",
+        "id"
+      ]
+    },
+    "log_date": {
+      "type": "date",
+      "required": true
+    },
+    "hours_used": {
+      "type": "numeric",
+      "required": true,
+      "default": 0
+    },
+    "updated_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "skill_mastery_checks": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "node_id": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text",
+      "required": true
+    },
+    "check_type": {
+      "type": "text"
+    },
+    "prompt": {
+      "type": "text"
+    },
+    "response": {
+      "type": "text"
+    },
+    "passed": {
+      "type": "boolean",
+      "default": false
+    },
+    "score": {
+      "type": "integer",
+      "default": 0
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "skill_progress": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "node_id": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text",
+      "required": true
+    },
+    "completed_at": {
+      "type": "timestamp with time zone",
+      "required": true,
+      "default": "now()"
+    }
+  },
+  "vp_ledger": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "source_type": {
+      "type": "text",
+      "required": true
+    },
+    "source_id": {
+      "type": "text",
+      "required": true
+    },
+    "amount": {
+      "type": "integer",
+      "required": true
+    },
+    "note": {
+      "type": "text"
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "vp_rewards": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "title": {
+      "type": "text",
+      "required": true
+    },
+    "cost": {
+      "type": "integer",
+      "required": true,
+      "default": 1000
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  },
+  "weekly_bosses": {
+    "id": {
+      "type": "integer",
+      "pk": true,
+      "required": true
+    },
+    "week_key": {
+      "type": "text",
+      "required": true
+    },
+    "name": {
+      "type": "text",
+      "required": true
+    },
+    "description": {
+      "type": "text"
+    },
+    "domain": {
+      "type": "text",
+      "required": true
+    },
+    "requirements": {
+      "type": "jsonb"
+    },
+    "xp_reward": {
+      "type": "integer",
+      "default": 200
+    },
+    "deadline": {
+      "type": "date",
+      "required": true
+    },
+    "created_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    },
+    "tier": {
+      "type": "text"
+    }
+  },
+  "xp_ledger": {
+    "id": {
+      "type": "bigint",
+      "pk": true,
+      "required": true
+    },
+    "source_type": {
+      "type": "text",
+      "required": true
+    },
+    "source_id": {
+      "type": "text",
+      "required": true
+    },
+    "category": {
+      "type": "text",
+      "required": true
+    },
+    "xp": {
+      "type": "integer",
+      "required": true
+    },
+    "earned_at": {
+      "type": "timestamp with time zone",
+      "default": "now()"
+    }
+  }
+}

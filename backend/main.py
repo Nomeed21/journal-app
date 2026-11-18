@@ -14,16 +14,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
-from supabase import create_client
-from supabase.lib.client_options import SyncClientOptions
+from pydantic import BaseModel, Field, model_validator
 import httpx
-from groq import Groq
-
 load_dotenv()
 
-from backend.ai import groq_client
+from backend.ai import LLM_MODEL, LLM_PROVIDER, groq_client, require_ai
 from backend.config import (
     EMBEDDING_MODEL_NAME,
     MAX_WEEKLY_ROWS,
@@ -39,26 +34,37 @@ from backend.core.time_utils import (
     local_hour_now,
 )
 from backend.db import db_retry, supabase
+from backend import journal_store
 
 embedding_model = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global embedding_model
-    # Prefer the locally cached model. This keeps normal starts fast and
-    # independent of a live Hugging Face connection, which matters when the
-    # app is being demonstrated. A first-ever setup can still download it.
-    try:
-        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, local_files_only=True)
-        logger.info("Loaded local semantic-search model")
-    except Exception:
-        logger.info("Semantic-search model is not cached; downloading it once")
-        embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    # No AI client, inference, embedding import, or model download on startup.
     yield
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Reject AI routes before context collection or writes. The provider boundary
+# separately rejects calls from helpers, jobs and future routes.
+from starlette.responses import JSONResponse
+AI_ROUTES = {
+    "/action-engine", "/ai-entry/chat", "/ai-insight", "/chat", "/daily-quest",
+    "/board/generate/journal", "/board/generate/morning-tasks",
+    "/board/generate/journal/preview", "/board/generate/journal/confirm",
+    "/bosses/generate", "/bottleneck", "/habits/ai-insights",
+    "/journal/generate-quests", "/monthly-review", "/coaching/proactive",
+}
+
+@app.middleware("http")
+async def ai_off_policy(request, call_next):
+    path = request.url.path.rstrip("/")
+    if path in AI_ROUTES or path.endswith("/mastery-check"):
+        return JSONResponse({"detail": "AI processing is off.", "ai_enabled": False}, status_code=403)
+    return await call_next(request)
+
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +72,22 @@ app = FastAPI(lifespan=lifespan)
 # ---------------------------------------------------------------------------
 
 class EntryCreate(BaseModel):
-    title: str
-    content: str
-    mood: int
+    title: str = ""
+    content: str = ""
+    mood: Optional[int] = Field(default=None, ge=1, le=5)
     tags: list[str] = []
     entry_type: str = "free"
-    energy: int = 3
-    focus: int = 3
+    energy: Optional[int] = Field(default=None, ge=1, le=5)
+    focus: Optional[int] = Field(default=None, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def meaningful(self):
+        self.content = self.content.strip()
+        if not self.content and self.mood is None:
+            raise ValueError("Write a note or choose a mood.")
+        if self.entry_type not in ("free", "morning", "night"):
+            raise ValueError("Unknown reflection type")
+        return self
 
 class ChatTurn(BaseModel):
     role: str
@@ -194,7 +209,8 @@ def calc_streak(unique_dates_desc: list[str], today: str) -> int:
     return streak
 
 def avg(lst, key=None):
-    items = [e[key] for e in lst] if key else lst
+    items = [e.get(key) for e in lst] if key else lst
+    items = [v for v in items if v is not None]
     return round(sum(items) / len(items), 1) if items else None
 
 # ---------------------------------------------------------------------------
@@ -626,12 +642,7 @@ def predictive_analytics() -> dict:
 
     # Declining consistency (gaps in last 14 days)
     start14 = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-    recent_entries = (
-        supabase.table("journal_entries")
-        .select("created_at")
-        .gte("created_at", start14)
-        .execute()
-    ).data
+    recent_entries = journal_store.records(start=start14)
     days_logged = {e["created_at"][:10] for e in recent_entries}
     expected_days = {
         (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -788,84 +799,39 @@ def save_pie_plan_today(plan: PiePlanSave):
 # ---------------------------------------------------------------------------
 
 def generate_embedding(text: str) -> list[float]:
-    return embedding_model.encode(text).tolist()
+    require_ai()
 
 def _backfill_entry_embedding(entry_id: int, combined_text: str):
-    """
-    Computes and writes an entry's embedding after the response has already
-    gone out. SentenceTransformer.encode() is CPU-bound model inference and
-    used to run inline on every /entries POST/PUT, meaning save latency
-    included a full embedding computation before the user saw "saved".
-    Semantic search (build_semantic_matches_block) just won't surface a
-    brand-new entry for the brief window before this finishes — a fine
-    trade in a single-user app.
-    """
-    try:
-        embedding = generate_embedding(combined_text)
-        supabase.table("journal_entries").update({"embedding": embedding}).eq("id", entry_id).execute()
-    except Exception as e:
-        logger.exception("embedding backfill failed for entry %s: %s", entry_id, e)
+    """Compatibility no-op: embedding processing is unavailable."""
+    return  # AI processing is off, including optional embeddings.
 
 def _insert_entry_fast(data: dict, combined: str):
-    """
-    Inserts a journal entry without waiting on embedding generation.
-    Tries an embedding-less insert first; if the table rejects a null
-    embedding (e.g. a NOT NULL constraint), falls back to the old
-    synchronous embed-then-insert behavior — so this is safe without
-    needing to know the column's nullability up front.
-    Returns (row, used_fast_path).
-    """
-    try:
-        result = supabase.table("journal_entries").insert({**data, "embedding": None}).execute()
-        return result.data[0], True
-    except Exception:
-        result = supabase.table("journal_entries").insert({**data, "embedding": generate_embedding(combined)}).execute()
-        return result.data[0], False
+    return journal_store.save(data), True
+
+SKIP_TAG = "__skipped__"
 
 @app.get("/entries/today-status")
 def today_entry_status():
     """Return which entry types have already been written today (local day)."""
     start_utc, end_utc = local_day_bounds_utc()
-    result = (
-        supabase.table("journal_entries")
-        .select("entry_type")
-        .gte("created_at", start_utc)
-        .lt("created_at", end_utc)
-        .execute()
-    )
-    done = {row["entry_type"] for row in result.data}
-    return {"done": list(done), "morning": "morning" in done, "night": "night" in done, "free": "free" in done}
+    rows = journal_store.records(start=start_utc, before=end_utc)
+    done = {row["entry_type"] for row in rows}
+    skipped = {row["entry_type"] for row in rows if SKIP_TAG in row["tags"]}
+    return {
+        "done": list(done), "morning": "morning" in done, "night": "night" in done, "free": "free" in done,
+        "skipped": list(skipped),
+    }
+
+class SkipEntryRequest(BaseModel):
+    entry_type: str = "free"
+
+@app.post("/entries/skip")
+def skip_journal_entry(req: SkipEntryRequest):
+    return {"status": "not_recorded", "message": "Nothing to catch up on."}
+
 
 def _create_journal_entry(entry: EntryCreate, background_tasks: BackgroundTasks) -> dict:
-    """
-    Core entry-creation logic — same duplicate-per-local-day guard, fast
-    insert + background embedding, and XP grant regardless of whether the
-    entry came from the hand-typed form (POST /entries) or was assembled
-    by the AI Entry conversation (POST /ai-entry/chat). Keeping this in one
-    place means an AI-authored entry is indistinguishable from a typed one
-    to every downstream system (streaks, XP, achievements, insights).
-    """
-    # Enforce one entry per type per local day (skip check when editing).
-    # FIX: this used to bucket on the UTC calendar day, so a morning entry
-    # written before ~8am local time (UTC+8) could be misjudged as
-    # belonging to yesterday's "already exists" check (or the reverse near
-    # midnight) — which either wrongly blocked a legitimate new entry or
-    # wrongly let a duplicate through, and either way could short-circuit
-    # entry creation before quest generation ever ran.
-    start_utc, end_utc = local_day_bounds_utc()
-    existing = (
-        supabase.table("journal_entries")
-        .select("id")
-        .eq("entry_type", entry.entry_type)
-        .gte("created_at", start_utc)
-        .lt("created_at", end_utc)
-        .execute()
-    )
-    if existing.data:
-        existing_id = existing.data[0]["id"]
-        return {"status": "already_exists", "entry_type": entry.entry_type, "existing_id": existing_id,
-                "message": f"A {entry.entry_type} entry already exists for today. Edit it instead."}
-
+    """Append a meaningful reflection without AI, tasks, or score changes."""
     combined = (
         f"Title: {entry.title}. Content: {entry.content}. "
         f"Mood: {entry.mood}/5. Energy: {entry.energy}/5. "
@@ -880,18 +846,7 @@ def _create_journal_entry(entry: EntryCreate, background_tasks: BackgroundTasks)
         "tags": entry.tags,
     }
     saved_row, used_fast_path = _insert_entry_fast(data, combined)
-    entry_id = saved_row["id"]
-    if used_fast_path:
-        background_tasks.add_task(_backfill_entry_embedding, entry_id, combined)
-
-    # Grant XP for journaling (into Personal Growth)
-    xp_map = {"morning": 15, "night": 20, "free": 10}
-    ledger_add("journal_entry", str(entry_id), "Personal Growth", xp_map.get(entry.entry_type, 10))
-
-    # Check achievements after every entry
-    new_achievements = award_achievements()
-
-    return {"status": "created", "entry": saved_row, "new_achievements": new_achievements}
+    return {"status": "created", "entry": saved_row, "new_achievements": []}
 
 @app.post("/entries")
 def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
@@ -900,45 +855,32 @@ def create_entry(entry: EntryCreate, background_tasks: BackgroundTasks):
 @app.get("/entries")
 def get_entries(tag: Optional[str] = None, keyword: Optional[str] = None,
                 start_date: Optional[str] = None, end_date: Optional[str] = None):
-    q = supabase.table("journal_entries").select(
-        "id, title, content, mood, energy, focus, entry_type, tags, created_at"
-    )
-    if tag:        q = q.contains("tags", [tag])
-    if keyword:    q = q.or_(f"title.ilike.%{keyword}%,content.ilike.%{keyword}%")
-    if start_date: q = q.gte("created_at", start_date)
-    if end_date:   q = q.lte("created_at", end_date)
-    return q.order("created_at", desc=True).execute().data
+    return journal_store.records(tag=tag, keyword=keyword, start=start_date, end=end_date)
 
 @app.get("/entries/trends")
 def get_trends(days: int = 30):
     start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    result = (
-        supabase.table("journal_entries")
-        .select("mood, energy, focus, created_at")
-        .gte("created_at", start).order("created_at").execute()
-    )
     daily = {}
-    for e in result.data:
+    for e in journal_store.records(start=start, newest=False):
         date = e["created_at"][:10]
         daily.setdefault(date, {"moods": [], "energies": [], "focuses": []})
-        daily[date]["moods"].append(e["mood"])
-        daily[date]["energies"].append(e.get("energy") or 3)
-        daily[date]["focuses"].append(e.get("focus") or 3)
+        if e["mood"] is not None: daily[date]["moods"].append(e["mood"])
+        if e.get("energy") is not None: daily[date]["energies"].append(e["energy"])
+        if e.get("focus") is not None: daily[date]["focuses"].append(e["focus"])
     return [
         {"date": d,
-         "avg_mood":   round(sum(v["moods"])    / len(v["moods"]), 1),
-         "avg_energy": round(sum(v["energies"]) / len(v["energies"]), 1),
-         "avg_focus":  round(sum(v["focuses"])  / len(v["focuses"]), 1)}
+         "avg_mood":   avg(v["moods"]),
+         "avg_energy": avg(v["energies"]),
+         "avg_focus":  avg(v["focuses"])}
         for d, v in sorted(daily.items())
     ]
 
 @app.get("/entries/correlations")
 def get_correlations():
-    result = supabase.table("journal_entries").select("mood, created_at").execute()
     days = {i: {"moods": []} for i in range(7)}
-    for e in result.data:
+    for e in journal_store.records():
         dow = datetime.fromisoformat(e["created_at"].replace("Z", "+00:00")).weekday()
-        days[dow]["moods"].append(e["mood"])
+        if e["mood"] is not None: days[dow]["moods"].append(e["mood"])
     day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     return [
         {"day": name,
@@ -948,14 +890,10 @@ def get_correlations():
 
 @app.get("/entries/{entry_id}")
 def get_entry(entry_id: int):
-    result = (
-        supabase.table("journal_entries")
-        .select("id, title, content, mood, tags, created_at")
-        .eq("id", entry_id).single().execute()
-    )
-    if not result.data:
+    row = journal_store.get(entry_id)
+    if row is None:
         raise HTTPException(404, "Entry not found")
-    return result.data
+    return row
 
 @app.put("/entries/{entry_id}")
 def update_entry(entry_id: int, entry: EntryCreate, background_tasks: BackgroundTasks):
@@ -974,16 +912,14 @@ def update_entry(entry_id: int, entry: EntryCreate, background_tasks: Background
         "energy": entry.energy, "focus": entry.focus,
         "entry_type": entry.entry_type, "tags": entry.tags,
     }
-    result = supabase.table("journal_entries").update(data).eq("id", entry_id).execute()
-    if not result.data:
+    row = journal_store.save(data, entry_id)
+    if row is None:
         raise HTTPException(404, "Entry not found")
-    background_tasks.add_task(_backfill_entry_embedding, entry_id, combined)
-    return {"status": "updated", "entry": result.data[0]}
+    return {"status": "updated", "entry": row}
 
 @app.delete("/entries/{entry_id}")
 def delete_entry(entry_id: int):
-    result = supabase.table("journal_entries").delete().eq("id", entry_id).execute()
-    if not result.data:
+    if not journal_store.delete(entry_id):
         raise HTTPException(404, "Entry not found")
     return {"status": "deleted"}
 # ---------------------------------------------------------------------------
@@ -1416,34 +1352,8 @@ def _build_life_balance(streaks: dict) -> list[dict]:
 # via the skill/goal/journal generators in the Quest Board V2 section below.)
 
 def _generate_evolution_stages(habit_name: str, skill_node_name: str) -> list[dict]:
-    """AI generates 5 evolution stages for a habit."""
-    try:
-        prompt = f"""You design habit evolution for a personal growth RPG.
-
-Habit: "{habit_name}"
-Skill Node: "{skill_node_name}"
-
-Design 5 progressive evolution stages. Each stage increases difficulty/depth.
-
-Reply ONLY in JSON array (no markdown):
-[
-  {{"stage": 1, "title": "short name", "description": "what this stage looks like", "duration_minutes": 5}},
-  {{"stage": 2, "title": "...", "description": "...", "duration_minutes": 10}},
-  {{"stage": 3, "title": "...", "description": "...", "duration_minutes": 20}},
-  {{"stage": 4, "title": "...", "description": "...", "duration_minutes": 30}},
-  {{"stage": 5, "title": "...", "description": "...", "duration_minutes": 45}}
-]"""
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.6, max_tokens=400,
-        )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = "\n".join(raw.split("\n")[1:]).replace("```", "")
-        return _json.loads(raw.strip())
-    except Exception:
-        return []
+    """Manual habits do not require AI evolution stages."""
+    return []
 
 
 
@@ -1786,7 +1696,7 @@ Mood on habit days: {avg_with}/5 vs no-habit days: {avg_without}/5
 Write 2-3 sharp observations (max 80 words). Be specific, name habits, mention domains. No generic advice."""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.8, max_tokens=150,
     )
@@ -2774,8 +2684,8 @@ def _get_active_skill_goals(category: str) -> dict:
 def _compute_node_habit_progress(category: str, node_id: str) -> float:
     """
     Success-rate of quest-derived activity for habits linked to this skill
-    node, with slow decay for days missed since the last completion (never
-    an instant reset). Since a habit's dates now come from any completed
+    node, evaluated at its last recorded activity without inactivity decay.
+    Since a habit's dates now come from any completed
     quest in its skill_tree/category, and skill_tree == category here,
     all linked habits share the same underlying date set.
     """
@@ -2793,13 +2703,10 @@ def _compute_node_habit_progress(category: str, node_id: str) -> float:
         dates = _habit_quest_dates(category)
         if not dates:
             return 0.0
-        today = local_date_today()
+        today = dates[0]  # Freeze participation at the last recorded activity.
         snap  = _build_habit_snapshot(profiles[0]["name"], {"skill_tree": category}, dates, today)
         rate  = snap["success_rate"]
-        last  = datetime.strptime(dates[0], "%Y-%m-%d")
-        days_since = (datetime.strptime(today, "%Y-%m-%d") - last).days
-        decayed = max(0.0, rate - days_since * 2)  # -2 pts/day of inactivity, floor at 0
-        return round(decayed, 1)
+        return round(rate, 1)
     except Exception:
         return 0.0
 
@@ -2999,7 +2906,7 @@ Respond ONLY in this JSON format:
 }}"""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": eval_prompt}],
         temperature=0.3,
         max_tokens=300,
@@ -3542,14 +3449,7 @@ def _mine_weekly_patterns():
     try:
         MEMORY_WINDOW_DAYS = 90
         mem_start = (now - timedelta(days=MEMORY_WINDOW_DAYS)).isoformat()
-        mem_rows = (
-            supabase.table("journal_entries")
-            .select("title, content, created_at")
-            .gte("created_at", mem_start)
-            .order("created_at")
-            .execute()
-            .data
-        )
+        mem_rows = journal_store.records(start=mem_start, newest=False)
         by_key: dict[tuple, list[dict]] = defaultdict(list)
         for r in mem_rows:
             text = f"{r.get('title','')}. {r.get('content','')}"
@@ -3661,13 +3561,7 @@ def _mine_weekly_patterns():
     # doesn't get blamed on whatever word happened to appear in it.
     try:
         start90 = (now - timedelta(days=90)).isoformat()
-        mood_rows = (
-            supabase.table("journal_entries")
-            .select("content, mood, created_at")
-            .gte("created_at", start90)
-            .execute()
-            .data
-        )
+        mood_rows = journal_store.records(start=start90)
         if len(mood_rows) >= 15:
             word_moods: dict[str, list] = defaultdict(list)
             all_moods = []
@@ -4424,7 +4318,7 @@ Write ONE short, warm, direct coaching message (max 60 words) that:
 Do not list all the alerts. Pick the most important one and speak to it."""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.8,
         max_tokens=120,
@@ -4515,7 +4409,7 @@ Reply in this exact JSON format (no markdown, no extra text):
 }}"""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7, max_tokens=300,
     )
@@ -4571,7 +4465,7 @@ Reply ONLY in this JSON format:
 Return an empty array [] if no clear quests emerge. Max 3 items."""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6, max_tokens=400,
     )
@@ -4670,7 +4564,7 @@ Reply ONLY in this JSON:
   "goal_title": "goal title or null"
 }}"""
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6, max_tokens=300,
     )
@@ -4709,11 +4603,7 @@ Reply ONLY in this JSON:
 # ---------------------------------------------------------------------------
 
 def fetch_all_entries_light():
-    result = (
-        supabase.table("journal_entries")
-        .select("id, mood, energy, focus, entry_type, created_at")
-        .order("created_at").execute()
-    )
+    rows = journal_store.records(newest=False)
     return [
         {
             "id": e["id"],
@@ -4723,20 +4613,16 @@ def fetch_all_entries_light():
             "entry_type": e.get("entry_type") or "free",
             "created_at": e["created_at"],
         }
-        for e in result.data
+        for e in rows
     ]
 
 def build_recent_text_block(today_iso: str) -> str:
     start = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).isoformat()
-    result = (
-        supabase.table("journal_entries")
-        .select("id, title, content, mood, energy, focus, entry_type, tags, created_at")
-        .gte("created_at", start).order("created_at", desc=True).execute()
-    )
-    if not result.data:
+    rows = journal_store.records(start=start)
+    if not rows:
         return "No entries in the last 14 days."
     parts = []
-    for e in result.data:
+    for e in rows:
         tags = f" [tags: {', '.join(e['tags'])}]" if e.get("tags") else ""
         parts.append(
             f"[{e['created_at'][:10]}] [{e.get('entry_type','free')}] "
@@ -4812,18 +4698,7 @@ def build_habit_block() -> str:
     return "\n".join(lines)
 
 def build_semantic_matches_block(message: str, exclude_ids: set[int]) -> str:
-    query_emb = generate_embedding(message)
-    matches   = supabase.rpc("match_entries", {
-        "query_embedding": query_emb, "match_threshold": 0.3, "match_count": 5
-    }).execute()
-    relevant = [e for e in matches.data if e["id"] not in exclude_ids]
-    if not relevant:
-        return ""
-    return "\n\n".join(
-        f"[{e['created_at'][:10]}] (Mood: {e['mood']}/5) "
-        f"{e['title']}: {e['content']}"
-        for e in relevant
-    )
+    require_ai()
 
 def build_coach_context(message: str) -> str:
     today_iso  = datetime.now(timezone.utc).isoformat()
@@ -5078,7 +4953,7 @@ def chat(msg: ChatMessage):
         + [{"role": "user", "content": msg.message}]
     )
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=messages, temperature=0.8, max_tokens=1024,
     )
     raw_response = response.choices[0].message.content
@@ -5158,7 +5033,7 @@ def ai_entry_chat(msg: AIEntryMessage, background_tasks: BackgroundTasks):
         + [{"role": "user", "content": msg.message}]
     )
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=messages, temperature=0.7, max_tokens=500,
     )
     raw_response = response.choices[0].message.content
@@ -5337,12 +5212,33 @@ focus trends, best day, XP/level progress, a long-horizon pattern, or a discover
 fact above instead. If a pattern shows a category has low follow-through, don't recommend more of it.
 If level >= 5, acknowledge their progress warmly."""
 
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "system", "content": prompt}],
-        temperature=0.8, max_tokens=150,
-    )
+    try:
+        response = groq_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "system", "content": prompt}],
+            temperature=0.8, max_tokens=150,
+        )
+    except Exception as e:
+        logger.exception("ai-insight LLM call failed (%s/%s)", LLM_PROVIDER, LLM_MODEL)
+        return {
+            "insight": (
+                f"AI is unavailable ({LLM_PROVIDER} / {LLM_MODEL}). "
+                f"{e}. Check GROQ_API_KEY, or set LLM_PROVIDER=ollama and pull the model."
+            )
+        }
     return {"insight": response.choices[0].message.content}
+
+
+@app.get("/ai/status")
+def ai_status():
+    """Sanity-check which chat backend the app will call (no model generation)."""
+    return {
+        "provider": LLM_PROVIDER,
+        "model": LLM_MODEL,
+        "ok": True,
+        "enabled": False,
+        "storage": "local SQLite",
+    }
 
 # ---------------------------------------------------------------------------
 # Monthly review
@@ -5354,13 +5250,7 @@ MONTH_NAMES_FULL = ["January", "February", "March", "April", "May", "June",
 def get_month_entries(year: int, month: int):
     start = datetime(year, month, 1, tzinfo=timezone.utc)
     end   = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if month == 12 else datetime(year, month + 1, 1, tzinfo=timezone.utc)
-    return (
-        supabase.table("journal_entries")
-        .select("title, content, mood, energy, focus, created_at")
-        .gte("created_at", start.isoformat())
-        .lt("created_at", end.isoformat())
-        .order("created_at").execute()
-    ).data
+    return journal_store.records(start=start.isoformat(), before=end.isoformat(), newest=False)
 
 def _month_key(year: int, month: int) -> str:
     return f"{year:04d}-{month:02d}"
@@ -5510,7 +5400,7 @@ Rules: Max 300 words. Honest but encouraging. Mention achievements and stalled g
 Give actionable focus areas. Natural language, not statistics lists."""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "system", "content": prompt}],
         temperature=0.7, max_tokens=500,
     )
@@ -5938,7 +5828,7 @@ Reply ONLY in this JSON (no markdown):
 Max 3 bosses. Make them distinct domains. xp_reward must be between {xp_min} and {xp_max}."""
 
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.85, max_tokens=600,
     )
@@ -6280,7 +6170,7 @@ Write a 3-sentence personalized recovery message:
 Be direct, warm, and specific. Max 80 words. Sound like a coach who cares."""
 
         ai_response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.75, max_tokens=150,
         )
@@ -6664,60 +6554,8 @@ def _gen_goal_quests() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _gen_habit_recovery_quests() -> list[dict]:
-    """
-    For habits with broken/at-risk streaks, generate recovery quests.
-
-    Grouped by CATEGORY, not by habit name. _habit_quest_dates() (the thing
-    that decides whether a habit is "done today") matches on category alone
-    — so if three habits share a category (the common case: any habit not
-    linked to a skill node defaults to "Personal Growth"), completing ONE
-    quest in that category already resolves the streak for all three of
-    them. Generating a separate card per habit name in that situation was
-    misleading — three cards that all do the exact same thing when any one
-    of them is completed. One card per at-risk category, listing which
-    habits it covers, matches how the mechanic actually works.
-    """
-    today     = local_date_today()
-    yesterday = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
-    generated = []
-    try:
-        profiles = supabase.table("habit_profiles").select("name, skill_tree, domain").execute().data
-
-        at_risk_by_category: dict[str, list[str]] = defaultdict(list)
-        for p in profiles:
-            category = p.get("skill_tree") or p.get("domain") or "Personal Growth"
-            dates    = _habit_quest_dates(p.get("skill_tree", ""), p.get("domain", ""))
-            if yesterday in dates and today not in dates:
-                at_risk_by_category[category].append(p["name"])
-
-        for category, names in at_risk_by_category.items():
-            src_id = f"habit_category:{category}:{today}"
-            if _source_exists("habit", src_id):
-                continue
-            names_list = ", ".join(f"'{n}'" for n in names)
-            desc = (
-                f"{names_list} {'rely' if len(names) > 1 else 'relies'} on a {category} quest today — "
-                f"{'their streaks are' if len(names) > 1 else 'its streak is'} at risk without one. "
-                f"Completing this (or any {category} quest) covers {'all of them' if len(names) > 1 else 'it'}."
-            )
-            row = _insert_board_quest({
-                "title":        f"Keep your {category} streak alive today",
-                "description":  desc,
-                "difficulty":   "Easy",
-                "section":      "recovery",
-                "source_type":  "habit",
-                "source_id":    src_id,
-                "category":     category,
-                "xp_reward":    30,
-                "is_completed": False,
-                "due_date":     today,
-                "created_at":   datetime.now(timezone.utc).isoformat(),
-            })
-            if row:
-                generated.append(row)
-    except Exception as e:
-        logger.exception("_gen_habit_recovery_quests failed: %s", e)
-    return generated
+    """Absence never generates additional recovery work."""
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -6755,7 +6593,7 @@ Return 1-3 quests as JSON array. Only include quests if the entry clearly sugges
 Return [] if no clear quests emerge. No markdown, pure JSON only."""
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6, max_tokens=400,
         )
@@ -6845,7 +6683,7 @@ Reply ONLY as a JSON array, one object per task, no markdown, no extra text:
     candidates = []
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5, max_tokens=600,
         )
@@ -6942,7 +6780,7 @@ Return 1-3 quests as JSON array. Only include quests if the entry clearly sugges
 Return [] if no clear quests emerge. No markdown, pure JSON only."""
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6, max_tokens=400,
         )
@@ -7168,59 +7006,43 @@ def focus_today():
 BOARD_GENERATION_THROTTLE_SECONDS = 300  # 5 minutes
 _last_board_generation_at: Optional[datetime] = None
 
+# ---------------------------------------------------------------------------
+# Board response cache
+# ---------------------------------------------------------------------------
+# GET /board/quests does 2 Supabase round trips + rebuilds every quest card
+# in Python. That's cheap once, but tab-switching, preloadAllPages(), and
+# repeated polling all hit it back-to-back with nothing having changed in
+# between. A short in-memory TTL cache absorbs those bursts; any endpoint
+# that actually writes to board_quests/board_quest_tasks calls
+# _invalidate_board_cache() so a real change is never served stale.
+_board_cache: Optional[dict] = None
+_board_cache_at: Optional[datetime] = None
+BOARD_CACHE_TTL_SECONDS = 15
+
+def _invalidate_board_cache():
+    global _board_cache, _board_cache_at
+    _board_cache, _board_cache_at = None, None
+
 def _run_board_generation_if_due(force: bool = False):
-    """Run quest-board auto-generation, but at most once per throttle window."""
-    global _last_board_generation_at
-    now = datetime.now(timezone.utc)
-    if not force and _last_board_generation_at is not None:
-        elapsed = (now - _last_board_generation_at).total_seconds()
-        if elapsed < BOARD_GENERATION_THROTTLE_SECONDS:
-            return False  # skipped — ran recently enough
-    try:
-        _expire_stale_daily_quests()
-    except Exception as e:
-        logger.exception("_expire_stale_daily_quests failed: %s", e)
-    try:
-        _reset_repeating_daily_quests()
-    except Exception as e:
-        logger.exception("_reset_repeating_daily_quests failed: %s", e)
-    try:
-        _expire_stale_recovery_quests()
-    except Exception as e:
-        logger.exception("_expire_stale_recovery_quests failed: %s", e)
-    try:
-        for cat in SKILL_TREES:
-            _gen_skill_chain(cat)
-    except Exception as e:
-        logger.exception("_gen_skill_chain failed: %s", e)
-    try:
-        _gen_habit_recovery_quests()
-    except Exception as e:
-        logger.exception("_gen_habit_recovery_quests failed: %s", e)
-    try:
-        _gen_goal_quests()
-    except Exception as e:
-        logger.exception("_gen_goal_quests failed: %s", e)
-    _last_board_generation_at = now
-    return True  # ran
+    """Compatibility no-op: board reads never mutate tasks."""
+    return False
 
 @app.get("/board/quests")
 def get_board_quests():
-    """
-    Return all board quests organised into sections.
-    Auto-generation (skill chains, habit recovery, goal quests) runs at most
-    once per BOARD_GENERATION_THROTTLE_SECONDS rather than on every call —
-    use POST /board/generate/* endpoints (or the "Generate Quests" button,
-    which forces a run) if you need it to happen immediately.
-    """
-    db_retry(_run_board_generation_if_due)
+    """Read the optional quest board without generating, expiring or resetting tasks."""
+    global _board_cache, _board_cache_at
+    now = datetime.now(timezone.utc)
+    if _board_cache is not None and (now - _board_cache_at).total_seconds() < BOARD_CACHE_TTL_SECONDS:
+        return _board_cache
+
+    # Reading the board never generates, expires, resets, or reschedules tasks.
 
     all_quests     = db_retry(_get_board_quests)
     tasks_by_quest = db_retry(_fetch_all_board_tasks_by_quest)
     enriched       = [_build_quest_card(q, tasks_by_quest) for q in all_quests]
 
     # Separate top-level from children
-    top_level = [q for q in enriched if not q.get("parent_quest_id")]
+    top_level = [q for q in enriched if not q.get("parent_quest_id") and q.get("section") != "archived"]
 
     # Build recommended
     recommended = _build_recommended_section(top_level)
@@ -7252,11 +7074,13 @@ def get_board_quests():
     for sec in sections:
         sections[sec] = attach_children(sections[sec])
 
-    return {
+    result = {
         "sections": sections,
         "total":    len(enriched),
         "pending":  sum(1 for q in enriched if not q.get("is_completed")),
     }
+    _board_cache, _board_cache_at = result, now
+    return result
 
 @app.post("/board/quests")
 def create_board_quest(q: QuestBoardCreate):
@@ -7267,6 +7091,7 @@ def create_board_quest(q: QuestBoardCreate):
     existing quest instead of creating a duplicate. Callers that don't pass
     a source_id (or use the default manual:{timestamp}, which is unique
     per call) are unaffected."""
+    _invalidate_board_cache()
     if q.source_id and _source_exists(q.source_type or "manual", q.source_id):
         existing = (
             supabase.table("board_quests")
@@ -7319,6 +7144,7 @@ def create_board_quest(q: QuestBoardCreate):
 
 @app.put("/board/quests/{quest_id}")
 def update_board_quest(quest_id: int, data: QuestBoardUpdate):
+    _invalidate_board_cache()
     update = {k: v for k, v in data.dict().items() if v is not None}
     if not update:
         raise HTTPException(400, "Nothing to update")
@@ -7330,6 +7156,7 @@ def update_board_quest(quest_id: int, data: QuestBoardUpdate):
 @app.post("/board/quests/{quest_id}/complete")
 def complete_board_quest(quest_id: int):
     """Mark a board quest complete, award XP, unlock children."""
+    _invalidate_board_cache()
     result = _complete_board_quest_internal(quest_id)
     if result is None:
         # Either not found or already completed — check which for a clean error
@@ -7341,6 +7168,7 @@ def complete_board_quest(quest_id: int):
 
 @app.delete("/board/quests/{quest_id}")
 def delete_board_quest(quest_id: int):
+    _invalidate_board_cache()
     try:
         supabase.table("board_quest_tasks").delete().eq("quest_id", quest_id).execute()
     except Exception:
@@ -7353,6 +7181,7 @@ def delete_board_quest(quest_id: int):
 # Board quest tasks
 @app.post("/board/quests/{quest_id}/tasks")
 def add_board_task(quest_id: int, task: TaskCreate):
+    _invalidate_board_cache()
     result = supabase.table("board_quest_tasks").insert({
         "quest_id":          quest_id,
         "title":             task.title,
@@ -7367,6 +7196,7 @@ def add_board_task(quest_id: int, task: TaskCreate):
 @app.put("/board/tasks/{task_id}/link-habit")
 def link_task_to_habit(task_id: int, link: TaskHabitLink):
     """Attach a habit to a quest task so logging that habit drives task progress."""
+    _invalidate_board_cache()
     task = supabase.table("board_quest_tasks").select("*").eq("id", task_id).single().execute().data
     if not task:
         raise HTTPException(404, "Task not found")
@@ -7380,6 +7210,7 @@ def link_task_to_habit(task_id: int, link: TaskHabitLink):
 
 @app.delete("/board/tasks/{task_id}/link-habit")
 def unlink_task_habit(task_id: int):
+    _invalidate_board_cache()
     supabase.table("board_quest_tasks").update({
         "linked_habit_name": None, "required_logs": 1, "current_logs": 0,
     }).eq("id", task_id).execute()
@@ -7625,6 +7456,7 @@ def _mark_board_task_completed(task: dict, auto: bool = False) -> dict:
 
 @app.put("/board/tasks/{task_id}")
 def toggle_board_task(task_id: int):
+    _invalidate_board_cache()
     task = supabase.table("board_quest_tasks").select("*").eq("id", task_id).single().execute().data
     if not task:
         raise HTTPException(404, "Task not found")
@@ -7640,12 +7472,14 @@ def toggle_board_task(task_id: int):
 
 @app.delete("/board/tasks/{task_id}")
 def delete_board_task(task_id: int):
+    _invalidate_board_cache()
     supabase.table("board_quest_tasks").delete().eq("id", task_id).execute()
     return {"status": "deleted"}
 
 # Trigger journal quest generation manually (called from frontend after entry save)
 @app.post("/board/generate/journal")
 def generate_journal_board_quests(data: dict):
+    _invalidate_board_cache()
     content  = data.get("content", "")
     mood     = data.get("mood", 3)
     entry_id = data.get("entry_id", 0)
@@ -7662,6 +7496,7 @@ def generate_morning_task_board_quests(data: dict):
     used here only to pick each task's category (instead of hardcoding
     every one to Personal Growth) and to draft a few subtasks per task.
     """
+    _invalidate_board_cache()
     entry_id    = data.get("entry_id", 0)
     task_titles = data.get("task_titles", []) or []
     generated   = _generate_morning_task_quests(entry_id, task_titles)
@@ -7688,6 +7523,7 @@ def confirm_journal_quests(data: dict):
     entry + index + title, so re-confirming the same selection twice
     (e.g. a double-click) is a safe no-op rather than a duplicate quest.
     """
+    _invalidate_board_cache()
     entry_id = data.get("entry_id", 0)
     quests   = data.get("quests", []) or []
     created  = []
@@ -7733,6 +7569,7 @@ def confirm_journal_quests(data: dict):
 # this backs the "Generate Quests" button, which is an explicit request to run now.
 @app.post("/board/generate/skills")
 def generate_skill_board_quests():
+    _invalidate_board_cache()
     before = {q["id"] for q in _get_board_quests()}
     _run_board_generation_if_due(force=True)
     after  = _get_board_quests()
@@ -7742,6 +7579,7 @@ def generate_skill_board_quests():
 # Trigger boss quest generation
 @app.post("/board/generate/boss/{boss_id}")
 def generate_boss_board_quest(boss_id: int):
+    _invalidate_board_cache()
     boss = supabase.table("weekly_bosses").select("*").eq("id", boss_id).execute()
     if not boss.data:
         raise HTTPException(404, "Boss not found")
@@ -7805,8 +7643,7 @@ def seed_demo_data():
             "tags": ["demo"],
         }
         try:
-            r = supabase.table("journal_entries").insert(row).execute()
-            if r.data:
+            if journal_store.save(row):
                 created["journal_entries"] += 1
         except Exception as e:
             logger.exception("seed journal entry failed: %s", e)
@@ -8081,15 +7918,30 @@ def delete_routine_category(cat_id: int):
 @app.post("/routine/log")
 def add_routine_log(entry: RoutineLogAdd):
     today = local_date_today()
-    existing = (supabase.table("routine_logs").select("*")
-        .eq("category_id", entry.category_id).eq("log_date", today).execute().data)
+    current_hour = local_hour_now()
+
+    all_logs_today = (supabase.table("routine_logs").select("*")
+        .eq("log_date", today).execute().data)
+    existing = next((l for l in all_logs_today if l["category_id"] == entry.category_id), None)
+
+    # Only allow logging time that's actually elapsed today: the sum of all
+    # hours logged across every category for today can't exceed how many
+    # hours of the day have passed. Prevents e.g. logging 5h of work at 9am.
+    total_used_today = sum(l["hours_used"] for l in all_logs_today)
+    prospective_total = total_used_today + entry.hours
+    if entry.hours > 0 and prospective_total > current_hour + 1e-9:
+        raise HTTPException(400, "Time does not match the current time")
+
     if existing:
-        new_hours = max(0, existing[0]["hours_used"] + entry.hours)
-        supabase.table("routine_logs").update({"hours_used": new_hours}).eq("id", existing[0]["id"]).execute()
+        new_hours = max(0, existing["hours_used"] + entry.hours)
+        supabase.table("routine_logs").update({
+            "hours_used": new_hours, "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", existing["id"]).execute()
     else:
         new_hours = max(0, entry.hours)
         supabase.table("routine_logs").insert({
             "category_id": entry.category_id, "log_date": today, "hours_used": new_hours,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
     return {"status": "logged", "hours_used": new_hours}
 
@@ -8100,6 +7952,7 @@ def get_routine_today():
     cats = supabase.table("routine_categories").select("*").order("id").execute().data
     logs = supabase.table("routine_logs").select("*").eq("log_date", today).execute().data
     used_by_cat = {l["category_id"]: l["hours_used"] for l in logs}
+    updated_by_cat = {l["category_id"]: l.get("updated_at") for l in logs}
 
     current_hour = local_hour_now()
     day_pace = current_hour / 24  # expected fraction of the day elapsed
@@ -8162,10 +8015,11 @@ def get_routine_today():
             "behind_pace": planned > 0 and pace_pct < day_pace - 0.15,  # meaningfully behind expected progress
             "historical_overrun_rate": round(hist_overrun_rate * 100),
             "overrun_predicted": overrun_predicted,
+            "last_updated": updated_by_cat.get(c["id"]),
         })
 
     # Procrastination heuristic: any category overtime + any category
-    # meaningfully behind pace (reactive), OR -- if nothing has actually
+    # meaningfully not yet recorded (reactive), OR -- if nothing has actually
     # gone over yet -- any category predicted to based on its history
     # (predictive), so the alert isn't only ever a postmortem.
     overtime_cats  = [r["label"] for r in result if r["overtime"]]
@@ -8176,7 +8030,7 @@ def get_routine_today():
         worst = min(behind_cats, key=lambda r: r["pace_pct"])
         procrastination_alert = (
             f"{', '.join(overtime_cats)} running over today — likely why "
-            f"'{worst['label']}' is behind pace ({worst['pace_pct']}% of its planned time used, "
+            f"'{worst['label']}' is not yet recorded ({worst['pace_pct']}% of its planned time used, "
             f"{round(day_pace*100)}% of the day gone)."
         )
     elif predicted_cats:
@@ -8187,9 +8041,106 @@ def get_routine_today():
 
     return {
         "date": today, "categories": result, "current_hour": current_hour,
-        "day_pace_pct": round(day_pace * 100), "procrastination_alert": procrastination_alert,
+        "day_pace_pct": round(day_pace * 100), "hours_left_today": round(24 - current_hour, 1),
+        "procrastination_alert": procrastination_alert,
     }
     
+# ---------------------------------------------------------------------------
+# Quick Check-in ("Busy Day Mode") — one combined view/action for a day with
+# no time to visit Journal, Entries, and Quest Board separately. Reuses the
+# exact same functions the individual pages call, so a quick check-in is
+# indistinguishable downstream (XP, streaks, achievements) from doing each
+# step the normal way.
+# ---------------------------------------------------------------------------
+
+class QuickCheckinEntry(EntryCreate):
+    pass
+
+class QuickRoutineLog(BaseModel):
+    category_id: int
+    hours: float
+
+class QuickCheckinRequest(BaseModel):
+    entry: Optional[QuickCheckinEntry] = None
+    routine_logs: list[QuickRoutineLog] = []
+    quest_ids: list[int] = []
+
+QUICK_CHECKIN_QUEST_SECTIONS = ["recommended", "daily", "weekly", "skill", "recovery", "boss"]
+
+@app.get("/quick-checkin/today")
+def quick_checkin_today():
+    """Everything needed to render the busy-day combined form in one call:
+    which entry types are still open today, today's routine pace, and a
+    short list of outstanding quests to check off -- so the "1 hour left"
+    view doesn't need to hit /entries/today-status, /routine/today, and
+    /board/quests separately before it can even render."""
+    status  = today_entry_status()
+    routine = get_routine_today()
+    board   = get_board_quests()
+
+    seen, pending = set(), []
+    for sec in QUICK_CHECKIN_QUEST_SECTIONS:
+        for q in board.get("sections", {}).get(sec, []):
+            if q.get("is_completed") or q["id"] in seen:
+                continue
+            seen.add(q["id"])
+            pending.append({
+                "id": q["id"], "title": q.get("title"), "difficulty": q.get("difficulty"),
+                "category": q.get("category"), "section": sec,
+            })
+    pending.sort(key=lambda q: {"trivial": 0, "easy": 1, "medium": 2, "hard": 3, "epic": 4}.get(q.get("difficulty"), 2))
+
+    return {
+        "entry_status":  status,
+        "routine":       routine,
+        "pending_quests": pending[:8],
+    }
+
+@app.post("/quick-checkin")
+def submit_quick_checkin(req: QuickCheckinRequest, background_tasks: BackgroundTasks):
+    """Apply a batch of quick-checkin actions in one round trip: at most one
+    journal entry, any number of routine hour logs, and any number of quest
+    completions. Each action fully reuses its normal single-purpose
+    endpoint's logic, and a failure in one action doesn't roll back the
+    others -- e.g. an already-logged entry shouldn't stop routine hours or
+    quest completions from still going through."""
+    result: dict = {"entry": None, "routine_logs": [], "quests_completed": [], "errors": []}
+
+    if req.entry is not None:
+        entry = EntryCreate(
+            title=req.entry.title or f"Quick check-in ({req.entry.entry_type})",
+            content=req.entry.content, mood=req.entry.mood, tags=req.entry.tags,
+            entry_type=req.entry.entry_type, energy=req.entry.energy, focus=req.entry.focus,
+        )
+        try:
+            result["entry"] = _create_journal_entry(entry, background_tasks)
+        except Exception as e:
+            logger.exception("quick-checkin entry failed: %s", e)
+            result["errors"].append(f"entry: {e}")
+
+    for log in req.routine_logs:
+        try:
+            result["routine_logs"].append(add_routine_log(RoutineLogAdd(category_id=log.category_id, hours=log.hours)))
+        except HTTPException as e:
+            result["errors"].append(f"routine[{log.category_id}]: {e.detail}")
+        except Exception as e:
+            logger.exception("quick-checkin routine log failed: %s", e)
+            result["errors"].append(f"routine[{log.category_id}]: {e}")
+
+    for quest_id in req.quest_ids:
+        try:
+            outcome = complete_board_quest(quest_id)
+            if outcome.get("status") != "already_completed":
+                result["quests_completed"].append(outcome)
+        except HTTPException as e:
+            result["errors"].append(f"quest[{quest_id}]: {e.detail}")
+        except Exception as e:
+            logger.exception("quick-checkin quest complete failed: %s", e)
+            result["errors"].append(f"quest[{quest_id}]: {e}")
+
+    result["status"] = "done"
+    return result
+
 from backend.routers.books import configure as configure_books_router, router as books_router
 from backend.routers.resume import configure as configure_resume_router, router as resume_router
 configure_resume_router(
@@ -8205,4 +8156,11 @@ configure_books_router(ledger_add=ledger_add, award_achievements=award_achieveme
 app.include_router(books_router)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from backend.routers.calm import router as calm_router
+app.include_router(calm_router)
+from backend.routers.backups import router as backups_router
+app.include_router(backups_router)
+from backend.routers.local_ai import router as local_ai_router
+app.include_router(local_ai_router)
+
 app.mount("/", StaticFiles(directory=str(PROJECT_ROOT / "static"), html=True), name="static")

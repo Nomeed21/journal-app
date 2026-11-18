@@ -1,6 +1,10 @@
+import { addAskButton, addDraftAskButton } from "./local-ai.js";
 import { initializeTheme } from "./theme.js";
 
 initializeTheme();
+if (window.Chart) {
+    Chart.defaults.font.family = getComputedStyle(document.documentElement).getPropertyValue('--font-body').trim();
+}
 
 document.addEventListener("DOMContentLoaded", () => {
 
@@ -29,7 +33,7 @@ const UNLOCK_RULES = {
 
 // Domains is no longer its own tab -- it's a drill-down inside Habits (see
 // switchHabitsView), gated by the same threshold the old "Domains" tab used.
-const DOMAIN_VIEW_UNLOCK_RULE = (p) => p.questsCompleted >= 1 || p.habits >= 1;
+const DOMAIN_VIEW_UNLOCK_RULE = () => true;
 
 let progressState = { entries: 0, questsCompleted: 0, questsPending: 0, habits: 0 };
 
@@ -42,29 +46,7 @@ function _saveUnlockedSet(set) {
 }
 
 function updateNavUnlocks() {
-    const previously = _getUnlockedSet();
-    const nowUnlocked = new Set(previously);
-
-    navItems.forEach(item => {
-        const page = item.dataset.page;
-        const rule = UNLOCK_RULES[page];
-        const unlocked = ALWAYS_UNLOCKED.includes(page) || !rule || rule(progressState);
-
-        if (!unlocked) { item.classList.add("nav-item--locked"); return; }
-        item.classList.remove("nav-item--locked");
-
-        if (!ALWAYS_UNLOCKED.includes(page) && !previously.has(page)) {
-            nowUnlocked.add(page);
-            item.classList.add("nav-item--fresh-unlock");
-            setTimeout(() => item.classList.remove("nav-item--fresh-unlock"), 600);
-            const label = item.querySelector(".nav-label")?.textContent || page;
-            _toast(`✦ ${label} unlocked!`, "var(--accent-deep)", 3200);
-        }
-    });
-
-    _saveUnlockedSet(nowUnlocked);
-    renderOnboardingCard();
-    updateDomainViewUnlock();
+    navItems.forEach(item => item.classList.remove("nav-item--locked"));
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +90,7 @@ function _onboardingComplete() {
 }
 
 function renderOnboardingCard() {
+    return; // AI and pressure panels are disabled in the calm experience.
     const hasEntry          = progressState.entries >= 1;
     const hasCompletedQuest = progressState.questsCompleted >= 1;
 
@@ -191,7 +174,7 @@ function showPage(pageId) {
 window.showPage = showPage;
 
 navItems.forEach(item =>
-    item.addEventListener("click", e => { e.preventDefault(); showPage(item.dataset.page); })
+    item.addEventListener("click", e => { e.preventDefault(); location.hash = item.dataset.page; showPage(item.dataset.page); })
 );
 
 // ---------------------------------------------------------------------------
@@ -203,7 +186,7 @@ navItems.forEach(item =>
 // was just loaded a moment ago.
 // ---------------------------------------------------------------------------
 const PAGE_LOADERS = {
-    journal:  () => { loadProactiveCoaching(); loadTodayStatus(); loadDiscoveries(); },
+    journal:  () => { loadTodayStatus(); loadJournalStreak(); },
     entries:  () => { loadEntries(); loadRoutineToday(); },
     quests:   () => { loadQuestBoard(); loadBooks(); },
     skills:   () => loadSkills(),
@@ -239,6 +222,21 @@ function preloadAllPages() {
 // ---------------------------------------------------------------------------
 // XP / Level HUD (shown in sidebar)
 // ---------------------------------------------------------------------------
+async function loadJournalStreak() {
+    const total = document.getElementById("journal-streak-count");
+    const balance = document.getElementById("journal-streak-freezes");
+    try {
+        const response = await fetch("/calm/streak");
+        if (!response.ok) throw new Error();
+        const {recorded_days, freezes_left} = await response.json();
+        total.textContent = recorded_days + (recorded_days === 1 ? " day" : " days");
+        balance.textContent = freezes_left + " of 2 freezes available";
+    } catch {
+        total.textContent = "Could not load your streak.";
+        balance.textContent = "";
+    }
+}
+
 async function loadXPHUD() {
     try {
         const data = await (await fetch("/achievements")).json();
@@ -254,7 +252,7 @@ async function loadXPHUD() {
             <div class="xp-hud-text">${info.xp_in_level} / ${info.xp_for_level} XP</div>
             <div class="vp-hud-text">💰 ${data.vp_balance ?? 0} VP</div>`;
     } catch (_) {}
-    loadProgressionStatus();
+
 }
 
 // ---------------------------------------------------------------------------
@@ -494,19 +492,23 @@ const submitBtn = document.getElementById("entry-submit");
 const TAB_LABELS = { morning: "Save Morning Entry", night: "Save Night Reflection", free: "Save Entry" };
 
 let todayDone = { morning: false, night: false, free: false };
+let todaySkipped = [];
 
 async function loadTodayStatus() {
     try {
         const data = await (await fetch("/entries/today-status")).json();
         todayDone = { morning: data.morning, night: data.night, free: data.free };
+        todaySkipped = data.skipped || [];
         // Update tab badges
         entryTabs.forEach(tab => {
             const type = tab.dataset.type;
             const done = todayDone[type];
+            const skipped = todaySkipped.includes(type);
             tab.classList.toggle("entry-tab--done", done);
+            tab.classList.toggle("entry-tab--skipped", skipped && done);
             // Update label: add checkmark if done
             const base = { morning: "🌅 Morning", night: "🌙 Night", free: "📓 Free" }[type];
-            tab.textContent = done ? base + " ✓" : base;
+            tab.textContent = done ? base + (skipped ? " ⤼" : " ✓") : base;
         });
         // Refresh current tab state
         applyTabDoneState(currentEntryType);
@@ -514,13 +516,16 @@ async function loadTodayStatus() {
 }
 
 function applyTabDoneState(type) {
-    const done = !editingId && todayDone[type];
+    const skippedToday = !editingId && todayDone[type] && todaySkipped.includes(type);
+    const done = !editingId && todayDone[type] && !skippedToday;
     submitBtn.disabled = done;
     submitBtn.textContent = editingId
         ? "Update Entry"
-        : done
-            ? `${type.charAt(0).toUpperCase()+type.slice(1)} entry already saved today`
-            : (TAB_LABELS[type] || "Save Entry");
+        : skippedToday
+            ? (TAB_LABELS[type] || "Save Entry")
+            : done
+                ? `${type.charAt(0).toUpperCase()+type.slice(1)} entry already saved today`
+                : (TAB_LABELS[type] || "Save Entry");
 
     // Show/hide the "edit today's entry" link
     let editLink = document.getElementById("edit-today-link");
@@ -542,6 +547,45 @@ function applyTabDoneState(type) {
     } else if (editLink) {
         editLink.remove();
     }
+
+    // Show/hide the "skip today" link -- only makes sense when there's
+    // nothing written yet for this type today and we're not mid-edit.
+    let skipLink = document.getElementById("skip-today-link");
+    if (!done && !editingId && !skippedToday) {
+        if (!skipLink) {
+            skipLink = document.createElement("div");
+            skipLink.id = "skip-today-link";
+            skipLink.className = "edit-today-link skip-today-link";
+            submitBtn.parentNode.insertBefore(skipLink, submitBtn.nextSibling);
+        }
+        skipLink.innerHTML = `<a href="#" id="skip-today-btn">Skip today's ${type} entry →</a>`;
+        document.getElementById("skip-today-btn").addEventListener("click", async (e) => {
+            e.preventDefault();
+            if (!confirm(`Mark today's ${type} entry as skipped? It won't count against your consistency, but no XP is earned.`)) return;
+            try {
+                await fetch("/entries/skip", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ entry_type: type }),
+                });
+                loadTodayStatus();
+                _toast(`${type.charAt(0).toUpperCase()+type.slice(1)} entry skipped for today`, "var(--accent-deep)", 2600);
+            } catch (_) {}
+        });
+    } else if (skipLink) {
+        skipLink.remove();
+    }
+    if (skippedToday) {
+        let note = document.getElementById("skipped-today-note");
+        if (!note) {
+            note = document.createElement("div");
+            note.id = "skipped-today-note";
+            note.className = "qc-note";
+            submitBtn.parentNode.insertBefore(note, submitBtn);
+        }
+        note.textContent = `You skipped today's ${type} entry. Writing one now will replace the skip.`;
+    } else {
+        document.getElementById("skipped-today-note")?.remove();
+    }
 }
 
 function switchEntryTab(type) {
@@ -562,6 +606,10 @@ entryTabs.forEach(tab => tab.addEventListener("click", () => switchEntryTab(tab.
  ["n-mood","n-mood-val"],["n-energy","n-energy-val"],["n-focus","n-focus-val"],
  ["f-mood","f-mood-val"],["f-energy","f-energy-val"],["f-focus","f-focus-val"]
 ].forEach(([sid, vid]) => {
+    const slider = document.getElementById(sid), val = document.getElementById(vid);
+    if (slider && val) slider.addEventListener("input", () => val.textContent = slider.value);
+});
+[["qc-mood","qc-mood-val"],["qc-energy","qc-energy-val"],["qc-focus","qc-focus-val"]].forEach(([sid, vid]) => {
     const slider = document.getElementById(sid), val = document.getElementById(vid);
     if (slider && val) slider.addEventListener("input", () => val.textContent = slider.value);
 });
@@ -615,6 +663,7 @@ async function loadNightChecklist() {
 // Entry form submit
 // ---------------------------------------------------------------------------
 const entryForm = document.getElementById("entry-form");
+addDraftAskButton(entryForm);
 const gv = id => { const e = document.getElementById(id); return e ? e.value : ""; };
 const gi = (id, fallback=3) => { const v = parseInt(gv(id)); return isNaN(v) ? fallback : v; };
 
@@ -717,59 +766,10 @@ entryForm.addEventListener("submit", async (e) => {
     // Show achievement toasts from the entry creation response
     if (saved.new_achievements) showAchievementToast(saved.new_achievements);
 
-    // Run action engine in background
-    fetch("/action-engine", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            mood: entryData.mood,
-            content: entryData.content, energy: entryData.energy || 3,
-            focus: entryData.focus || 3, entry_type: currentEntryType,
-        }),
-    }).then(r => r.json()).then(data => {
-        if (data.triggered && data.action) showActionBanner(data);
-    }).catch(() => {});
-
-    // Morning entry: the Top 3 Tasks are already explicit, named actions --
-    // no need to ask the AI to guess quests from them or make the user
-    // confirm anything. They're turned straight into quests on the board.
-    // Other entry types keep going through the AI preview/confirm flow
-    // below, since their content is free-form and needs interpretation.
-    if (!editingId && saved.entry && currentEntryType === "morning" && morningTaskTitles.length) {
-        autoCreateMorningTaskQuests(saved.entry.id, morningTaskTitles);
-    } else if (!editingId && saved.entry) {
-        handleJournalQuestPreview(saved.entry.id, entryData.content, entryData.mood);
-    }
-
-    // Night entry: turn tomorrow's stated priority into a quest due tomorrow
-    if (currentEntryType === "night" && tomorrowPriorityText) {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        const dueDate = tomorrow.toISOString().slice(0, 10);
-        fetch("/board/quests", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                title: tomorrowPriorityText,
-                description: "Tomorrow's top priority, set during last night's reflection.",
-                section: "weekly",
-                difficulty: "Normal",
-                category: "Personal Growth",
-                xp_reward: 50,
-                due_date: dueDate,
-                source_type: "manual",
-                source_id: `night_priority:${dueDate}`,
-            }),
-        }).then(r => r.json()).then(data => {
-            if (data.status === "created") {
-                _toast(`🎯 Added to Quests for tomorrow: "${tomorrowPriorityText}"`, "var(--accent-deep)", 3500);
-            }
-        }).catch(() => {});
-    }
-
+    // A reflection never creates tasks or commitments.
     resetEntryForm();
     loadTodayStatus();
-    loadAIInsight();
-    loadXPHUD();
-    loadProactiveCoaching();
+    loadJournalStreak();
 });
 
 // ---------------------------------------------------------------------------
@@ -922,6 +922,7 @@ window.addAllJournalQuests = async function(entryId, btn) {
 // Proactive coaching alert on Journal page
 // ---------------------------------------------------------------------------
 async function loadProactiveCoaching() {
+    return; // AI and pressure panels are disabled in the calm experience.
     try {
         const data = await (await fetch("/coaching/proactive")).json();
         let el     = document.getElementById("proactive-coaching");
@@ -1092,6 +1093,7 @@ function highlightQuestCategory(category) {
 }
 
 async function loadDiscoveries() {
+    return; // AI and pressure panels are disabled in the calm experience.
     const el = document.getElementById("discovery-cards");
     if (!el) return;
     try {
@@ -1154,6 +1156,9 @@ function resetEntryForm() {
 // Entries page
 // ---------------------------------------------------------------------------
 const entriesDiv = document.getElementById("entries");
+document.addEventListener('local-ai-note-saved', () => {
+    if (document.getElementById("page-entries").classList.contains("active")) loadEntries();
+});
 const TYPE_BADGE = { morning: "🌅 Morning", night: "🌙 Night", free: "📓 Free" };
 
 async function loadEntries(filters = {}) {
@@ -1167,25 +1172,33 @@ async function loadEntries(filters = {}) {
         progressState.entries = entries.length;
         updateNavUnlocks();
     }
-    entriesDiv.innerHTML = entries.map(e => {
-        const type  = e.entry_type || "free";
-        const badge = TYPE_BADGE[type] || type;
-        return `<div class="entry-card">
-            <div class="entry-card-header">
-                <strong>${e.title}</strong>
-                <span class="entry-type-badge entry-type-badge--${type}">${badge}</span>
-            </div>
-            <p>${e.content.replace(/\n/g, "<br>")}</p>
-            <div class="meta">${e.created_at.slice(0,10)} | Mood: ${e.mood}/5</div>
-            ${e.tags && e.tags.length ? `<div class="tags">${e.tags.map(t => `<span>${t}</span>`).join("")}</div>` : ""}
-            <div class="actions">
-                <button onclick="window.editEntry(${e.id},'${e.title.replace(/'/g,"\\'")}',
-                    '${e.content.replace(/'/g,"\\'").replace(/\n/g,"\\n")}',
-                    ${e.mood},'${(e.tags||[]).join(",")}','${type}')">Edit</button>
-                <button class="delete-btn" onclick="window.deleteEntry(${e.id})">Delete</button>
-            </div>
-        </div>`;
-    }).join("") || "<p style='color:var(--ink-faint);font-style:italic'>No entries yet.</p>";
+    entriesDiv.replaceChildren();
+    if (!entries.length) entriesDiv.textContent = "No entries yet.";
+    for (const e of entries) {
+        const type = e.entry_type || "free";
+        const card = document.createElement("article");
+        card.className = "entry-card";
+        function append(tag, text, css, parent = card) {
+            const node = document.createElement(tag);
+            if (css) node.className = css;
+            node.textContent = text;
+            parent.append(node);
+            return node;
+        }
+        const head = append("div", "", "entry-card-header");
+        append("strong", e.title, "", head);
+        append("span", TYPE_BADGE[type] || type, "entry-type-badge entry-type-badge--"+type, head);
+        const passage = append("p", e.content || "");
+        passage.style.whiteSpace = "pre-wrap";
+        append("div", e.created_at.slice(0,10) + " | Mood: " + (e.mood == null ? "Not recorded" : e.mood+"/5"), "meta");
+        const tags = append("div", "", "tags");
+        for (const tag of e.tags || []) append("span", tag, "", tags);
+        const actions = append("div", "", "actions");
+        append("button", "Edit", "", actions).onclick = () => window.editEntry(e.id,e.title,e.content,e.mood,(e.tags||[]).join(","),type);
+        append("button", "Delete", "delete-btn", actions).onclick = () => window.deleteEntry(e.id);
+        addAskButton(card, e.content || (e.mood == null ? "" : "Mood: "+e.mood+"/5"), passage);
+        entriesDiv.append(card);
+    }
 }
 
 window.editEntry = async function(id, title, content, mood, tags, entryType) {
@@ -1255,6 +1268,19 @@ async function loadRoutineToday() {
     } catch (_) {}
 }
 
+function _formatRoutineLastUpdated(iso) {
+    if (!iso) return "";
+    const then = new Date(iso);
+    if (isNaN(then.getTime())) return "";
+    const diffMs = Date.now() - then.getTime();
+    const diffMin = Math.round(diffMs / 60000);
+    if (diffMin < 1) return "Updated just now";
+    if (diffMin < 60) return `Updated ${diffMin}m ago`;
+    const diffHr = Math.round(diffMin / 60);
+    if (diffHr < 24) return `Updated ${diffHr}h ago`;
+    return `Updated ${then.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
 function renderRoutineToday(data) {
     const totalEl = document.getElementById("pie-planner-total");
     const listEl  = document.getElementById("pie-planner-list");
@@ -1266,7 +1292,7 @@ function renderRoutineToday(data) {
     if (alertEl) {
         if (data.procrastination_alert) {
             alertEl.style.display = "";
-            alertEl.innerHTML = `<div class="proactive-label">🔮 Procrastination Signal</div>
+            alertEl.innerHTML = `<div class="proactive-label">🔮 Recorded routine time</div>
                 <div class="proactive-nudge">${_escHtml(data.procrastination_alert)}</div>`;
         } else {
             alertEl.style.display = "none";
@@ -1274,7 +1300,7 @@ function renderRoutineToday(data) {
     }
 
     const totalRemaining = routineCategories.reduce((s, c) => s + c.remaining_hours, 0);
-    if (totalEl) totalEl.textContent = `${totalRemaining.toFixed(1)}h remaining · ${data.day_pace_pct}% of day gone`;
+    if (totalEl) totalEl.textContent = `${totalRemaining.toFixed(1)}h remaining · ${data.hours_left_today.toFixed(1)}h left in the day`;
 
     listEl.innerHTML = routineCategories.map(c => {
         const badge = c.overtime
@@ -1282,11 +1308,12 @@ function renderRoutineToday(data) {
             : c.overrun_predicted
                 ? `<span class="risk-badge" style="background:#fff3e0;color:#e65100">⚠ often runs over (${c.historical_overrun_rate}%)</span>`
                 : c.behind_pace
-                    ? `<span class="risk-badge" style="background:#fff8e1;color:#e65100">behind pace</span>`
+                    ? `<span class="risk-badge" style="background:#fff8e1;color:#e65100">Not yet recorded</span>`
                     : "";
+        const lastUpdatedText = _formatRoutineLastUpdated(c.last_updated);
         return `<div class="pie-planner-item">
             <span class="pie-planner-swatch" style="background:${c.color}"></span>
-            <span class="pie-planner-item-label">${_escHtml(c.label)}</span>
+            <span class="pie-planner-item-label"><span>${_escHtml(c.label)}</span>${lastUpdatedText ? `<span class="pie-planner-last-updated">${lastUpdatedText}</span>` : ""}</span>
             <span class="pie-planner-item-hours">${c.remaining_hours}h left / ${c.planned_hours}h</span>
             ${badge}
             <button type="button" class="pie-planner-del" onclick="logRoutineTime(${c.id}, 0.25)" title="+15m">+15m</button>
@@ -1324,10 +1351,15 @@ function renderRoutineToday(data) {
 }
 
 window.logRoutineTime = async function(categoryId, hours) {
-    await fetch("/routine/log", {
+    const res = await fetch("/routine/log", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ category_id: categoryId, hours }),
     });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        _toast(data.detail || "Time does not match the current time.", "#ef5350");
+        return;
+    }
     loadRoutineToday();
 };
 
@@ -2025,6 +2057,7 @@ let _lastHabitAIInsightAt = 0;
 const HABIT_AI_INSIGHT_THROTTLE_MS = 60000; // AI calls are slow/costly -- no need to re-ask more than once a minute
 
 async function _loadHabitAIInsight() {
+    return; // AI is off.
     const el   = document.getElementById("habit-ai-insight");
     const card = document.getElementById("habit-ai-insight-card");
     const sigs = document.getElementById("hv2-adaptation-signals");
@@ -2312,6 +2345,139 @@ chatForm.addEventListener("submit", async (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Quick Check-in ("Busy Day Mode") — one combined view for when there's no
+// time to visit Journal, Entries, and Quest Board separately: a short
+// entry, remaining routine hours, and a few quests, all saved in one call
+// to POST /quick-checkin.
+// ---------------------------------------------------------------------------
+let qcData = null;
+let qcSelectedQuests = new Set();
+
+window.openQuickCheckin = async function() {
+    const modal = document.getElementById("quick-checkin-modal");
+    if (!modal) return;
+    modal.style.display = "flex";
+    document.getElementById("qc-loading").style.display = "";
+    document.getElementById("qc-body").style.display = "none";
+    qcSelectedQuests = new Set();
+
+    try {
+        qcData = await (await fetch("/quick-checkin/today")).json();
+    } catch (_) {
+        qcData = null;
+    }
+    renderQuickCheckin();
+    document.getElementById("qc-loading").style.display = "none";
+    document.getElementById("qc-body").style.display = "";
+};
+
+window.closeQuickCheckin = function() {
+    const modal = document.getElementById("quick-checkin-modal");
+    if (modal) modal.style.display = "none";
+};
+
+function renderQuickCheckin() {
+    if (!qcData) {
+        document.getElementById("qc-body").innerHTML = "<p class='plan-loading'>Couldn't load today's status. Try again in a moment.</p>";
+        return;
+    }
+
+    // Entry section: if every type is already done (or skipped), there's
+    // nothing left to quickly capture -- say so instead of showing a form
+    // that would just get rejected as a duplicate.
+    const status = qcData.entry_status || {};
+    const openType = ["free", "morning", "night"].find(t => !status[t]) || null;
+    const doneNote = document.getElementById("qc-entry-done-note");
+    const entryFields = document.getElementById("qc-entry-fields");
+    if (!openType) {
+        doneNote.style.display = "";
+        doneNote.textContent = "All of today's entry types are already logged. Nothing to add here.";
+        entryFields.style.display = "none";
+    } else {
+        doneNote.style.display = "none";
+        entryFields.style.display = "";
+    }
+
+    // Routine section: only categories with time actually remaining today.
+    const routineList = document.getElementById("qc-routine-list");
+    const cats = (qcData.routine && qcData.routine.categories) || [];
+    const withTime = cats.filter(c => c.remaining_hours > 0);
+    routineList.innerHTML = withTime.length
+        ? withTime.map(c => `
+            <div class="qc-routine-row">
+                <span class="qc-routine-label" style="color:${c.color || 'inherit'}">${c.label}</span>
+                <span class="qc-routine-remaining">${c.remaining_hours}h left</span>
+                <input type="number" class="qc-routine-input" data-cat-id="${c.id}" min="0" max="${c.remaining_hours}" step="0.25" placeholder="0">
+            </div>`).join("")
+        : `<p class="plan-loading">Nothing left to log -- all routine categories are on pace or fully logged.</p>`;
+
+    // Quests section: short list of what's outstanding.
+    const questsList = document.getElementById("qc-quests-list");
+    const quests = qcData.pending_quests || [];
+    questsList.innerHTML = quests.length
+        ? quests.map(q => `
+            <label class="qc-quest-row">
+                <input type="checkbox" class="qc-quest-check" data-quest-id="${q.id}">
+                <span class="qc-quest-title">${q.title}</span>
+                <span class="qc-quest-diff">${q.difficulty || ""}</span>
+            </label>`).join("")
+        : `<p class="plan-loading">No outstanding quests right now.</p>`;
+}
+
+window.submitQuickCheckin = async function() {
+    const btn = document.getElementById("qc-submit-btn");
+    btn.disabled = true;
+    btn.textContent = "Saving...";
+
+    const status  = (qcData && qcData.entry_status) || {};
+    const openType = ["free", "morning", "night"].find(t => !status[t]) || null;
+    const content = document.getElementById("qc-content").value.trim();
+
+    const payload = { entry: null, routine_logs: [], quest_ids: [] };
+    if (openType && content) {
+        payload.entry = {
+            entry_type: openType, title: "", content,
+            mood: parseInt(document.getElementById("qc-mood").value, 10),
+            energy: parseInt(document.getElementById("qc-energy").value, 10),
+            focus: parseInt(document.getElementById("qc-focus").value, 10),
+            tags: ["busy-day"],
+        };
+    }
+    document.querySelectorAll(".qc-routine-input").forEach(inp => {
+        const hours = parseFloat(inp.value);
+        if (hours > 0) payload.routine_logs.push({ category_id: parseInt(inp.dataset.catId, 10), hours });
+    });
+    document.querySelectorAll(".qc-quest-check:checked").forEach(cb => {
+        payload.quest_ids.push(parseInt(cb.dataset.questId, 10));
+    });
+
+    try {
+        const result = await (await fetch("/quick-checkin", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        })).json();
+
+        const savedBits = [];
+        if (result.entry?.status === "created") savedBits.push("entry saved");
+        if (result.routine_logs?.length) savedBits.push(`${result.routine_logs.length} time log${result.routine_logs.length > 1 ? "s" : ""}`);
+        if (result.quests_completed?.length) savedBits.push(`${result.quests_completed.length} quest${result.quests_completed.length > 1 ? "s" : ""} completed`);
+
+        _toast(savedBits.length ? `⚡ Busy Day Mode: ${savedBits.join(", ")}` : "Nothing new to save", "var(--accent-deep)", 3200);
+
+        closeQuickCheckin();
+        loadTodayStatus();
+        loadRoutineToday();
+        loadQuestBoard();
+        loadXPHUD();
+    } catch (_) {
+        _toast("Couldn't save — try again", "#c0392b", 2600);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = "Save Everything";
+    }
+};
+
+// ---------------------------------------------------------------------------
 // AI Entry — talk instead of type; automatically writes a journal entry.
 // Deliberately separate state/endpoint from the coaching chat above: this
 // conversation's only job is assembling one entry, and its history should
@@ -2463,6 +2629,7 @@ async function loadInsights() {
 }
 
 async function loadAIInsight() {
+    return; // AI and pressure panels are disabled in the calm experience.
     const data = await (await fetch("/ai-insight")).json();
     document.getElementById("ai-insight").textContent = data.insight;
 }
@@ -2474,6 +2641,7 @@ async function loadAIInsight() {
 // history and how well past nudges have actually landed per category.
 // ---------------------------------------------------------------------------
 async function loadCoachPatterns() {
+    return; // AI and pressure panels are disabled in the calm experience.
     const card = document.getElementById("coach-patterns-card");
     const body = document.getElementById("coach-patterns-body");
     if (!card || !body) return;
@@ -2562,19 +2730,7 @@ window.changeReviewYear = function(delta) {
 window.selectReviewMonth = async function(year, month, force = false) {
     reviewSelectedMonth = { year, month };
     renderReviewCalendar();
-    const el = document.getElementById("monthly-review");
-    el.innerHTML = `<p class="plan-loading">${force ? "Regenerating" : "Loading"} review for ${MRC_MONTH_NAMES[month - 1]} ${year}…</p>`;
-    try {
-        const res  = await fetch(`/monthly-review?year=${year}&month=${month}${force ? "&force=true" : ""}`);
-        const data = await res.json();
-        if (!res.ok) {
-            el.textContent = data.detail || "Could not generate review for that month.";
-            return;
-        }
-        renderMonthlyReviewResult(data);
-    } catch (_) {
-        el.textContent = "Could not generate review. Check your connection and try again.";
-    }
+    document.getElementById("monthly-review").textContent = "AI reviews are off. Your entries remain available in Journal.";
 };
 
 const MRC_SECTION_META = {
@@ -2707,10 +2863,16 @@ const SOURCE_ICONS = {
 };
 
 // ── Main load ─────────────────────────────────────────────────
+// Cache the last rendered board so re-visiting the tab shows something
+// instantly instead of flashing a loading spinner every time — the fetch
+// below still runs and quietly replaces it once fresh data arrives.
+let _lastQuestBoardHTML = null;
+
 async function loadQuestBoard() {
     const board = document.getElementById("quest-board");
     if (!board) return;
-    board.innerHTML = `<div class="qb-loading"><div class="qb-loading-icon">⚔️</div><div>Assembling your quest board…</div></div>`;
+    board.innerHTML = _lastQuestBoardHTML
+        || `<div class="qb-loading"><div class="qb-loading-icon">⚔️</div><div>Assembling your quest board…</div></div>`;
 
     try {
         const data = await (await fetch("/board/quests")).json();
@@ -2757,11 +2919,16 @@ async function loadQuestBoard() {
         board.innerHTML = html || `<div class="qb-section-empty" style="padding:2rem;text-align:center">
             No quests yet — click <strong>Generate Quests</strong> to get started!
         </div>`;
+        _lastQuestBoardHTML = board.innerHTML;
 
     } catch (err) {
-        board.innerHTML = `<div class="qb-section-empty" style="padding:2rem;color:var(--ink-soft)">
-            Could not load quest board. ${err.message}
-        </div>`;
+        // Keep showing the cached board on a failed refresh rather than
+        // wiping it out — only show the error state if we have nothing else.
+        if (!_lastQuestBoardHTML) {
+            board.innerHTML = `<div class="qb-section-empty" style="padding:2rem;color:var(--ink-soft)">
+                Could not load quest board. ${err.message}
+            </div>`;
+        }
     }
 }
 
@@ -3621,7 +3788,7 @@ async function loadSkills() {
         const achEl = document.createElement("div");
         achEl.className = "achievements-section";
         achEl.innerHTML = `
-            <h3 style="font-family:var(--font-display);margin-bottom:.75rem">🏆 Achievements</h3>
+            <h3 style="font-family:var(--font-heading);margin-bottom:.75rem">🏆 Achievements</h3>
             <div class="achievements-grid">
                 ${sorted.map(a => {
                     const isLegendary = a.tier === "legendary";
@@ -4061,6 +4228,7 @@ function updateDomainCardInPlace(container, d) {
 }
 
 async function loadActionEngine() {
+    return; // AI and pressure panels are disabled in the calm experience.
     const el = document.getElementById("aep-content");
     try {
         const data = await (await fetch("/action-engine")).json();
@@ -4086,6 +4254,7 @@ async function loadActionEngine() {
 }
 
 async function loadBottleneck() {
+    return; // AI and pressure panels are disabled in the calm experience.
     const el = document.getElementById("bottleneck-content");
     el.innerHTML = "<span style='color:var(--ink-faint);font-style:italic'>Analyzing…</span>";
     try {
@@ -4131,7 +4300,7 @@ async function loadCurrentBosses() {
     try {
         const data = await (await fetch("/bosses/current")).json();
         if (!data.bosses || !data.bosses.length) {
-            el.innerHTML = `<div class="boss-empty">No boss battles this week yet. <button class="btn-ghost btn-sm" onclick="generateBosses()">Generate Now</button></div>`;
+            el.innerHTML = `<div class="boss-empty">No boss battles recorded. AI generation is off.</div>`;
             return;
         }
         el.innerHTML = data.bosses.map(b => buildBossCard(b)).join("");
@@ -4310,19 +4479,14 @@ window.redeemReward = async function(id, btn) {
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
-updateNavUnlocks();      // hide not-yet-relevant tabs immediately
-renderOnboardingCard();  // show step 1 immediately for brand-new users
-loadAIInsight();
-loadXPHUD();
-loadTodayStatus();
-switchEntryTab("morning");
-loadProactiveCoaching();
-loadDiscoveries();
-
-// Warm up every other tab's data in the background so the first click on
-// any nav item is instant instead of showing a loading spinner. Delayed
-// slightly so it never competes with the initial Journal page render above.
-setTimeout(preloadAllPages, 150);
+updateNavUnlocks();
+const requestedTool = location.hash.slice(1);
+const gamePages = Object.keys(PAGE_LOADERS);
+showPage(gamePages.includes(requestedTool) ? requestedTool : "quests");
+window.addEventListener("hashchange", () => {
+    const page = location.hash.slice(1);
+    if (gamePages.includes(page)) showPage(page);
+});
 
 }); // end DOMContentLoaded
 
@@ -4653,6 +4817,4 @@ window.closeHowItWorks = function() {
 // a brand-new user, the onboarding card's single next-step CTA replaces
 // this; for a returning/seeded user, progressState resolves true on the
 // first load and this fires immediately, same as before.
-if (_onboardingComplete() && !localStorage.getItem("liainne-hiw-dismissed")) {
-    setTimeout(() => window.openHowItWorks(), 600);
-}
+// Optional tools do not open onboarding or gamification overlays automatically.

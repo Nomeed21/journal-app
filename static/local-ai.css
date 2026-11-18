@@ -1,0 +1,19 @@
+.local-ai-settings { padding-block: 1rem; border-bottom: 1px solid var(--line); }
+.local-ai-settings input[type=checkbox] { width: auto; margin-right: .55rem; accent-color: var(--rose,var(--accent)); }
+.local-ai-settings select { display: block; width: min(100%, 24rem); }
+.local-ai-settings button { margin-top: 1rem; }
+.ask-local-ai { margin-top: .7rem; }
+.local-ai-dialog {
+    box-sizing: border-box; width: min(42rem, calc(100vw - 2rem)); max-height: 90dvh;
+    padding: clamp(1rem,4vw,2rem); overflow-y: auto; color: var(--ink); background: var(--paper);
+    border: 1px solid var(--line); border-radius: 16px; font-family: var(--font-body);
+}
+.local-ai-dialog::backdrop { background: rgb(30 27 30 / 45%); }
+.local-ai-dialog label { display: block; margin: 1rem 0 .4rem; }
+.local-ai-dialog textarea { width: 100%; box-sizing: border-box; padding: .75rem; font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 8px; }
+.local-ai-dialog button { margin: .4rem .3rem .4rem 0; min-height: 44px; padding: .5rem 1rem; }
+.local-ai-dialog pre, #ask-answer { white-space: pre-wrap; overflow-wrap: anywhere; }
+.local-ai-dialog pre { font: .9rem/1.55 var(--font-mono); }
+.local-ai-dialog [hidden], .ask-local-ai[hidden] { display: none !important; }
+.ask-actions { display: flex; flex-wrap: wrap; align-items: center; }
+
